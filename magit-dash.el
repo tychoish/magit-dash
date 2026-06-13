@@ -18,7 +18,7 @@
 ;; Press RET to open a per-repo overview buffer with PR counts and magit action
 ;; shortcuts.  Press m or ? for the transient actions menu.
 ;;
-;; `magit-gh-pr-dashboard-open' — a tabulated-list view of pull requests with
+;; `magit-dash-gh-pr-dashboard-open' — a tabulated-list view of pull requests with
 ;; filters for state, author, repo, and org.  Supports CI outcome, age, comment
 ;; count, and review decision columns.
 ;;
@@ -60,8 +60,8 @@
 
 (declare-function builder-compile-project "builder")
 (declare-function magit-dash-bump-submodules-menu "magit-dash-submodules")
-(declare-function magit-gh-pr-dashboard-open "magit-dash-gh-pr")
-(declare-function magit-gh-pr-dashboard-mode "magit-dash-gh-pr")
+(declare-function magit-dash-gh-pr-dashboard-open "magit-dash-gh-pr")
+(declare-function magit-dash-gh-pr-dashboard-mode "magit-dash-gh-pr")
 
 (defconst magit-dash-buffer-name "*magit-dash-repos*")
 
@@ -157,7 +157,7 @@ Includes hostname, Emacs instance ID, and the current sync trigger."
 
 (defun magit-dash--stage-all (repo)
   "Stage all changes in REPO. Returns t on success."
-  (magit-gh--with-repo-dir (magit-dash-repo-path repo)
+  (magit-dash-gh--with-repo-dir (magit-dash-repo-path repo)
     (= 0 (magit-call-git "add" "-A"))))
 
 (defun magit-dash--auto-commit (repo)
@@ -168,7 +168,7 @@ Returns t when the commit succeeds, nil otherwise."
                       (funcall auto-commit repo)
                     (magit-dash--default-commit-message repo))))
     (and (magit-dash--stage-all repo)
-         (magit-gh--with-repo-dir (magit-dash-repo-path repo)
+         (magit-dash-gh--with-repo-dir (magit-dash-repo-path repo)
            (= 0 (magit-call-git "commit" "-m" message))))))
 
 (defun magit-dash--run-command-for (repo)
@@ -185,7 +185,7 @@ Returns t when the commit succeeds, nil otherwise."
       (when-let* ((fn (cdr (seq-find (lambda (cmd)
                                       (equal label (format "%s" (car cmd))))
                                     commands))))
-        (magit-gh--with-repo-dir (magit-dash-repo-path repo)
+        (magit-dash-gh--with-repo-dir (magit-dash-repo-path repo)
           (call-interactively fn))))))
 
 ;;;; Stats collection
@@ -242,7 +242,7 @@ Returns a plist with keys :branch :remote-origin :behind :ahead :dirty
                       :fetch-age (magit-dash--fetch-age path)
                       :head-hash (magit-dash--head-hash path)
                       :recent-log recent-log)))
-    (magit-gh--cache-set path :stats stats)
+    (magit-dash-gh--cache-set path :stats stats)
     stats))
 
 (defun magit-dash--collect-stats-async (repo callback)
@@ -284,7 +284,7 @@ accumulating their outputs before assembling the stats plist."
                                     :fetch-age (magit-dash--fetch-age path)
                                     :head-hash (magit-dash--head-hash path)
                                     :recent-log recent-log)))
-                  (magit-gh--cache-set path :stats stats)
+                  (magit-dash-gh--cache-set path :stats stats)
                   (funcall callback stats))
               (magit-dash--run-git
                path (car remaining)
@@ -299,15 +299,15 @@ accumulating their outputs before assembling the stats plist."
 (defun magit-dash-overview--pr-counts-async (path callback)
   "Fetch open PR counts for repo at PATH asynchronously.
 Checks the in-memory cache first; calls CALLBACK with (TOTAL . MINE)."
-  (cond ((magit-gh--cache-get path :include-prs)
-	 (if-let* ((cached (magit-gh--cache-get path :pr-counts)))
+  (cond ((magit-dash-gh--cache-get path :include-prs)
+	 (if-let* ((cached (magit-dash-gh--cache-get path :pr-counts)))
 	     (funcall callback cached)
-	   (magit-gh--run-process
+	   (magit-dash-gh--run-process
 	    '("api" "user" "--jq" ".login")
 	    path
 	    (lambda (viewer-output)
 	      (let ((viewer (string-trim viewer-output)))
-		(magit-gh--run-process
+		(magit-dash-gh--run-process
 		 (list "pr" "list" "--json" "number,author"
                        "--state" "open" "--limit" "200")
 		 path
@@ -325,7 +325,7 @@ Checks the in-memory cache first; calls CALLBACK with (TOTAL . MINE)."
 						 (map-elt (map-elt pr 'author) 'login)))
 					prs)))
 			     (cons 0 0))))
-		     (magit-gh--cache-set path :pr-counts counts)
+		     (magit-dash-gh--cache-set path :pr-counts counts)
 		     (funcall callback counts)))))))))
 	(t 'disabled)))
 
@@ -335,7 +335,7 @@ Checks the in-memory cache first; calls CALLBACK with (TOTAL . MINE)."
 The cache is invalidated when the HEAD commit hash changes.
 For missing submodules, returns minimal placeholder stats."
   (let* ((path (magit-dash-repo-path repo))
-         (cached (magit-gh--cache-get path :stats)))
+         (cached (magit-dash-gh--cache-get path :stats)))
     (cond
      ;; Missing submodules get placeholder stats
      ((eq (magit-dash-repo-submodule repo) 'missing)
@@ -365,11 +365,11 @@ For missing submodules, returns minimal placeholder stats."
 ON-SUCCESS is called with right-trimmed stdout on exit 0.
 ON-ERROR is called with stdout and exit-code on non-zero exit; defaults to a message."
   (let* ((default-directory path)
-         (proc-buf (generate-new-buffer " *magit-gh-git*")))
+         (proc-buf (generate-new-buffer " *magit-dash-gh-git*")))
     (with-current-buffer proc-buf
       (setq default-directory path))
     (make-process
-     :name "magit-gh-git"
+     :name "magit-dash-gh-git"
      :buffer proc-buf
      :command (cons magit-git-executable args)
      :connection-type 'pipe
@@ -521,11 +521,11 @@ Calls ON-COMPLETE with `ok', `skipped' (branch not allowed), or `error'."
 (defun magit-dash--run-shell-string-async (cmd path on-complete)
   "Run shell command string CMD in PATH asynchronously.
 Calls ON-COMPLETE with `ok' on exit 0, or `error' and output on failure."
-  (let ((proc-buf (generate-new-buffer " *magit-gh-cmd*")))
+  (let ((proc-buf (generate-new-buffer " *magit-dash-gh-cmd*")))
     (with-current-buffer proc-buf
       (setq default-directory path))
     (make-process
-     :name "magit-gh-cmd"
+     :name "magit-dash-gh-cmd"
      :buffer proc-buf
      :command (list shell-file-name shell-command-switch cmd)
      :connection-type 'pipe
@@ -680,7 +680,7 @@ ON-ALL-DONE with an alist of (NAME . STATUS)."
                                             (not (eq (magit-dash-repo-submodule r) 'missing))))
                                      magit-dash-repo-list))
          (configured (- total discovered-wt discovered-subm))
-         (cached (hash-table-count magit-gh--cache)))
+         (cached (hash-table-count magit-dash-gh--cache)))
     (message "Repos: %d configured + %d worktrees + %d submodules = %d tracked | Cache: %d entries"
              configured discovered-wt discovered-subm total cached)))
 
@@ -689,15 +689,15 @@ ON-ALL-DONE with an alist of (NAME . STATUS)."
   (interactive)
   (if repo-path
       (progn
-        (magit-gh--cache-remove repo-path)
+        (magit-dash-gh--cache-remove repo-path)
         (message "Cleared cache for %s" repo-path))
-    (clrhash magit-gh--cache)
+    (clrhash magit-dash-gh--cache)
     (message "Cleared entire cache")))
 
 (defun magit-dash-cache-reset-all ()
   "Clear cache and repopulate stats for all repos."
   (interactive)
-  (clrhash magit-gh--cache)
+  (clrhash magit-dash-gh--cache)
   (magit-dash--discover-worktrees)
   (magit-dash--discover-submodules)
   (let ((failed nil))
@@ -719,7 +719,7 @@ ON-ALL-DONE with an alist of (NAME . STATUS)."
   (when-let ((repo (magit-dash--repo-at-point)))
     (let ((path (magit-dash-repo-path repo))
           (name (magit-dash-repo-name repo)))
-      (magit-gh--cache-remove path)
+      (magit-dash-gh--cache-remove path)
       (condition-case err
           (progn
             (magit-dash--collect-stats repo)
@@ -772,7 +772,7 @@ The first block (the main worktree) is always skipped."
                          (process-lines magit-git-executable
                                         "worktree" "list" "--porcelain"))))
               (found (when lines (magit-dash--parse-worktrees path lines))))
-         (magit-gh--cache-set path :worktrees found))))
+         (magit-dash-gh--cache-set path :worktrees found))))
    magit-dash-repo-list))
 
 (defun magit-dash--parse-submodules (main-path lines)
@@ -810,13 +810,13 @@ Missing/uninitialized submodules are marked with :submodule 'missing."
                        (let ((default-directory path))
                          (process-lines magit-git-executable
                                         "submodule" "status")))))
-         (magit-gh--cache-set path
+         (magit-dash-gh--cache-set path
 	  :submodules (when lines
 			(magit-dash--parse-submodules path lines))))))))
 
 (defun magit-dash-overview--worktrees-for (path)
   "Return worktree structs for the main repo at PATH, discovering lazily if needed."
-  (let ((cached (magit-gh--cache-get path :worktrees)))
+  (let ((cached (magit-dash-gh--cache-get path :worktrees)))
     (cond
      ((eq cached 'none) nil)
      (cached cached)
@@ -826,7 +826,7 @@ Missing/uninitialized submodules are marked with :submodule 'missing."
                         (process-lines magit-git-executable
                                        "worktree" "list" "--porcelain"))))
              (found (when lines (magit-dash--parse-worktrees path lines))))
-        (magit-gh--cache-set path :worktrees (or found 'none))
+        (magit-dash-gh--cache-set path :worktrees (or found 'none))
         found)))))
 
 ;;;; Column configuration
@@ -982,7 +982,7 @@ The Name column width is elastic: wide enough for the longest name in REPOS."
     (define-key m (kbd "x")   #'magit-dash-run-command)
     (define-key m (kbd "t")   #'magit-dash-filter-by-tag)
     (define-key m (kbd "i")   #'magit-dash-add-tag)
-    (define-key m (kbd "p")   #'magit-gh-pr-dashboard-open)
+    (define-key m (kbd "p")   #'magit-dash-gh-pr-dashboard-open)
     (define-key m (kbd "b")   #'magit-dash-visit-buffer)
     (define-key m (kbd "e")   #'magit-dash-find-file)
     (define-key m (kbd "B")   #'magit-dash-switch-branch)
@@ -1080,7 +1080,7 @@ submodules and to derive their parent<mod> display name.")
                       ('sync
                        (magit-dash--format-sync repo))
                       ('cached
-                       (if (magit-gh--cache-get (magit-dash-repo-path repo) :stats)
+                       (if (magit-dash-gh--cache-get (magit-dash-repo-path repo) :stats)
                            (propertize "✓" 'face 'success)
                          (propertize "·" 'face 'shadow)))))
                   active)))))
@@ -1124,12 +1124,12 @@ suppressed to avoid duplicate rows — the registered entry is shown instead."
                              paths)))
     (seq-mapcat (lambda (repo)
                   (cons repo
-                        (append (magit-gh--cache-get (magit-dash-repo-path repo) :worktrees)
+                        (append (magit-dash-gh--cache-get (magit-dash-repo-path repo) :worktrees)
                                 (when magit-dash-show-discovered-submodules
                                   (seq-remove
                                    (lambda (sm)
                                      (gethash (magit-dash-repo-path sm) registered-paths))
-                                   (magit-gh--cache-get (magit-dash-repo-path repo) :submodules))))))
+                                   (magit-dash-gh--cache-get (magit-dash-repo-path repo) :submodules))))))
                 sorted)))
 
 (defun magit-dash-refresh ()
@@ -1137,7 +1137,7 @@ suppressed to avoid duplicate rows — the registered entry is shown instead."
 When `magit-dash--tag-filter' is set, shows only matching repos.
 Repos are ordered by :sort-hint; discovered worktrees follow their parent."
   (interactive)
-  (clrhash magit-gh--cache)
+  (clrhash magit-dash-gh--cache)
   (magit-dash--discover-worktrees)
   (magit-dash--discover-submodules)
   (setq magit-dash--submodule-path-set
@@ -1145,7 +1145,7 @@ Repos are ordered by :sort-hint; discovered worktrees follow their parent."
           (seq-do (lambda (repo)
                     (seq-do (lambda (sm)
                               (puthash (magit-dash-repo-path sm) (magit-dash-repo-name sm) paths))
-                            (or (magit-gh--cache-get (magit-dash-repo-path repo) :submodules) '())))
+                            (or (magit-dash-gh--cache-get (magit-dash-repo-path repo) :submodules) '())))
                   magit-dash-repo-list)
           paths))
   (let ((repos (magit-dash--sorted-repos
@@ -1465,7 +1465,7 @@ Adds to any existing marks rather than replacing them."
   "Prune merged branches in the repository at point."
   (interactive)
   (with-magit-from-dashboard (magit-dash--repo-at-point)
-    (magit-gh-prune-merged-branches)))
+    (magit-dash-gh-prune-merged-branches)))
 
 (defun magit-dash--at-worktree-p ()
   "Return non-nil when the repo at point is a worktree."
@@ -1616,7 +1616,7 @@ Lighter than `with-magit-dash'; repo is already fetched."
 (defun magit-dash-overview-magit-dispatch ()
   "Open `magit-dispatch' in the context of this overview's repository."
   (interactive)
-  (magit-gh--with-repo-dir (magit-dash-repo-path (magit-dash-overview--current-repo))
+  (magit-dash-gh--with-repo-dir (magit-dash-repo-path (magit-dash-overview--current-repo))
     (call-interactively #'magit-dispatch)))
 
 (defun magit-dash-overview-magit-status ()
@@ -1628,37 +1628,37 @@ Lighter than `with-magit-dash'; repo is already fetched."
 (defun magit-dash-overview-magit-diff ()
   "Open magit diff (dwim) for this overview's repository."
   (interactive)
-  (magit-gh--with-repo-dir (magit-dash-repo-path (magit-dash-overview--current-repo))
+  (magit-dash-gh--with-repo-dir (magit-dash-repo-path (magit-dash-overview--current-repo))
     (call-interactively #'magit-diff)))
 
 (defun magit-dash-overview-magit-log ()
   "Open magit log for the current branch in this overview's repository."
   (interactive)
-  (magit-gh--with-repo-dir (magit-dash-repo-path (magit-dash-overview--current-repo))
+  (magit-dash-gh--with-repo-dir (magit-dash-repo-path (magit-dash-overview--current-repo))
     (call-interactively #'magit-log-current)))
 
 (defun magit-dash-overview-magit-log-full ()
   "Open the full magit log menu for this overview's repository."
   (interactive)
-  (magit-gh--with-repo-dir (magit-dash-repo-path (magit-dash-overview--current-repo))
+  (magit-dash-gh--with-repo-dir (magit-dash-repo-path (magit-dash-overview--current-repo))
     (call-interactively #'magit-log)))
 
 (defun magit-dash-overview-magit-commit ()
   "Open magit commit for this overview's repository."
   (interactive)
-  (magit-gh--with-repo-dir (magit-dash-repo-path (magit-dash-overview--current-repo))
+  (magit-dash-gh--with-repo-dir (magit-dash-repo-path (magit-dash-overview--current-repo))
     (call-interactively #'magit-commit-create)))
 
 (defun magit-dash-overview-fetch ()
   "Run git fetch for this overview's repository via magit."
   (interactive)
-  (magit-gh--with-repo-dir (magit-dash-repo-path (magit-dash-overview--current-repo))
+  (magit-dash-gh--with-repo-dir (magit-dash-repo-path (magit-dash-overview--current-repo))
     (call-interactively #'magit-fetch)))
 
 (defun magit-dash-overview-pull ()
   "Pull from upstream for this overview's repository via magit."
   (interactive)
-  (magit-gh--with-repo-dir (magit-dash-repo-path (magit-dash-overview--current-repo))
+  (magit-dash-gh--with-repo-dir (magit-dash-repo-path (magit-dash-overview--current-repo))
     (call-interactively #'magit-pull-from-upstream)))
 
 (defun magit-dash-overview-commit ()
@@ -1732,14 +1732,14 @@ Signals `user-error' when no auto operations are configured for this repo."
 (defun magit-dash-overview-switch-branch ()
   "Switch branch in this overview's repository via magit."
   (interactive)
-  (magit-gh--with-repo-dir (magit-dash-repo-path (magit-dash-overview--current-repo))
+  (magit-dash-gh--with-repo-dir (magit-dash-repo-path (magit-dash-overview--current-repo))
     (call-interactively #'magit-checkout)))
 
 (defun magit-dash-overview-prune-branches ()
   "Prune merged branches in this overview's repository."
   (interactive)
-  (magit-gh--with-repo-dir (magit-dash-repo-path (magit-dash-overview--current-repo))
-    (magit-gh-prune-merged-branches)))
+  (magit-dash-gh--with-repo-dir (magit-dash-repo-path (magit-dash-overview--current-repo))
+    (magit-dash-gh-prune-merged-branches)))
 
 (defun magit-dash-overview--is-worktree-p ()
   "Return non-nil when the current overview buffer shows a worktree."
@@ -1753,7 +1753,7 @@ Signals `user-error' when already viewing a worktree."
   (let ((repo (magit-dash-overview--current-repo)))
     (when (magit-dash-repo-worktree repo)
       (user-error "Cannot add a worktree from a worktree overview"))
-    (magit-gh--with-repo-dir (magit-dash-repo-path repo)
+    (magit-dash-gh--with-repo-dir (magit-dash-repo-path repo)
       (call-interactively #'magit-worktree-checkout))
     (magit-dash-overview-refresh)))
 
@@ -1764,26 +1764,26 @@ Signals `user-error' when the current overview is not a worktree."
   (let ((repo (magit-dash-overview--current-repo)))
     (unless (magit-dash-repo-worktree repo)
       (user-error "Not a worktree; use 'k' only on worktree overviews"))
-    (magit-gh--with-repo-dir (magit-dash-repo-path repo)
+    (magit-dash-gh--with-repo-dir (magit-dash-repo-path repo)
       (call-interactively #'magit-worktree-delete))
     (quit-window)))
 
 (defun magit-dash-overview-builder ()
   "Run `builder-compile-project' in this overview's repository."
   (interactive)
-  (magit-gh--with-repo-dir (magit-dash-repo-path (magit-dash-overview--current-repo))
+  (magit-dash-gh--with-repo-dir (magit-dash-repo-path (magit-dash-overview--current-repo))
     (call-interactively #'builder-compile-project)))
 
 (defun magit-dash-overview-agent-shell ()
   "Switch to an agent-shell session for this overview's repository."
   (interactive)
-  (magit-gh--with-repo-dir (magit-dash-repo-path (magit-dash-overview--current-repo))
+  (magit-dash-gh--with-repo-dir (magit-dash-repo-path (magit-dash-overview--current-repo))
     (call-interactively #'agent-shell-switch-project-session)))
 
 (defun magit-dash-overview-agent-shell-new ()
   "Start a new agent-shell session in this overview's repository."
   (interactive)
-  (magit-gh--with-repo-dir (magit-dash-repo-path (magit-dash-overview--current-repo))
+  (magit-dash-gh--with-repo-dir (magit-dash-repo-path (magit-dash-overview--current-repo))
     (call-interactively #'agent-shell-new-shell)))
 
 (defun magit-dash-overview-agent-shell-queue ()
@@ -1930,7 +1930,7 @@ On a Recent Commits line: show the commit in magit."
       ('magit-status (magit-status-setup-buffer data))
       ('dired (dired data))
       ('magit-show-commit
-       (magit-gh--with-repo-dir (magit-dash-repo-path (magit-dash-overview--current-repo))
+       (magit-dash-gh--with-repo-dir (magit-dash-repo-path (magit-dash-overview--current-repo))
          (magit-show-commit data))))))
 
 (defun magit-dash-overview--rerender ()
@@ -1966,8 +1966,8 @@ On a Recent Commits line: show the commit in magit."
   "Re-render the overview buffer with fresh stats fetched asynchronously."
   (interactive)
   (when-let* ((repo (magit-dash-overview--current-repo)))
-    (magit-gh--cache-remove (magit-dash-repo-path repo) :stats)
-    (magit-gh--cache-remove (magit-dash-repo-path repo) :pr-counts)
+    (magit-dash-gh--cache-remove (magit-dash-repo-path repo) :stats)
+    (magit-dash-gh--cache-remove (magit-dash-repo-path repo) :pr-counts)
     (setq-local magit-dash-overview--stats nil)
     (setq-local magit-dash-overview--pr-counts nil)
     (magit-dash-overview--rerender)
@@ -1996,7 +1996,7 @@ On a Recent Commits line: show the commit in magit."
 (defun magit-dash--dirty-or-unknown-p ()
   "Return non-nil when the repo at point is dirty or its stats are not yet cached."
   (when-let* ((repo (ignore-errors (magit-dash--repo-at-point))))
-    (if-let* ((stats (magit-gh--cache-get (magit-dash-repo-path repo) :stats)))
+    (if-let* ((stats (magit-dash-gh--cache-get (magit-dash-repo-path repo) :stats)))
         (plist-get stats :dirty)
       t)))
 
@@ -2217,7 +2217,7 @@ On a Recent Commits line: show the commit in magit."
     ("maa"  "Autosync all"      magit-dash-auto-sync)
     ("mbt"  "Mark by tag"       magit-dash-mark-by-tag)]
    ["Dashboard"
-    ("mbpr" "Open PR dashboard" magit-gh-pr-dashboard-open)
+    ("mbpr" "Open PR dashboard" magit-dash-gh-pr-dashboard-open)
     ("nt"   "Filter by tag"     magit-dash-filter-by-tag)
     ("C-t"  "Toggle column"     magit-dash-toggle-column)
     ("M-s"  "Toggle submodules" magit-dash-toggle-discovered-submodules)
@@ -2283,11 +2283,11 @@ On a Recent Commits line: show the commit in magit."
 (defun ad:magit-dash--quit-window (orig-fn &optional kill window)
   "Around advice for `quit-window': delete split window in dashboard buffers.
 Only applies in `magit-dash-mode', `magit-dash-overview-mode',
-and `magit-gh-pr-dashboard-mode'.  Falls through otherwise."
+and `magit-dash-gh-pr-dashboard-mode'.  Falls through otherwise."
   (if (or kill (one-window-p)
           (not (derived-mode-p 'magit-dash-mode
                                'magit-dash-overview-mode
-                               'magit-gh-pr-dashboard-mode)))
+                               'magit-dash-gh-pr-dashboard-mode)))
       (funcall orig-fn kill window)
     (delete-window (or window (selected-window)))))
 

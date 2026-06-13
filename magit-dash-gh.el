@@ -28,75 +28,75 @@
 (declare-function magit-get-current-branch "magit-git")
 (declare-function magit-branch-delete "magit-branch")
 
-;;; Core helpers shared by all magit-gh-* modules
+;;; Core helpers shared by all magit-dash-gh-* modules
 
-(defvar magit-gh--cache (make-hash-table :test #'equal)
+(defvar magit-dash-gh--cache (make-hash-table :test #'equal)
   "Global cache for repository-specific data, keyed by repository path.
 Each value is a plist containing data like :stats, :pr-counts, etc.")
 
-(defun magit-gh--cache-get (path key)
+(defun magit-dash-gh--cache-get (path key)
   "Return the value for KEY in the cache for repo at PATH."
-  (plist-get (map-elt magit-gh--cache path) key))
+  (plist-get (map-elt magit-dash-gh--cache path) key))
 
-(defun magit-gh--cache-set (path key value)
+(defun magit-dash-gh--cache-set (path key value)
   "Set the value for KEY in the cache for repo at PATH."
-  (let ((plist (map-elt magit-gh--cache path)))
-    (setf (map-elt magit-gh--cache path) (plist-put plist key value))))
+  (let ((plist (map-elt magit-dash-gh--cache path)))
+    (setf (map-elt magit-dash-gh--cache path) (plist-put plist key value))))
 
-(defun magit-gh--cache-remove (path &optional key)
+(defun magit-dash-gh--cache-remove (path &optional key)
   "Remove data for repo at PATH. If KEY is nil, remove all data."
   (if key
-      (setf (map-elt magit-gh--cache path)
+      (setf (map-elt magit-dash-gh--cache path)
             (seq-mapcat (lambda (pair) (unless (eq (car pair) key) pair))
-                        (seq-partition (map-elt magit-gh--cache path) 2)))
-    (map-delete magit-gh--cache path)))
+                        (seq-partition (map-elt magit-dash-gh--cache path) 2)))
+    (map-delete magit-dash-gh--cache path)))
 
-(defun magit-gh--check-gh ()
+(defun magit-dash-gh--check-gh ()
   "Signal `user-error' when the `gh' CLI is not found on PATH."
   (unless (executable-find "gh")
     (user-error "magit-gh: `gh' CLI not found on PATH")))
 
-(defun magit-gh--repo-dir ()
+(defun magit-dash-gh--repo-dir ()
   "Return the current git repository root for running `gh' commands.
 Signals `user-error' when not inside a git repository."
   (or (magit-toplevel)
       (user-error "magit-gh: not inside a git repository")))
 
-(defvar magit-gh-prune-pr-limit 100
+(defvar magit-dash-gh-prune-pr-limit 100
   "Maximum number of PRs to fetch from GitHub on each incremental scan.")
 
-(defvar magit-gh-prune-cache-dir nil
+(defvar magit-dash-gh-prune-cache-dir nil
   "Directory for per-repo closed-PR cache files, or nil to disable disk caching.")
 
-(defun magit-gh--pr-closed-p (pr)
+(defun magit-dash-gh--pr-closed-p (pr)
   "Return non-nil when PR alist represents a merged or closed PR."
   (member (map-elt pr 'state) '("MERGED" "CLOSED")))
 
-(defun magit-gh--default-branch ()
+(defun magit-dash-gh--default-branch ()
   "Return the repository's default branch name, falling back to \"main\"."
-  (let* ((default-directory (magit-gh--repo-dir))
+  (let* ((default-directory (magit-dash-gh--repo-dir))
 	 (output (string-trim
 		  (shell-command-to-string
 		   "gh repo view --json defaultBranchRef --jq .defaultBranchRef.name"))))
     (if (string-empty-p output) "main" output)))
 
-(defun magit-gh--prune-cache-file ()
+(defun magit-dash-gh--prune-cache-file ()
   "Return the cache file path for the current repo, or nil when caching is disabled.
 The filename uses the repo's directory basename plus a short hash for uniqueness."
-  (when magit-gh-prune-cache-dir
-    (let* ((dir (magit-gh--repo-dir))
+  (when magit-dash-gh-prune-cache-dir
+    (let* ((dir (magit-dash-gh--repo-dir))
 	   (basename (file-name-nondirectory (directory-file-name dir)))
 	   (short-hash (substring (secure-hash 'sha1 dir) 0 8)))
       (expand-file-name
        (format "%s-%s.eld" basename short-hash)
-       magit-gh-prune-cache-dir))))
+       magit-dash-gh-prune-cache-dir))))
 
-(defun magit-gh--prune-load-cache ()
+(defun magit-dash-gh--prune-load-cache ()
   "Return a hash table of headRefName→PR-alist from the repo's cache file.
 Returns an empty hash table when caching is disabled, no cache exists,
 or the file is unreadable."
   (let ((table (make-hash-table :test #'equal)))
-    (when-let* ((file (magit-gh--prune-cache-file)))
+    (when-let* ((file (magit-dash-gh--prune-cache-file)))
       (when (file-exists-p file)
         (condition-case err
             (with-temp-buffer
@@ -108,66 +108,66 @@ or the file is unreadable."
           (error (message "magit-gh prune: ignoring unreadable cache: %s" err)))))
     table))
 
-(defun magit-gh--prune-save-cache (table)
+(defun magit-dash-gh--prune-save-cache (table)
   "Persist the closed-PR hash TABLE to the repo cache file.
-No-op when `magit-gh-prune-cache-dir' is nil."
-  (when-let* ((file (magit-gh--prune-cache-file)))
-    (make-directory magit-gh-prune-cache-dir t)
+No-op when `magit-dash-gh-prune-cache-dir' is nil."
+  (when-let* ((file (magit-dash-gh--prune-cache-file)))
+    (make-directory magit-dash-gh-prune-cache-dir t)
     (with-temp-file file
       (prin1 (map-values table) (current-buffer)))))
 
-(defun magit-gh--fetch-closed-prs (&optional table)
+(defun magit-dash-gh--fetch-closed-prs (&optional table)
   "Fetch recent PRs from GitHub, merge closed ones into TABLE, persist and return it.
 TABLE defaults to the on-disk cache for the current repo.
-Uses a single gh call fetching up to `magit-gh-prune-pr-limit' PRs."
-  (let* ((default-directory (magit-gh--repo-dir))
-	 (table (or table (magit-gh--prune-load-cache)))
+Uses a single gh call fetching up to `magit-dash-gh-prune-pr-limit' PRs."
+  (let* ((default-directory (magit-dash-gh--repo-dir))
+	 (table (or table (magit-dash-gh--prune-load-cache)))
 	 (cmd (format "gh pr list --state all --limit %d --json number,state,headRefName,title"
-		      magit-gh-prune-pr-limit))
+		      magit-dash-gh-prune-pr-limit))
 	 (output (string-trim (shell-command-to-string cmd))))
     (when (string-prefix-p "[" output)
       (thread-last (json-parse-string output :array-type 'list :object-type 'alist)
-        (seq-filter #'magit-gh--pr-closed-p)
+        (seq-filter #'magit-dash-gh--pr-closed-p)
         (seq-do (lambda (pr)
                   (let ((branch (map-elt pr 'headRefName)))
                     (unless (map-elt table branch)
                       (map-put! table branch pr)))))))
-    (magit-gh--prune-save-cache table)
+    (magit-dash-gh--prune-save-cache table)
     table))
 
-(defun magit-gh--prune-scan ()
+(defun magit-dash-gh--prune-scan ()
   "Re-scan all local branches against the closed/merged PR cache.
 Merges fresh GitHub data into the in-memory table stored in `:closed-prs'
 (seeded from disk on first call), persists the result, and rebuilds
 `:candidates'. Excludes the default branch and the currently checked-out
 branch, catching squash-merged branches whose remote tracking ref is gone.
 Stale marked branches are dropped from `:marked'. Returns new candidates."
-  (let* ((path (magit-gh--repo-dir))
+  (let* ((path (magit-dash-gh--repo-dir))
          (default-directory path)
-         (state (magit-gh--cache-get path :prune-state))
+         (state (magit-dash-gh--cache-get path :prune-state))
          (prev-marked (plist-get state :marked))
-         (protected (list (magit-gh--default-branch)
+         (protected (list (magit-dash-gh--default-branch)
                           (magit-get-current-branch)))
-         (closed-prs (magit-gh--fetch-closed-prs (plist-get state :closed-prs)))
+         (closed-prs (magit-dash-gh--fetch-closed-prs (plist-get state :closed-prs)))
          (candidates (thread-last (magit-list-local-branch-names)
                        (seq-remove (lambda (branch) (member branch protected)))
                        (seq-filter (lambda (branch) (map-elt closed-prs branch)))
                        (seq-map (lambda (branch) (cons branch (map-elt closed-prs branch)))))))
-    (magit-gh--cache-set path
+    (magit-dash-gh--cache-set path
      :prune-state (list :candidates candidates
                         :marked (seq-filter (lambda (m) (member m (seq-map #'car candidates)))
                                             prev-marked)
                         :closed-prs closed-prs))
     candidates))
 
-(defun magit-gh--prune-format-annotation (pr)
+(defun magit-dash-gh--prune-format-annotation (pr)
   "Return a one-line annotation string describing PR alist."
   (format "PR #%s %s: %s"
 	  (map-elt pr 'number)
 	  (map-elt pr 'state)
 	  (map-elt pr 'title)))
 
-(defun magit-gh--prune-build-menu (candidates marked)
+(defun magit-dash-gh--prune-build-menu (candidates marked)
   "Build a hash-table menu for the prune command.
 CANDIDATES is the alist of (BRANCH . PR-ALIST). MARKED is the list of
 branch names currently marked for batch pruning. Branch entries are
@@ -190,17 +190,17 @@ labeled `prune: BRANCH' with a ` [marked]' suffix when applicable."
               (let* ((branch (car entry))
                      (suffix (if (member branch marked) " [marked]" "")))
                 (map-put! table (format "prune: %s%s" branch suffix)
-                          (magit-gh--prune-format-annotation (cdr entry)))))
+                          (magit-dash-gh--prune-format-annotation (cdr entry)))))
             candidates)
     table))
 
-(defun magit-gh--prune-parse-branch-label (label)
+(defun magit-dash-gh--prune-parse-branch-label (label)
   "Extract BRANCH from a menu LABEL like `prune: BRANCH [marked]'.
 Returns nil when LABEL is not a branch entry."
   (when (string-match "\\`prune: \\(.+?\\)\\(?: \\[marked\\]\\)?\\'" label)
     (match-string 1 label)))
 
-(defun magit-gh--prune-delete-branches (branches path &optional prompt-p)
+(defun magit-dash-gh--prune-delete-branches (branches path &optional prompt-p)
   "Delete each branch in BRANCHES for repo at PATH, prompting only when PROMPT-P.
 After deletion, re-scan the cache for PATH.
 Returns a plist (:deleted N :skipped M :quit BOOL).
@@ -217,18 +217,18 @@ yes-to-all for the remainder, `q' terminates the loop."
                                (format "Delete %s? (y/n/q/!) " branch)
                                '(?y ?n ?q ?!)))))
                 (pcase answer
-                  (?y (magit-gh--with-repo-dir path
+                  (?y (magit-dash-gh--with-repo-dir path
                         (magit-branch-delete (list branch) t))
                       (plist-put state :deleted (1+ (plist-get state :deleted))))
                   (?n (plist-put state :skipped (1+ (plist-get state :skipped))))
                   (?q (plist-put state :quit t))
-                  (?! (magit-gh--with-repo-dir path
+                  (?! (magit-dash-gh--with-repo-dir path
                         (magit-branch-delete (list branch) t))
                       (plist-put (plist-put state :yes-to-all t)
                                  :deleted (1+ (plist-get state :deleted))))))))
           branches
           (list :deleted 0 :skipped 0 :yes-to-all (not prompt-p) :quit nil))))
-    (magit-gh--prune-scan)
+    (magit-dash-gh--prune-scan)
     (message "magit-gh prune: deleted %d, skipped %d%s"
              (plist-get result :deleted)
              (plist-get result :skipped)
@@ -237,10 +237,10 @@ yes-to-all for the remainder, `q' terminates the loop."
           :skipped (plist-get result :skipped)
           :quit (plist-get result :quit))))
 
-(defun magit-gh--prune-toggle-mark (path)
+(defun magit-dash-gh--prune-toggle-mark (path)
   "Prompt for a branch from the cache for repo at PATH and toggle its mark.
 Updates `:marked' in the cached prune state."
-  (let* ((state (magit-gh--cache-get path :prune-state))
+  (let* ((state (magit-dash-gh--cache-get path :prune-state))
 	 (candidates (plist-get state :candidates))
 	 (marked (plist-get state :marked))
 	 (table (make-hash-table :test #'equal)))
@@ -250,45 +250,45 @@ Updates `:marked' in the cached prune state."
               (let* ((branch (car entry))
                      (label (format "%s%s" branch
                                     (if (member branch marked) " [marked]" ""))))
-                (map-put! table label (magit-gh--prune-format-annotation (cdr entry)))))
+                (map-put! table label (magit-dash-gh--prune-format-annotation (cdr entry)))))
             candidates)
     (let* ((label (annotated-completing-read table
 					     :prompt "toggle mark => "
-					     :category 'magit-gh-mark
+					     :category 'magit-dash-gh-mark
 					     :require-match t))
 	   (branch (replace-regexp-in-string " \\[marked\\]\\'" "" label))
 	   (new-marked (if (member branch marked)
 			   (delete branch (copy-sequence marked))
 			 (cons branch marked))))
-      (magit-gh--cache-set path :prune-state
+      (magit-dash-gh--cache-set path :prune-state
                            (plist-put state :marked new-marked)))))
 
-(defun magit-gh--prune-dispatch (label path)
+(defun magit-dash-gh--prune-dispatch (label path)
   "Dispatch the menu action for LABEL given repo PATH.
-Throws `magit-gh--prune-exit' to terminate the menu loop."
-  (let* ((state (magit-gh--cache-get path :prune-state))
+Throws `magit-dash-gh--prune-exit' to terminate the menu loop."
+  (let* ((state (magit-dash-gh--cache-get path :prune-state))
 	 (candidates (plist-get state :candidates))
 	 (marked (plist-get state :marked)))
     (cond
      ((equal label "exit menu")
-      (throw 'magit-gh--prune-exit nil))
+      (throw 'magit-dash-gh--prune-exit nil))
      ((equal label "refresh")
-      (magit-gh--prune-scan))
+      (magit-dash-gh--prune-scan))
      ((equal label "prune all branches (no prompt)")
-      (magit-gh--prune-delete-branches (seq-map #'car candidates) path nil))
+      (magit-dash-gh--prune-delete-branches (seq-map #'car candidates) path nil))
      ((equal label "prune all branches (with prompt)")
-      (magit-gh--prune-delete-branches (seq-map #'car candidates) path t))
+      (magit-dash-gh--prune-delete-branches (seq-map #'car candidates) path t))
      ((equal label "mark branch for pruning")
-      (magit-gh--prune-toggle-mark path))
+      (magit-dash-gh--prune-toggle-mark path))
      ((equal label "prune marked branches")
-      (magit-gh--prune-delete-branches marked path nil))
+      (magit-dash-gh--prune-delete-branches marked path nil))
      (t
-      (if-let* ((branch (magit-gh--prune-parse-branch-label label)))
-          (magit-gh--prune-delete-branches (list branch) path nil)
+      (if-let* ((branch (magit-dash-gh--prune-parse-branch-label label)))
+          (magit-dash-gh--prune-delete-branches (list branch) path nil)
         (user-error "Unknown menu label: %s" label))))))
 
 ;;;###autoload
-(defun magit-gh-prune-merged-branches ()
+(defun magit-dash-gh-prune-merged-branches ()
   "Open a menu to prune local branches whose PRs are merged or closed.
 
 Per-repo cache (candidates + marked list) lives on the unified global cache
@@ -303,58 +303,58 @@ menu'. The menu offers:
   - prune marked branches (when any are marked)
   - prune: BRANCH [marked]   (one entry per candidate)"
   (interactive)
-  (magit-gh--check-gh)
-  (let ((path (magit-gh--repo-dir)))
-    (unless (magit-gh--cache-get path :prune-state)
+  (magit-dash-gh--check-gh)
+  (let ((path (magit-dash-gh--repo-dir)))
+    (unless (magit-dash-gh--cache-get path :prune-state)
       (message "magit-gh prune: scanning for branches with closed PRs...")
-      (magit-gh--prune-scan))
-    (catch 'magit-gh--prune-exit
+      (magit-dash-gh--prune-scan))
+    (catch 'magit-dash-gh--prune-exit
       (while t
-	(let* ((state (magit-gh--cache-get path :prune-state))
-	       (table (magit-gh--prune-build-menu
+	(let* ((state (magit-dash-gh--cache-get path :prune-state))
+	       (table (magit-dash-gh--prune-build-menu
 		       (plist-get state :candidates)
 		       (plist-get state :marked)))
 	       (label (annotated-completing-read
 		       table
 		       :prompt "magit-gh prune => "
-		       :category 'magit-gh-prune
+		       :category 'magit-dash-gh-prune
 		       :require-match t)))
-	  (magit-gh--prune-dispatch label path))))))
+	  (magit-dash-gh--prune-dispatch label path))))))
 
 ;;;###autoload
-(defun magit-gh-prune-prefetch ()
+(defun magit-dash-gh-prune-prefetch ()
   "Seed the in-memory closed-PR cache from disk for the current repo.
 Makes no GitHub API calls; safe to call on status load.
 Skips silently when caching is disabled, not in a git repo, or the
 in-memory cache is already populated."
-  (when (and magit-gh-prune-cache-dir
+  (when (and magit-dash-gh-prune-cache-dir
 	     (ignore-errors (magit-toplevel)))
-    (let* ((path (magit-gh--repo-dir))
-           (state (magit-gh--cache-get path :prune-state)))
+    (let* ((path (magit-dash-gh--repo-dir))
+           (state (magit-dash-gh--cache-get path :prune-state)))
       (unless (plist-get state :closed-prs)
-        (let ((table (magit-gh--prune-load-cache)))
-          (magit-gh--cache-set path :prune-state
+        (let ((table (magit-dash-gh--prune-load-cache)))
+          (magit-dash-gh--cache-set path :prune-state
                                (plist-put state :closed-prs table)))))))
 
 ;;; Shared utilities
 
-(defmacro magit-gh--with-repo-dir (path &rest body)
+(defmacro magit-dash-gh--with-repo-dir (path &rest body)
   "Execute BODY with `default-directory' set to PATH."
   (declare (indent 1))
   `(let ((default-directory ,path))
      ,@body))
 
-(defun magit-gh--add-file (ctx path type)
+(defun magit-dash-gh--add-file (ctx path type)
   "Return CTX with a new {:path PATH :type TYPE} entry appended to :files."
   (plist-put ctx :files
              (append (plist-get ctx :files)
                      (list (list :path path :type type)))))
 
-(defun magit-gh--branch-slug (branch)
+(defun magit-dash-gh--branch-slug (branch)
   "Return BRANCH lowercased with non-alphanumeric chars replaced by hyphens."
   (downcase (replace-regexp-in-string "[^a-z0-9]+" "-" branch)))
 
-(defun magit-gh--make-error-handler (prefix label)
+(defun magit-dash-gh--make-error-handler (prefix label)
   "Return an on-error callback that messages with PREFIX for step LABEL."
   (lambda (output code)
     (message "%s: %s step failed (exit %d): %s"
@@ -362,39 +362,39 @@ in-memory cache is already populated."
 
 ;;; Collect infrastructure
 
-(defvar magit-gh-collect-base-dir nil
+(defvar magit-dash-gh-collect-base-dir nil
   "Base directory for artifact downloads, or nil to use <project-root>/plans/.")
 
-(defvar magit-gh-collect-name-function #'magit-gh--collect-default-name
+(defvar magit-dash-gh-collect-name-function #'magit-dash-gh--collect-default-name
   "Function (TYPE SLUG ID) => string naming a collection run directory.
 TYPE is a symbol (`ci' or `pr'), SLUG is a branch or PR slug string,
 ID is a run-id or PR number.  The result is used as a subdirectory
 name under the base collection directory.")
 
-(defvar magit-gh-collect-index-format 'json
+(defvar magit-dash-gh-collect-index-format 'json
   "Serialization format for index files written by collect commands.
 `json' (default, always available) or `yaml' (requires the `yaml' package).")
 
-(defun magit-gh--collect-default-name (type slug id)
+(defun magit-dash-gh--collect-default-name (type slug id)
   "Return TYPE-SLUG-ID with non-alphanumeric characters replaced by hyphens."
   (downcase
    (replace-regexp-in-string
     "[^a-z0-9-]+" "-"
     (format "%s-%s-%s" type slug id))))
 
-(defun magit-gh--collect-dir (root type slug id)
+(defun magit-dash-gh--collect-dir (root type slug id)
   "Create and return an artifact directory under ROOT for this collection run.
 ROOT is the project root directory (captured before any async work).
-BASE is `magit-gh-collect-base-dir' or <ROOT>/plans/.
-The leaf name is produced by `magit-gh-collect-name-function'."
-  (let* ((base (or magit-gh-collect-base-dir
+BASE is `magit-dash-gh-collect-base-dir' or <ROOT>/plans/.
+The leaf name is produced by `magit-dash-gh-collect-name-function'."
+  (let* ((base (or magit-dash-gh-collect-base-dir
                    (expand-file-name "plans" root)))
-         (name (funcall magit-gh-collect-name-function type slug id))
+         (name (funcall magit-dash-gh-collect-name-function type slug id))
          (dir  (expand-file-name name base)))
     (make-directory dir t)
     dir))
 
-(defun magit-gh--index-table (&rest kvs)
+(defun magit-dash-gh--index-table (&rest kvs)
   "Build a string-keyed hash-table for JSON/YAML serialization from KVS pairs.
 KVS is a flat list of alternating string KEY and VALUE arguments."
   (let ((ht (make-hash-table :test #'equal)))
@@ -402,17 +402,17 @@ KVS is a flat list of alternating string KEY and VALUE arguments."
       (puthash (pop kvs) (pop kvs) ht))
     ht))
 
-(defun magit-gh--file-table (path type)
+(defun magit-dash-gh--file-table (path type)
   "Return a string-keyed hash-table representing a collected file entry."
   (let ((ht (make-hash-table :test #'equal)))
     (puthash "path" path ht)
     (puthash "type" type ht)
     ht))
 
-(defun magit-gh--write-index (dir data)
+(defun magit-dash-gh--write-index (dir data)
   "Write DATA hash-table as an index file inside DIR.
-Format is controlled by `magit-gh-collect-index-format'."
-  (pcase magit-gh-collect-index-format
+Format is controlled by `magit-dash-gh-collect-index-format'."
+  (pcase magit-dash-gh-collect-index-format
     ('yaml
      (unless (require 'yaml nil t)
        (user-error "magit-gh: yaml format requires the `yaml' package"))
@@ -422,13 +422,13 @@ Format is controlled by `magit-gh-collect-index-format'."
      (with-temp-file (expand-file-name "index.json" dir)
        (insert (json-serialize data :false-object :false :null-object nil))))))
 
-(defun magit-gh--run-process (args dir on-success &optional on-error)
+(defun magit-dash-gh--run-process (args dir on-success &optional on-error)
   "Run `gh' with ARGS in DIR asynchronously.
 ON-SUCCESS is called with the output string when the process exits 0.
 ON-ERROR is called with the output string and exit code otherwise;
 when nil, a `message' is emitted instead."
   (let* ((default-directory dir)
-         (buf (generate-new-buffer " *magit-gh-proc*"))
+         (buf (generate-new-buffer " *magit-dash-gh-proc*"))
          (proc (make-process
                 :name "magit-gh"
                 :buffer buf
@@ -453,10 +453,10 @@ when nil, a `message' is emitted instead."
       (setq default-directory dir))
     proc))
 
-(defun magit-gh--repo-info ()
+(defun magit-dash-gh--repo-info ()
   "Return a plist :owner :repo :branch for the current repository.
 Uses `gh repo view' and `magit-get-current-branch'."
-  (let* ((default-directory (magit-gh--repo-dir))
+  (let* ((default-directory (magit-dash-gh--repo-dir))
          (output (string-trim
                   (shell-command-to-string
                    "gh repo view --json owner,name --jq '[.owner.login,.name]|@tsv'")))
