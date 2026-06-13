@@ -2162,7 +2162,7 @@ On a Recent Commits line: show the commit in magit."
      :inapt-if-not magit-dash--repo-at-point-p)
     ("C-c"    "Commit"       magit-dash-magit-commit
      :inapt-if-not magit-dash--dirty-or-unknown-p)
-    ("G"   "Stage all"      magit-dash-stage-all
+    ("ga"  "Stage all"      magit-dash-stage-all
      :inapt-if-not magit-dash--dirty-or-unknown-p)
     ("fr"   "Fetch"          magit-dash-fetch
      :inapt-if-not magit-dash--repo-at-point-p)
@@ -2215,7 +2215,7 @@ On a Recent Commits line: show the commit in magit."
     ("sa"   "Sync all"          magit-dash-sync-all)
     ("ca"   "Commit all"        magit-dash-commit-all)
     ("aa"   "Autosync all"      magit-dash-auto-sync)
-    ("T"    "Mark by tag"       magit-dash-mark-by-tag)]
+    ("mt"   "Mark by tag"       magit-dash-mark-by-tag)]
    ["Dashboard"
     ("pr"   "Open PR dashboard" magit-dash-gh-pr-dashboard-open)
     ("nt"   "Filter by tag"     magit-dash-filter-by-tag)
@@ -2238,9 +2238,9 @@ On a Recent Commits line: show the commit in magit."
      :if magit-dash-overview--has-changes-p)
     ("lc"  "Log (current)"   magit-dash-overview-magit-log)
     ("lf"  "Log…"            magit-dash-overview-magit-log-full)
-    ("c"   "Commit"          magit-dash-overview-magit-commit
+    ("C-c"  "Commit"          magit-dash-overview-magit-commit
      :if magit-dash-overview--has-changes-p)
-    ("sa"   "Stage all"       magit-dash-overview-stage-all
+    ("ga"   "Stage all"       magit-dash-overview-stage-all
      :if magit-dash-overview--has-changes-p)
     ("fr"   "Fetch"            magit-dash-overview-fetch)
     ("rp"   "Pull"             magit-dash-overview-pull)
