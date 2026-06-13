@@ -2162,7 +2162,7 @@ On a Recent Commits line: show the commit in magit."
      :inapt-if-not magit-dash--repo-at-point-p)
     ("C-c"    "Commit"       magit-dash-magit-commit
      :inapt-if-not magit-dash--dirty-or-unknown-p)
-    ("sa"   "Stage all"      magit-dash-stage-all
+    ("G"   "Stage all"      magit-dash-stage-all
      :inapt-if-not magit-dash--dirty-or-unknown-p)
     ("fr"   "Fetch"          magit-dash-fetch
      :inapt-if-not magit-dash--repo-at-point-p)
@@ -2186,7 +2186,7 @@ On a Recent Commits line: show the commit in magit."
      :inapt-if-not magit-dash--has-auto-sync-p)
     ("et"   "Add tag"         magit-dash-add-tag
      :inapt-if-not magit-dash--repo-at-point-p)
-    ("t"    "Compile Project (builder)"  magit-dash-builder
+    ("j"    "Compile Project (builder)"  magit-dash-builder
      :inapt-if-not magit-dash--has-auto-commit-p)
     ("x"   "Run command"     magit-dash-run-command
      :inapt-if-not magit-dash--has-commands-p)
@@ -2215,9 +2215,9 @@ On a Recent Commits line: show the commit in magit."
     ("sa"   "Sync all"          magit-dash-sync-all)
     ("ca"   "Commit all"        magit-dash-commit-all)
     ("aa"   "Autosync all"      magit-dash-auto-sync)
-    ("bt"   "Mark by tag"       magit-dash-mark-by-tag)]
+    ("T"    "Mark by tag"       magit-dash-mark-by-tag)]
    ["Dashboard"
-    ("bpr"  "Open PR dashboard" magit-dash-gh-pr-dashboard-open)
+    ("pr"   "Open PR dashboard" magit-dash-gh-pr-dashboard-open)
     ("nt"   "Filter by tag"     magit-dash-filter-by-tag)
     ("C-t"  "Toggle column"     magit-dash-toggle-column)
     ("M-s"  "Toggle submodules" magit-dash-toggle-discovered-submodules)
