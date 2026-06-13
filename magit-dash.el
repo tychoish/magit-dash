@@ -2205,19 +2205,19 @@ On a Recent Commits line: show the commit in magit."
    ["Batch"
     ("SPC"  "Toggle mark"       magit-dash-toggle-mark
      :inapt-if-not magit-dash--repo-at-point-p)
-    ("mt"   "Toggle mark"       magit-dash-toggle-mark
+    ("t"    "Toggle mark"       magit-dash-toggle-mark
      :inapt-if-not magit-dash--repo-at-point-p)
-    ("mu"   "Clear marks"       magit-dash-unmark-all
+    ("u"    "Clear marks"       magit-dash-unmark-all
      :inapt-if-not magit-dash--has-marks-p)
-    ("mfa"  "Fetch all/marked"  magit-dash-fetch-all)
-    ("mpa"  "Pull all/marked"   magit-dash-pull-all)
-    ("mpu"  "Push all/marked"   magit-dash-push-all)
-    ("msa"  "Sync all"          magit-dash-sync-all)
-    ("mca"  "Commit all"        magit-dash-commit-all)
-    ("maa"  "Autosync all"      magit-dash-auto-sync)
-    ("mbt"  "Mark by tag"       magit-dash-mark-by-tag)]
+    ("fa"   "Fetch all/marked"  magit-dash-fetch-all)
+    ("pa"   "Pull all/marked"   magit-dash-pull-all)
+    ("pu"   "Push all/marked"   magit-dash-push-all)
+    ("sa"   "Sync all"          magit-dash-sync-all)
+    ("ca"   "Commit all"        magit-dash-commit-all)
+    ("aa"   "Autosync all"      magit-dash-auto-sync)
+    ("bt"   "Mark by tag"       magit-dash-mark-by-tag)]
    ["Dashboard"
-    ("mbpr" "Open PR dashboard" magit-dash-gh-pr-dashboard-open)
+    ("bpr"  "Open PR dashboard" magit-dash-gh-pr-dashboard-open)
     ("nt"   "Filter by tag"     magit-dash-filter-by-tag)
     ("C-t"  "Toggle column"     magit-dash-toggle-column)
     ("M-s"  "Toggle submodules" magit-dash-toggle-discovered-submodules)
