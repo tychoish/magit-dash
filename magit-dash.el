@@ -841,13 +841,13 @@ Persisted across sessions via `savehist-additional-variables'.")
   "All available dashboard columns in display order.")
 
 (defconst magit-dash--column-defs
-  '((branch   . ("Branch"  18 t))
-    (fetched  . ("Fetched"  8 nil))
+  '((fetched  . ("Fetched"  8 nil))
     (status   . ("Status"  10 nil))
     (worktree . ("Type"    10 nil))
     (sync     . ("Sync"     8 nil))
     (cached   . ("Cached"   7 nil)))
-  "Alist of COLUMN-SYMBOL to (LABEL WIDTH SORTABLE) for non-name columns.")
+  "Alist of COLUMN-SYMBOL to (LABEL WIDTH SORTABLE) for non-name columns.
+Name and Branch widths are computed dynamically in `magit-dash--build-format'.")
 
 (defun magit-dash--column-enabled-p (col)
   "Return non-nil when column COL is enabled in `magit-dash-columns'."
@@ -950,15 +950,28 @@ Returns an empty string when nothing is set."
 
 (defun magit-dash--build-format (repos)
   "Return the tabulated-list format vector for REPOS using enabled columns.
-The Name column width is elastic: wide enough for the longest name in REPOS."
-  (let* ((name-width (seq-reduce (lambda (w r) (max w (length (magit-dash-repo-name r))))
-                                 repos (length "Name")))
+Name column: min 12, max 21, elastic (longest repo name + 1).
+Branch column: min 8, max 24, elastic (longest branch name + 1)."
+  (let* ((raw-name  (seq-reduce (lambda (w r) (max w (length (magit-dash-repo-name r))))
+                                repos 0))
+         (name-width (max 12 (min 21 (1+ raw-name))))
+         (raw-branch (seq-reduce
+                      (lambda (w r)
+                        (let ((b (or (plist-get (magit-dash-gh--cache-get
+                                                 (magit-dash-repo-path r) :stats)
+                                                :branch)
+                                     (magit-dash-repo-branch r)
+                                     "")))
+                          (max w (length b))))
+                      repos 0))
+         (branch-width (max 8 (min 24 (1+ raw-branch))))
          (active (magit-dash--active-columns)))
     (apply #'vector
            (seq-map (lambda (col)
-                      (if (eq col 'name)
-                          `("Name" ,name-width t)
-                        (alist-get col magit-dash--column-defs)))
+                      (pcase col
+                        ('name   `("Name"   ,name-width   t))
+                        ('branch `("Branch" ,branch-width t))
+                        (_       (alist-get col magit-dash--column-defs))))
                     active))))
 
 (defvar magit-dash-mode-map
