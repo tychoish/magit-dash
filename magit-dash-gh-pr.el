@@ -254,15 +254,19 @@ Keys: :state (\"open\"/\"closed\"), :author, :repo (OWNER/NAME), :org.")
   '((t :inherit warning))
   "Face for pending CI status in the PR dashboard.")
 
-(defconst magit-dash-gh-pr-dashboard--format
-  [("Repo" 22 t)
-   ("PR#" 5 nil)
-   ("Title" 38 t)
-   ("CI" 8 t)
-   ("Age" 6 nil)
-   ("Cmts" 4 nil)
-   ("Review" 14 t)]
-  "Column format for `magit-dash-gh-pr-dashboard-mode'.")
+(defun magit-dash-gh-pr-dashboard--build-format (&optional width)
+  "Return the `tabulated-list-format' vector with an elastic Repo column.
+WIDTH is the available window width; when nil, `window-width' is used.
+Repo column fills leftover space after the fixed columns (75 chars total),
+with a minimum of 12."
+  (let ((repo-width (max 12 (- (or width (window-width)) 75))))
+    (vector (list "Repo" repo-width t)
+            '("PR#" 5 nil)
+            '("Title" 38 t)
+            '("CI" 8 t)
+            '("Age" 6 nil)
+            '("Cmts" 4 nil)
+            '("Review" 14 t))))
 
 (defvar magit-dash-gh-pr-dashboard-mode-map
   (let ((m (make-sparse-keymap)))
@@ -280,7 +284,7 @@ Keys: :state (\"open\"/\"closed\"), :author, :repo (OWNER/NAME), :org.")
 
 (define-derived-mode magit-dash-gh-pr-dashboard-mode tabulated-list-mode "PRs"
   "Major mode for the pull request dashboard."
-  (setq tabulated-list-format magit-dash-gh-pr-dashboard--format)
+  (setq tabulated-list-format (magit-dash-gh-pr-dashboard--build-format))
   (setq tabulated-list-sort-key nil)
   (tabulated-list-init-header)
   (setq-local magit-dash-gh-pr-dashboard--filters
@@ -392,6 +396,10 @@ Returns nil when OUTPUT is not a JSON array."
          (with-current-buffer buf
            (setq tabulated-list-entries
                  (or (magit-dash-gh-pr-dashboard--parse-output output filters) nil))
+           (setq tabulated-list-format
+                 (magit-dash-gh-pr-dashboard--build-format
+                  (window-width (get-buffer-window buf t))))
+           (tabulated-list-init-header)
            (tabulated-list-print t)
            (message "magit-gh: %d PR(s)"
                     (length tabulated-list-entries))))))))
