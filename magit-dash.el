@@ -2262,10 +2262,10 @@ On a Recent Commits line: show the commit in magit."
      :if magit-dash-overview--has-auto-sync-p)
     ("sb"  "Bump submodules..." magit-dash-bump-submodules-menu)]
    ["Batch"
-    ("msa"  "Sync all"          magit-dash-sync-all)
-    ("mca"  "Commit all"        magit-dash-commit-all)
-    ("maa"  "Autosync all"      magit-dash-auto-sync)
-    ("mpa"  "Push all"          magit-dash-push-all)]
+    ("sa"   "Sync all"          magit-dash-sync-all)
+    ("ca"   "Commit all"        magit-dash-commit-all)
+    ("aa"   "Autosync all"      magit-dash-auto-sync)
+    ("pa"   "Push all"          magit-dash-push-all)]
    ["Agent Shell"
     ("as"   "Agent shell (project)"  magit-dash-overview-agent-shell
      :if agent-shell-menu-project-buffers)
