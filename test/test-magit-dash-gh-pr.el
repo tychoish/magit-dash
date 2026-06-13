@@ -94,16 +94,16 @@
 (ert-deftest magit-dash-gh-pr/thread-table-resolved ()
   (let* ((th  '(:id "t1" :resolved t :path "x.el" :creator "a" :last-commentor "b"))
          (ht  (magit-dash-gh-pr--thread-table th)))
-    (should (equal "t1"  (gethash "id" ht)))
-    (should (eq    t     (gethash "resolved" ht)))
-    (should (equal "x.el" (gethash "path" ht)))
-    (should (equal "a"   (gethash "creator" ht)))
-    (should (equal "b"   (gethash "last_commentor" ht)))))
+    (should (equal "t1"  (map-elt ht "id")))
+    (should (eq    t     (map-elt ht "resolved")))
+    (should (equal "x.el" (map-elt ht "path")))
+    (should (equal "a"   (map-elt ht "creator")))
+    (should (equal "b"   (map-elt ht "last_commentor")))))
 
 (ert-deftest magit-dash-gh-pr/thread-table-unresolved ()
   (let* ((th '(:id "t2" :resolved nil :path "" :creator "c" :last-commentor "d"))
          (ht (magit-dash-gh-pr--thread-table th)))
-    (should (eq :false (gethash "resolved" ht)))))
+    (should (eq :false (map-elt ht "resolved")))))
 
 
 ;;; has_unresolved_threads derivation
