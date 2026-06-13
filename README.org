@@ -1,0 +1,152 @@
+#+TITLE: magit-dash.el -- multi-repo dashboard for Emacs with GitHub integration
+#+OPTIONS: toc:2 num:nil
+
+* Overview
+
+=magit-dash= is a tabulated-list dashboard for tracking multiple local git
+repositories from a single buffer.  Each registered repo shows its current
+branch, fetch age, ahead/behind counts, dirty state, and configured
+auto-sync operations.  Selecting a repo opens a per-repo overview buffer with
+recent log, PR counts (via the GitHub CLI), and magit action shortcuts.
+
+A companion PR dashboard (=magit-dash-gh-pr=) and CI log fetcher
+(=magit-dash-gh-actions=) are provided as optional modules.
+
+Repositories are registered with =magit-dash-register= (typically in your
+=user/= or personal init file) and the dashboard is opened with
+=magit-dash-open=.
+
+* Contents                                                       :TOC:
+- [[#overview][Overview]]
+- [[#installation][Installation]]
+  - [[#package-vcel][package-vc.el]]
+  - [[#use-package-with-vc][use-package with VC]]
+  - [[#use-package][use-package with load-path]]
+  - [[#manual][Manual]]
+- [[#api-reference][API Reference]]
+- [[#license][License]]
+
+* Installation
+
+** package-vc.el
+
+Requires Emacs 29.1+.  Run once to clone and register the package:
+
+#+BEGIN_SRC emacs-lisp
+(package-vc-install '(magit-dash
+                      :url "https://github.com/tychoish/magit-dash"))
+#+END_SRC
+
+** use-package with VC
+
+Requires Emacs 30+.  Installs on first load if not already present:
+
+#+BEGIN_SRC emacs-lisp
+(use-package magit-dash
+  :vc (:url "https://github.com/tychoish/magit-dash"))
+#+END_SRC
+
+** use-package with load-path
+
+#+BEGIN_SRC sh
+git clone https://github.com/tychoish/magit-dash ~/path/to/magit-dash
+#+END_SRC
+
+#+BEGIN_SRC emacs-lisp
+(use-package magit-dash
+  :load-path "~/path/to/magit-dash"
+  :commands (magit-dash-open magit-dash-open-other-window))
+#+END_SRC
+
+** Manual
+
+#+BEGIN_SRC sh
+git clone https://github.com/tychoish/magit-dash ~/path/to/magit-dash
+#+END_SRC
+
+#+BEGIN_SRC emacs-lisp
+(add-to-list 'load-path "~/path/to/magit-dash")
+(require 'magit-dash)
+#+END_SRC
+
+* API Reference
+
+#+BEGIN_COMMENT
+Generated from ;;;###autoload-annotated public functions in magit-dash.el.
+To regenerate: open this file in Emacs with magit-dash on your load-path,
+place point in the source block below, and run C-c C-c (or M-x org-babel-execute-buffer).
+Do not edit the #+RESULTS: block by hand — it will be overwritten on the next run.
+#+END_COMMENT
+
+#+BEGIN_SRC emacs-lisp :results output raw :exports none
+  (save-excursion
+    (org-back-to-heading t)
+    (let ((end (save-excursion (org-end-of-subtree t) (point))))
+      (forward-line 1)
+      (while (and (< (point) end) (not (org-at-heading-p)))
+        (forward-line 1))
+      (when (< (point) end)
+        (delete-region (point) end))))
+
+  (let* ((org-dir (file-name-directory (buffer-file-name)))
+         (el-file (expand-file-name "magit-dash.el" org-dir)))
+    (add-to-list 'load-path org-dir)
+    (require 'magit-dash)
+
+    (defun magit-dash-doc--format-doc (doc)
+      (let* ((paras (split-string doc "\n\n" t))
+             (fn-para (seq-find (lambda (p) (string-match "\\`(fn " (string-trim p))) paras))
+             (rest-paras (seq-remove (lambda (p) (string-match "\\`(fn " (string-trim p))) paras)))
+        (mapconcat #'identity
+                   (delq nil
+                         (list
+                          (when fn-para (concat ": " (string-trim fn-para)))
+                          (when rest-paras
+                            (mapconcat
+                             (lambda (para)
+                               (if (string-match "\\`[ \t]" para)
+                                   para
+                                 (mapconcat #'string-trim (split-string para "\n" t) " ")))
+                             rest-paras "\n\n"))))
+                   "\n\n")))
+
+    (defun magit-dash-doc--format-sym (name)
+      (let* ((sym (intern name))
+             (fn-p (fboundp sym))
+             (var-p (and (not fn-p) (boundp sym)))
+             (doc (or (when fn-p (documentation sym))
+                      (when var-p (documentation-property sym 'variable-documentation)))))
+        (format "** %s~%s~\n\n%s\n\n"
+                (if doc "" "TODO ")
+                name
+                (if doc (magit-dash-doc--format-doc doc) "*no docstring*"))))
+
+    ;; Collect only ;;;###autoload-annotated public functions (no -- in name).
+    (let (syms autoload-next)
+      (with-temp-buffer
+        (insert-file-contents el-file)
+        (goto-char (point-min))
+        (while (not (eobp))
+          (let ((line (buffer-substring-no-properties
+                       (line-beginning-position) (line-end-position))))
+            (cond
+             ((string-match "^;;;###autoload" line)
+              (setq autoload-next t))
+             ((and autoload-next
+                   (string-match "^(\\(?:cl-\\)?def[^ ]+ +'?\\([^ ()]+\\)" line)
+                   (not (string-match-p "--" (match-string 1 line))))
+              (push (match-string 1 line) syms)
+              (setq autoload-next nil))
+             ((not (string-empty-p (string-trim line)))
+              (setq autoload-next nil))))
+          (forward-line 1)))
+      (dolist (name (nreverse syms))
+        (princ (magit-dash-doc--format-sym name)))))
+#+END_SRC
+
+#+RESULTS:
+
+* License
+
+Copyright (C) tychoish. GPL-3.0 or later. See the source file header
+for the full license text.
