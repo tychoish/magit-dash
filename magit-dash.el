@@ -358,6 +358,21 @@ For missing submodules, returns minimal placeholder stats."
                  :dirty nil :uncommitted-files nil :fetch-age nil
                  :head-hash nil :recent-log "")))))))
 
+(defun magit-dash--get-stats-fast (repo)
+  "Return cached stats for REPO without validity checking, or a loading placeholder.
+Unlike `magit-dash--get-stats', never blocks: returns whatever is in cache, or
+a placeholder plist when nothing is cached.  Caller is responsible for async collection."
+  (cond
+   ((eq (magit-dash-repo-submodule repo) 'missing)
+    (list :branch "" :remote-origin nil :behind 0 :ahead 0
+          :dirty nil :uncommitted-files nil :fetch-age nil
+          :head-hash nil :recent-log ""))
+   (t
+    (or (magit-dash-gh--cache-get (magit-dash-repo-path repo) :stats)
+        (list :branch "…" :remote-origin nil :behind 0 :ahead 0
+              :dirty nil :uncommitted-files nil :fetch-age nil
+              :head-hash nil :recent-log "")))))
+
 ;;;; Async git operations
 
 (defun magit-dash--run-git (path args on-success &optional on-error)
@@ -695,38 +710,17 @@ ON-ALL-DONE with an alist of (NAME . STATUS)."
     (message "Cleared entire cache")))
 
 (defun magit-dash-cache-reset-all ()
-  "Clear cache and repopulate stats for all repos."
+  "Clear all caches and repopulate the dashboard asynchronously."
   (interactive)
   (clrhash magit-dash-gh--cache)
-  (magit-dash--discover-worktrees)
-  (magit-dash--discover-submodules)
-  (let ((failed nil))
-    (dolist (repo magit-dash-repo-list)
-      (condition-case err
-          (magit-dash--collect-stats repo)
-        (error
-         (push (cons (magit-dash-repo-name repo) (error-message-string err)) failed))))
-    (message "Cache reset: %d/%d repos updated%s"
-             (- (length magit-dash-repo-list) (length failed))
-             (length magit-dash-repo-list)
-             (if failed (format " (%d failed)" (length failed)) "")))
-  (when (get-buffer magit-dash-buffer-name)
-    (magit-dash-refresh)))
+  (magit-dash--maybe-refresh))
 
 (defun magit-dash-cache-reset-at-point ()
-  "Reset cache for repository at point."
+  "Clear cache for repository at point and refresh its stats asynchronously."
   (interactive)
-  (when-let ((repo (magit-dash--repo-at-point)))
-    (let ((path (magit-dash-repo-path repo))
-          (name (magit-dash-repo-name repo)))
-      (magit-dash-gh--cache-remove path)
-      (condition-case err
-          (progn
-            (magit-dash--collect-stats repo)
-            (magit-dash--maybe-refresh)
-            (message "Cache reset for %s" name))
-        (error
-         (message "Failed to collect stats for %s: %s" name (error-message-string err)))))))
+  (when-let* ((repo (magit-dash--repo-at-point)))
+    (magit-dash-gh--cache-remove (magit-dash-repo-path repo))
+    (magit-dash-refresh)))
 
 ;;;; Worktree support
 
@@ -1004,7 +998,7 @@ When both together exceed the available window space they split it proportionall
   (let ((m (make-sparse-keymap)))
     (define-key m (kbd "RET") #'magit-dash-view)
     (define-key m (kbd "g")   #'magit-dash-refresh)
-    (define-key m (kbd "r")   #'magit-dash-refresh)
+    (define-key m (kbd "r")   #'magit-dash-hard-refresh)
     (define-key m (kbd "!")   #'magit-dash-magit-dispatch)
     (define-key m (kbd "s")   #'magit-dash-magit-status)
     (define-key m (kbd "d")   #'magit-dash-magit-diff)
@@ -1080,8 +1074,10 @@ submodules and to derive their parent<mod> display name.")
   (tabulated-list-init-header))
 
 (defun magit-dash--build-entry (repo)
-  "Return a `tabulated-list-entries' entry for REPO using enabled columns."
-  (let* ((stats (magit-dash--get-stats repo))
+  "Return a `tabulated-list-entries' entry for REPO using enabled columns.
+Uses cached stats without blocking; stale or absent stats show as placeholders
+until `magit-dash--populate-stats-async' updates them."
+  (let* ((stats (magit-dash--get-stats-fast repo))
          (active (magit-dash--active-columns)))
     (list repo
           (apply #'vector
@@ -1123,6 +1119,50 @@ submodules and to derive their parent<mod> display name.")
                            (propertize "✓" 'face 'success)
                          (propertize "·" 'face 'shadow)))))
                   active)))))
+
+(defun magit-dash--update-entry (repo)
+  "Rebuild the dashboard row for REPO from the current cache and re-render the table."
+  (let ((path (magit-dash-repo-path repo)))
+    (setq tabulated-list-entries
+          (seq-map (lambda (entry)
+                     (if (equal (magit-dash-repo-path (car entry)) path)
+                         (magit-dash--build-entry repo)
+                       entry))
+                   tabulated-list-entries))
+    (tabulated-list-print t)))
+
+(defun magit-dash--populate-stats-async (repos)
+  "Asynchronously collect stats for stale or uncached repos in REPOS.
+Emits a status message with repo counts; updates dashboard rows as each finishes."
+  (let* ((buf (current-buffer))
+         (needs-update
+          (seq-filter
+           (lambda (repo)
+             (and (not (eq (magit-dash-repo-submodule repo) 'missing))
+                  (let* ((path (magit-dash-repo-path repo))
+                         (cached (magit-dash-gh--cache-get path :stats)))
+                    (not (and cached
+                              (equal (magit-dash--head-hash path)
+                                     (plist-get cached :head-hash)))))))
+           repos))
+         (total (length repos))
+         (stale (length needs-update))
+         (done (list 0)))
+    (if (= stale 0)
+        (message "magit-dash: %d repos (all cached)" total)
+      (message "magit-dash: %d repos, loading %d…" total stale)
+      (seq-do
+       (lambda (repo)
+         (magit-dash--collect-stats-async
+          repo
+          (lambda (_stats)
+            (setcar done (1+ (car done)))
+            (when (buffer-live-p buf)
+              (with-current-buffer buf
+                (magit-dash--update-entry repo)))
+            (when (= (car done) stale)
+              (message "magit-dash: %d repos, %d updated" total stale)))))
+       needs-update))))
 
 (defun magit-dash--repo-type-rank (repo)
   "Return a sort rank for REPO based on its git context type.
@@ -1172,11 +1212,11 @@ suppressed to avoid duplicate rows — the registered entry is shown instead."
                 sorted)))
 
 (defun magit-dash-refresh ()
-  "Discover worktrees, invalidate the stats cache, and repopulate the table.
-When `magit-dash--tag-filter' is set, shows only matching repos.
-Repos are ordered by :sort-hint; discovered worktrees follow their parent."
+  "Render the dashboard from cache, then populate stale stats asynchronously.
+Discovers worktrees and submodules synchronously on each call (single git
+invocation per repo), then renders immediately with cached or placeholder stats.
+Repos with absent or stale stats are updated in the background as each finishes."
   (interactive)
-  (clrhash magit-dash-gh--cache)
   (magit-dash--discover-worktrees)
   (magit-dash--discover-submodules)
   (setq magit-dash--submodule-path-set
@@ -1197,7 +1237,16 @@ Repos are ordered by :sort-hint; discovered worktrees follow their parent."
     (setq tabulated-list-format (magit-dash--build-format repos))
     (tabulated-list-init-header)
     (setq tabulated-list-entries (seq-map #'magit-dash--build-entry repos))
-    (tabulated-list-print t)))
+    (tabulated-list-print t)
+    (magit-dash--populate-stats-async repos)))
+
+(defun magit-dash-hard-refresh ()
+  "Clear all caches and repopulate the dashboard from scratch.
+Unlike `magit-dash-refresh', discards all cached stats so every repo is
+re-collected asynchronously."
+  (interactive)
+  (clrhash magit-dash-gh--cache)
+  (magit-dash-refresh))
 
 (defun magit-dash--repo-at-point ()
   "Return the `magit-dash-repo' struct at point or signal `user-error'."

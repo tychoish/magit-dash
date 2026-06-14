@@ -66,7 +66,7 @@
   ":worktree t is stored correctly."
   (let ((magit-dash-repo-list nil))
     (magit-dash-register :name "r" :path "/tmp/r" :worktree t)
-    (should (eq t (magit-dash-repo-worktree (car magit-dash-repo-list)))))))
+    (should (eq t (magit-dash-repo-worktree (car magit-dash-repo-list))))))
 
 (ert-deftest magit-dash/register-include-prs-true ()
   ":include-prs t is stored correctly."
@@ -315,6 +315,44 @@
         (should (equal "feat" (plist-get result :branch)))
         (should (= 1 (plist-get result :behind)))))))
 
+;;;; magit-dash--get-stats-fast (non-blocking cache access)
+
+(ert-deftest magit-dash/get-stats-fast-returns-cached-stats ()
+  "get-stats-fast returns cached stats without validation."
+  (let* ((repo (magit-dash-repo--make :name "test" :path "/tmp/test-fast"))
+         (cached (list :branch "main" :remote-origin nil :behind 0 :ahead 0
+                       :dirty nil :uncommitted-files nil
+                       :fetch-age 60.0 :head-hash "abc123" :recent-log ""))
+         (magit-dash-gh--cache (make-hash-table :test #'equal)))
+    (magit-dash-gh--cache-set "/tmp/test-fast" :stats cached)
+    (should (equal cached (magit-dash--get-stats-fast repo)))))
+
+(ert-deftest magit-dash/get-stats-fast-returns-placeholder-when-empty ()
+  "get-stats-fast returns a loading placeholder when no cache entry exists."
+  (let* ((repo (magit-dash-repo--make :name "test" :path "/tmp/test-nocache"))
+         (magit-dash-gh--cache (make-hash-table :test #'equal))
+         (result (magit-dash--get-stats-fast repo)))
+    (should (equal "…" (plist-get result :branch)))
+    (should (null (plist-get result :head-hash)))))
+
+(ert-deftest magit-dash/get-stats-fast-returns-empty-for-missing-submodule ()
+  "get-stats-fast returns empty branch string for missing submodules."
+  (let* ((repo (magit-dash-repo--make :name "p<s>" :path "/tmp/p/s" :submodule 'missing))
+         (magit-dash-gh--cache (make-hash-table :test #'equal))
+         (result (magit-dash--get-stats-fast repo)))
+    (should (equal "" (plist-get result :branch)))))
+
+(ert-deftest magit-dash/get-stats-fast-does-not-validate-stale-cache ()
+  "get-stats-fast returns cached stats even when HEAD hash has changed."
+  (let* ((repo (magit-dash-repo--make :name "test" :path "/tmp/test-stale"))
+         (stale (list :branch "old" :remote-origin nil :behind 0 :ahead 0
+                      :dirty nil :uncommitted-files nil
+                      :fetch-age nil :head-hash "old-hash" :recent-log ""))
+         (magit-dash-gh--cache (make-hash-table :test #'equal)))
+    (magit-dash-gh--cache-set "/tmp/test-stale" :stats stale)
+    (cl-letf (((symbol-function 'magit-dash--head-hash) (lambda (_) "new-hash")))
+      (should (equal stale (magit-dash--get-stats-fast repo))))))
+
 ;;;; magit-dash--auto-commit
 
 (ert-deftest magit-dash/auto-commit-uses-default-message ()
@@ -448,9 +486,10 @@
   (let ((repo (magit-dash-repo--make :name "myrep" :path "/tmp/myrep"))
         (magit-dash--stats-cache (make-hash-table :test #'equal))
         (magit-dash-columns
-         '((name . t) (branch . t) (fetched . t) (status . t) (worktree . t)))
+         '((name . t) (branch . t) (fetched . t) (status . t) (worktree . t)
+           (sync . nil) (cached . nil)))
         (magit-dash--worktree-map (make-hash-table :test #'equal)))
-    (cl-letf (((symbol-function 'magit-dash--get-stats)
+    (cl-letf (((symbol-function 'magit-dash--get-stats-fast)
                (lambda (_)
                  (list :branch "main" :ahead 0 :behind 0 :dirty nil :fetch-age 120.0
                        :head-hash "abc" :recent-log ""))))
@@ -1323,7 +1362,7 @@ Overrides are placed first so `plist-get' finds them before the defaults."
   (let ((magit-dash-columns
          '((name . t) (branch . t) (fetched . nil) (status . t) (worktree . nil)))
         (magit-dash--worktree-map (make-hash-table :test #'equal)))
-    (cl-letf (((symbol-function 'magit-dash--get-stats)
+    (cl-letf (((symbol-function 'magit-dash--get-stats-fast)
                (lambda (_)
                  (list :branch "main" :ahead 0 :behind 0 :dirty nil :fetch-age 60.0
                        :head-hash "abc" :recent-log "" :remote-origin nil

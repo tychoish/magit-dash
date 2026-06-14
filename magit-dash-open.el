@@ -1,7 +1,7 @@
 ;;; magit-dash-open.el --- Interactive git repository picker for magit-dash -*- lexical-binding: t; -*-
 
 ;;; Commentary:
-;; Provides `magit-dash-open', a context-aware repository picker using
+;; Provides `magit-dash-open-repo', a context-aware repository picker using
 ;; `annotated-completing-read'.  Behaviour adapts to the calling context:
 ;;
 ;;   - Current directory is a git repo (non-magit buffer):
@@ -46,10 +46,10 @@ Keys are absolute paths.  Values are plists:
   :dirty            non-nil when working tree has uncommitted changes")
 
 (defun magit-dash-open-cache-reset ()
-  "Clear the git info cache used by `magit-dash-open'."
+  "Clear the git info cache used by `magit-dash-open-repo'."
   (interactive)
   (setq magit-dash-open--info-cache (make-hash-table :test #'equal))
-  (message "magit-dash-open: cache cleared"))
+  (message "magit-dash-open-repo: cache cleared"))
 
 ;;; Git subprocess helpers
 
@@ -221,7 +221,7 @@ KIND is one of: `repo', `worktree', `submodule', `dir'."
 ;;; Entry point
 
 ;;;###autoload
-(defun magit-dash-open (&optional root)
+(defun magit-dash-open-repo (&optional root)
   "Select a repository and open its magit status buffer.
 
 Context-aware collection:
