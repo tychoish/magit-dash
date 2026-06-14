@@ -38,6 +38,7 @@
 
 (require 'annotated-completing-read)
 (require 'sprite)
+(require 'magit-dash-gh-ci)
 
 (declare-function magit-status-setup-buffer "magit-status")
 (declare-function magit-diff-dwim "magit-diff")
@@ -62,6 +63,10 @@
 (declare-function magit-dash-bump-submodules-menu "magit-dash-submodules")
 (declare-function magit-dash-gh-pr-dashboard-open "magit-dash-gh-pr")
 (declare-function magit-dash-gh-pr-dashboard-mode "magit-dash-gh-pr")
+(declare-function magit-dash-gh-ci--format-status "magit-dash-gh-ci")
+(declare-function magit-dash-gh-ci-fetch "magit-dash-gh-ci")
+(declare-function magit-dash-gh-ci-open-last-run "magit-dash-gh-ci")
+(declare-function magit-dash-gh-ci-fix-ci "magit-dash-gh-ci")
 
 (defconst magit-dash-buffer-name "*magit-dash-repos*")
 
@@ -72,6 +77,7 @@
   name
   path
   (include-prs nil)
+  (include-ci nil)
   (auto-fetch nil)
   (auto-pull nil)
   (auto-commit nil)
@@ -89,12 +95,13 @@
   "List of `magit-dash-repo' structs registered for dashboard display.
 Use `magit-dash-register' to add entries.")
 
-(cl-defun magit-dash-register (&key name path include-prs auto-fetch auto-pull auto-commit auto-push auto-sync-command tags commands sort-hint worktree sync-branches)
+(cl-defun magit-dash-register (&key name path include-prs include-ci auto-fetch auto-pull auto-commit auto-push auto-sync-command tags commands sort-hint worktree sync-branches)
   "Register or replace a repository with NAME at absolute PATH.
 Replaces any existing entry with the same name or path.
 
 Keyword arguments:
   :include-prs    include in PR dashboard fetches.
+  :include-ci     include in CI status column fetches (GitHub Actions).
   :auto-fetch     non-nil — run git fetch --all during auto-sync.
   :auto-pull      non-nil — run git pull during auto-sync (implies fetch).
                   Respects :sync-branches.
@@ -129,6 +136,7 @@ Keyword arguments:
                            :name name
                            :path abs-path
                            :include-prs include-prs
+                           :include-ci include-ci
                            :auto-fetch auto-fetch
                            :auto-pull auto-pull
                            :auto-commit auto-commit
@@ -419,6 +427,16 @@ Calls ON-COMPLETE with symbol `ok' on success or `error' and error text on failu
   (magit-dash--run-git
    (magit-dash-repo-path repo)
    '("pull")
+   (lambda (_) (funcall on-complete 'ok))
+   (lambda (output code)
+     (funcall on-complete 'error (format "exit %d: %s" code output)))))
+
+(defun magit-dash--submodule-update-async (repo on-complete)
+  "Run git submodule update --init --recursive for REPO asynchronously.
+Calls ON-COMPLETE with `ok' on success or `error' with message on failure."
+  (magit-dash--run-git
+   (magit-dash-repo-path repo)
+   '("submodule" "update" "--init" "--recursive")
    (lambda (_) (funcall on-complete 'ok))
    (lambda (output code)
      (funcall on-complete 'error (format "exit %d: %s" code output)))))
@@ -826,12 +844,12 @@ Missing/uninitialized submodules are marked with :submodule 'missing."
 ;;;; Column configuration
 
 (defvar magit-dash-columns
-  '((name . t) (branch . t) (fetched . t) (status . t) (worktree . t) (sync . t) (cached . nil))
+  '((name . t) (branch . t) (fetched . t) (status . t) (worktree . t) (sync . t) (cached . nil) (ci . nil))
   "Alist of (COLUMN-SYMBOL . ENABLED) for the repository dashboard.
 Persisted across sessions via `savehist-additional-variables'.")
 
 (defconst magit-dash--all-columns
-  '(name branch fetched status worktree sync cached)
+  '(name branch fetched status worktree sync cached ci)
   "All available dashboard columns in display order.")
 
 (defconst magit-dash--column-defs
@@ -839,7 +857,8 @@ Persisted across sessions via `savehist-additional-variables'.")
     (status   . ("Status"  10 nil))
     (worktree . ("Type"    10 nil))
     (sync     . ("Sync"     8 nil))
-    (cached   . ("Cached"   7 nil)))
+    (cached   . ("Cached"   7 nil))
+    (ci       . ("CI"       8 nil)))
   "Alist of COLUMN-SYMBOL to (LABEL WIDTH SORTABLE) for non-name columns.
 Name and Branch widths are computed dynamically in `magit-dash--build-format'.")
 
@@ -900,8 +919,9 @@ a single space.  Returns an empty string when everything is clean and synced."
 (defun magit-dash--format-worktree (repo)
   "Format the type indicator for REPO.
 Shows \"WT\" for worktrees, \"SUBM\" for initialized submodules,
-\"SUBM.EMPTY\" for missing/uninitialized submodules, \"SUBM.TRACK\" for
-explicitly-registered submodules, and \"REPO\" for ordinary working-tree repos."
+\"SUBM.EMPTY\" for missing/uninitialized submodules, \"SUBM.TR\" for
+explicitly-registered submodules, \"REPO+SM\" for repos with discovered
+submodules, and \"REPO\" for ordinary working-tree repos."
   (let ((path (magit-dash-repo-path repo))
         (submodule (magit-dash-repo-submodule repo)))
     (cond
@@ -913,7 +933,9 @@ explicitly-registered submodules, and \"REPO\" for ordinary working-tree repos."
       (propertize "SUBM" 'face 'magit-dash-repo-branch-face))
      ((and magit-dash--submodule-path-set
            (gethash path magit-dash--submodule-path-set))
-      (propertize "SUBM.TRACK" 'face 'magit-dash-repo-branch-face))
+      (propertize "SUBM.TR" 'face 'magit-dash-repo-branch-face))
+     ((magit-dash-gh--cache-get path :submodules)
+      (propertize "REPO+SM" 'face 'shadow))
      (t (propertize "REPO" 'face 'shadow)))))
 
 (defun magit-dash--format-sync (repo)
@@ -1117,7 +1139,12 @@ until `magit-dash--populate-stats-async' updates them."
                       ('cached
                        (if (magit-dash-gh--cache-get (magit-dash-repo-path repo) :stats)
                            (propertize "✓" 'face 'success)
-                         (propertize "·" 'face 'shadow)))))
+                         (propertize "·" 'face 'shadow)))
+                      ('ci
+                       (if (magit-dash-repo-include-ci repo)
+                           (magit-dash-gh-ci--format-status
+                            (magit-dash-gh--cache-get (magit-dash-repo-path repo) :ci-status))
+                         (propertize "—" 'face 'shadow)))))
                   active)))))
 
 (defun magit-dash--update-entry (repo)
@@ -1161,7 +1188,14 @@ Emits a status message with repo counts; updates dashboard rows as each finishes
               (with-current-buffer buf
                 (magit-dash--update-entry repo)))
             (when (= (car done) stale)
-              (message "magit-dash: %d repos, %d updated" total stale)))))
+              (message "magit-dash: %d repos, %d updated" total stale))
+            (when (magit-dash-repo-include-ci repo)
+              (magit-dash-gh-ci-fetch
+               repo
+               (lambda (_ci-status)
+                 (when (buffer-live-p buf)
+                   (with-current-buffer buf
+                     (magit-dash--update-entry repo)))))))))
        needs-update))))
 
 (defun magit-dash--repo-type-rank (repo)
@@ -1212,10 +1246,10 @@ suppressed to avoid duplicate rows — the registered entry is shown instead."
                 sorted)))
 
 (defun magit-dash-refresh ()
-  "Render the dashboard from cache, then populate stale stats asynchronously.
-Discovers worktrees and submodules synchronously on each call (single git
-invocation per repo), then renders immediately with cached or placeholder stats.
-Repos with absent or stale stats are updated in the background as each finishes."
+  "Refresh the dashboard, clearing all per-repo caches and re-fetching asynchronously.
+Discovers worktrees and submodules synchronously, renders the table with the last
+known state, then clears :stats, :pr-counts, and :ci-status for every repo and
+re-fetches all three in the background, updating each row as data arrives."
   (interactive)
   (magit-dash--discover-worktrees)
   (magit-dash--discover-submodules)
@@ -1238,7 +1272,24 @@ Repos with absent or stale stats are updated in the background as each finishes.
     (tabulated-list-init-header)
     (setq tabulated-list-entries (seq-map #'magit-dash--build-entry repos))
     (tabulated-list-print t)
-    (magit-dash--populate-stats-async repos)))
+    (seq-do (lambda (repo)
+              (let ((path (magit-dash-repo-path repo)))
+                (magit-dash-gh--cache-remove path :stats)
+                (magit-dash-gh--cache-remove path :pr-counts)
+                (magit-dash-gh--cache-remove path :ci-status)))
+            repos)
+    (magit-dash--populate-stats-async repos)
+    (let ((buf (current-buffer)))
+      (seq-do
+       (lambda (repo)
+         (when (magit-dash-repo-include-ci repo)
+           (magit-dash-gh-ci-fetch
+            repo
+            (lambda (_)
+              (when (buffer-live-p buf)
+                (with-current-buffer buf
+                  (magit-dash--update-entry repo)))))))
+       repos))))
 
 (defun magit-dash-hard-refresh ()
   "Clear all caches and repopulate the dashboard from scratch.
@@ -1603,6 +1654,34 @@ Signals `user-error' when the current row is not a worktree."
   "Open the agent-shell queue buffer."
   (interactive)
   (call-interactively #'agent-shell-queue-buffer-open))
+
+(defun magit-dash-gh-ci-fetch-at-point ()
+  "Fetch CI status for the repository at point and refresh its dashboard row."
+  (interactive)
+  (when-let* ((repo (magit-dash--repo-at-point)))
+    (magit-dash-gh-ci-fetch repo (lambda (_) (magit-dash--update-entry repo)))))
+
+(defun magit-dash-gh-ci-open-at-point ()
+  "Open the most recent CI run in the browser for the repository at point."
+  (interactive)
+  (when-let* ((repo (magit-dash--repo-at-point)))
+    (magit-dash-gh-ci-open-last-run repo)))
+
+(defun magit-dash-gh-ci-fix-at-point ()
+  "Dispatch a fix-CI agent task for the repository at point."
+  (interactive)
+  (when-let* ((repo (magit-dash--repo-at-point)))
+    (magit-dash-gh-ci-fix-ci repo)))
+
+(defun magit-dash--repo-has-ci-p ()
+  "Return non-nil when the repository at point has :include-ci set."
+  (when-let* ((repo (magit-dash--repo-at-point)))
+    (magit-dash-repo-include-ci repo)))
+
+(defun magit-dash--repo-has-ci-status-p ()
+  "Return non-nil when the repository at point has cached CI status."
+  (when-let* ((repo (magit-dash--repo-at-point)))
+    (magit-dash-gh--cache-get (magit-dash-repo-path repo) :ci-status)))
 
 ;;;###autoload
 (defun magit-dash-open-other-window ()
@@ -2236,6 +2315,18 @@ On a Recent Commits line: show the commit in magit."
      "magit-gh push"
      (lambda (_) (magit-dash--maybe-refresh)))))
 
+(defun magit-dash-submodule-update-all ()
+  "Run git submodule update --init --recursive for marked repos, or all visible repos."
+  (interactive)
+  (let ((repos (magit-dash--effective-repos)))
+    (unless repos
+      (user-error "No repositories to update"))
+    (magit-dash--batch-run
+     repos
+     #'magit-dash--submodule-update-async
+     "magit-dash submodule-update"
+     (lambda (_) (magit-dash--maybe-refresh)))))
+
 ;;;; Transient menus
 
 (transient-define-prefix magit-dash-menu ()
@@ -2290,6 +2381,13 @@ On a Recent Commits line: show the commit in magit."
      :inapt-if-not agent-shell-menu-project-buffers)
     ("an"   "New agent shell"            magit-dash-agent-shell-new)
     ("aq"   "Agent shell queue"          magit-dash-agent-shell-queue)]
+   ["CI"
+    ("cf"   "Fetch CI status"   magit-dash-gh-ci-fetch-at-point
+     :inapt-if-not magit-dash--repo-has-ci-p)
+    ("co"   "Open last CI run"  magit-dash-gh-ci-open-at-point
+     :inapt-if-not magit-dash--repo-has-ci-status-p)
+    ("cx"   "Fix CI (agent)"    magit-dash-gh-ci-fix-at-point
+     :inapt-if-not magit-dash--repo-has-ci-status-p)]
    ["Worktree"
     ("w"   "Add worktree"    magit-dash-worktree-add
      :inapt-if-not magit-dash--can-add-worktree-p)
@@ -2308,7 +2406,8 @@ On a Recent Commits line: show the commit in magit."
     ("sa"   "Sync all"          magit-dash-sync-all)
     ("ca"   "Commit all"        magit-dash-commit-all)
     ("aa"   "Autosync all"      magit-dash-auto-sync)
-    ("mt"   "Mark by tag"       magit-dash-mark-by-tag)]
+    ("mt"   "Mark by tag"       magit-dash-mark-by-tag)
+    ("su"   "Update submodules all/marked" magit-dash-submodule-update-all)]
    ["Dashboard"
     ("pr"   "Open PR dashboard" magit-dash-gh-pr-dashboard-open)
     ("nt"   "Filter by tag"     magit-dash-filter-by-tag)
