@@ -20,6 +20,7 @@
 
 (require 'cl-lib)
 (require 'map)
+(require 'transient)
 
 (require 'annotated-completing-read)
 
@@ -27,6 +28,8 @@
 (declare-function magit-list-local-branch-names "magit-git")
 (declare-function magit-get-current-branch "magit-git")
 (declare-function magit-branch-delete "magit-branch")
+(declare-function magit-dash-gh-actions-fetch "magit-dash-gh-actions")
+(declare-function magit-dash-gh-pr-fetch "magit-dash-gh-pr")
 
 ;;; Core helpers shared by all magit-dash-gh-* modules
 
@@ -218,12 +221,12 @@ yes-to-all for the remainder, `q' terminates the loop."
                                '(?y ?n ?q ?!)))))
                 (pcase answer
                   (?y (magit-dash-gh--with-repo-dir path
-                        (magit-branch-delete (list branch) t))
+                        (with-no-warnings (magit-branch-delete (list branch) t)))
                       (plist-put state :deleted (1+ (plist-get state :deleted))))
                   (?n (plist-put state :skipped (1+ (plist-get state :skipped))))
                   (?q (plist-put state :quit t))
                   (?! (magit-dash-gh--with-repo-dir path
-                        (magit-branch-delete (list branch) t))
+                        (with-no-warnings (magit-branch-delete (list branch) t)))
                       (plist-put (plist-put state :yes-to-all t)
                                  :deleted (1+ (plist-get state :deleted))))))))
           branches
@@ -339,14 +342,11 @@ in-memory cache is already populated."
 ;;; Shared utilities
 
 (defmacro magit-dash-gh--with-repo-dir (path &rest body)
-  "Execute BODY with `default-directory' set to PATH.
-Binds via let (the standard with- idiom) and also sets it buffer-locally
-so the value persists through transient interactions."
+  "Execute BODY with `default-directory' set to PATH."
   (declare (indent 1))
   (let ((p (make-symbol "path")))
     `(let* ((,p ,path)
              (default-directory ,p))
-       (setq-local default-directory ,p)
        ,@body)))
 
 (defun magit-dash-gh--add-file (ctx path type)
@@ -469,6 +469,14 @@ Uses `gh repo view' and `magit-get-current-branch'."
     (list :owner  (nth 0 parts)
           :repo   (nth 1 parts)
           :branch (magit-get-current-branch))))
+
+;;;###autoload
+(transient-define-prefix magit-gh ()
+  "GitHub workflow commands: branch pruning, CI logs, and PR comments."
+  [["GitHub"
+    ("P" "Prune merged/closed PR branches" magit-dash-gh-prune-merged-branches)
+    ("L" "Fetch CI logs"                   magit-dash-gh-actions-fetch)
+    ("R" "Fetch PR comments"               magit-dash-gh-pr-fetch)]])
 
 (provide 'magit-dash-gh)
 

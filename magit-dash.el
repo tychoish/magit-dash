@@ -791,7 +791,7 @@ The first block (the main worktree) is always skipped."
   "Parse LINES from `git submodule status' for repo at MAIN-PATH.
 Returns a list of `magit-dash-repo' structs, one per submodule (initialized or not).
 Name is formatted as \"parent<submod>\" where parent is the basename of MAIN-PATH.
-Missing/uninitialized submodules are marked with :submodule 'missing."
+Missing/uninitialized submodules are marked with :submodule \\='missing."
   (let ((main-name (file-name-nondirectory (directory-file-name main-path))))
     (thread-last lines
       (seq-filter (lambda (l) (not (string-empty-p l))))
@@ -844,12 +844,12 @@ Missing/uninitialized submodules are marked with :submodule 'missing."
 ;;;; Column configuration
 
 (defvar magit-dash-columns
-  '((name . t) (branch . t) (fetched . t) (status . t) (worktree . t) (sync . t) (cached . nil) (ci . nil))
+  '((name . t) (branch . t) (fetched . t) (ci . nil) (status . t) (worktree . t) (sync . t) (cached . nil))
   "Alist of (COLUMN-SYMBOL . ENABLED) for the repository dashboard.
 Persisted across sessions via `savehist-additional-variables'.")
 
 (defconst magit-dash--all-columns
-  '(name branch fetched status worktree sync cached ci)
+  '(name branch fetched ci status worktree sync cached)
   "All available dashboard columns in display order.")
 
 (defconst magit-dash--column-defs
@@ -1141,10 +1141,13 @@ until `magit-dash--populate-stats-async' updates them."
                            (propertize "✓" 'face 'success)
                          (propertize "·" 'face 'shadow)))
                       ('ci
-                       (if (magit-dash-repo-include-ci repo)
-                           (magit-dash-gh-ci--format-status
-                            (magit-dash-gh--cache-get (magit-dash-repo-path repo) :ci-status))
-                         (propertize "—" 'face 'shadow)))))
+                       (if (not (magit-dash-repo-include-ci repo))
+                           ""
+                         (let ((ci-status (magit-dash-gh--cache-get
+                                           (magit-dash-repo-path repo) :ci-status)))
+                           (if ci-status
+                               (magit-dash-gh-ci--format-status ci-status)
+                             (propertize "?" 'face 'shadow)))))))
                   active)))))
 
 (defun magit-dash--update-entry (repo)
@@ -1388,7 +1391,7 @@ Signals `user-error' when :auto-commit is not configured for this repo."
   "Push current branch to its push remote for the repository at point."
   (interactive)
   (with-magit-from-dashboard (magit-dash--repo-at-point)
-    (magit-push-current-to-pushremote nil)))
+    (call-interactively #'magit-push-current-to-pushremote)))
 
 (defun magit-dash-sync ()
   "Run the configured auto operations for the repository at point asynchronously.
@@ -1403,11 +1406,11 @@ Signals `user-error' when no auto operations are configured for this repo."
        (magit-dash--maybe-refresh)))))
 
 (defun magit-dash-commit-all ()
-  "Auto-commit repos with :auto-commit configured, asynchronously.
+  "Auto-commit marked repos (or all if none marked) with :auto-commit configured.
 Uses each repo's :auto-commit message function (or the default chore message).
 Displays a summary message and refreshes the dashboard when all complete."
   (interactive)
-  (let ((repos (seq-filter #'magit-dash-repo-auto-commit magit-dash-repo-list)))
+  (let ((repos (seq-filter #'magit-dash-repo-auto-commit (magit-dash--effective-repos))))
     (unless repos
       (user-error "No repositories have :auto-commit configured"))
     (magit-dash--batch-run
@@ -1417,9 +1420,9 @@ Displays a summary message and refreshes the dashboard when all complete."
      (lambda (_) (magit-dash--maybe-refresh)))))
 
 (defun magit-dash-sync-all ()
-  "Run auto operations for all configured repos asynchronously, then refresh."
+  "Run auto operations for marked repos (or all if none marked) asynchronously, then refresh."
   (interactive)
-  (let ((repos (seq-filter #'magit-dash--auto-sync-steps magit-dash-repo-list)))
+  (let ((repos (seq-filter #'magit-dash--auto-sync-steps (magit-dash--effective-repos))))
     (unless repos
       (user-error "No repositories have auto operations configured"))
     (magit-dash--batch-run
@@ -1429,11 +1432,11 @@ Displays a summary message and refreshes the dashboard when all complete."
      (lambda (_) (magit-dash--maybe-refresh)))))
 
 (defun magit-dash-auto-sync ()
-  "Run all configured auto operations for every eligible repo asynchronously.
+  "Run auto operations for marked repos (or all if none marked) asynchronously.
 Each repo's steps (fetch, pull, commit, push) run sequentially; each step is
 logged individually. Dashboard refreshes when all repos complete."
   (interactive)
-  (let ((repos (seq-filter #'magit-dash--auto-sync-steps magit-dash-repo-list)))
+  (let ((repos (seq-filter #'magit-dash--auto-sync-steps (magit-dash--effective-repos))))
     (unless repos
       (user-error "No repos have auto operations configured"))
     (magit-dash--batch-run
@@ -1724,16 +1727,11 @@ Signals `user-error' when `magit-dash-repo-list' is empty."
        ,@body))))
 
 (defmacro with-magit-from-dashboard (repo &rest body)
-  "Execute BODY with default-directory set to REPO path.
-Binds default-directory via let (the standard with- idiom) and also sets
-it buffer-locally so the value persists through transient interactions:
-transient prefixes return immediately after showing their popup, meaning
-a let-binding alone would exit before the user selects a suffix."
+  "Execute BODY with default-directory set to REPO path."
   (declare (indent 1))
   (let ((path (make-symbol "path")))
     `(let* ((,path (magit-dash-repo-path ,repo))
              (default-directory ,path))
-       (setq-local default-directory ,path)
        ,@body)))
 
 ;;;; Repo overview buffer
@@ -1873,7 +1871,7 @@ Signals `user-error' when no auto operations are configured for this repo."
   "Push current branch to its push remote for this overview's repository."
   (interactive)
   (magit-dash-gh--with-repo-dir (magit-dash-repo-path (magit-dash-overview--current-repo))
-    (magit-push-current-to-pushremote nil)))
+    (call-interactively #'magit-push-current-to-pushremote)))
 
 (defun magit-dash-overview-run-command ()
   "Open ACR picker for this overview's repository and invoke the selected command."
@@ -2266,14 +2264,17 @@ On a Recent Commits line: show the commit in magit."
   (tabulated-list-print t))
 
 (defun magit-dash--effective-repos ()
-  "Return marked repos if any are marked, else all repos currently in the table."
-  (let ((all (seq-map #'car tabulated-list-entries)))
-    (if magit-dash--marked-paths
-        (seq-filter (lambda (r)
-                      (member (magit-dash-repo-path r)
-                              magit-dash--marked-paths))
-                    all)
-      all)))
+  "Return marked repos if any are marked, else all repos currently in the table.
+Falls back to `magit-dash-repo-list' when not in a dashboard buffer."
+  (if (derived-mode-p 'magit-dash-mode)
+      (let ((all (seq-map #'car tabulated-list-entries)))
+        (if magit-dash--marked-paths
+            (seq-filter (lambda (r)
+                          (member (magit-dash-repo-path r)
+                                  magit-dash--marked-paths))
+                        all)
+          all))
+    magit-dash-repo-list))
 
 (defun magit-dash--has-marks-p ()
   "Return non-nil when at least one repository is marked."
@@ -2389,25 +2390,25 @@ On a Recent Commits line: show the commit in magit."
     ("cx"   "Fix CI (agent)"    magit-dash-gh-ci-fix-at-point
      :inapt-if-not magit-dash--repo-has-ci-status-p)]
    ["Worktree"
-    ("w"   "Add worktree"    magit-dash-worktree-add
+    ("w"   "Add"    magit-dash-worktree-add
      :inapt-if-not magit-dash--can-add-worktree-p)
-    ("k"   "Delete worktree" magit-dash-worktree-delete
+    ("k"   "Delete" magit-dash-worktree-delete
      :inapt-if-not magit-dash--at-worktree-p)]
    ["Batch"
-    ("SPC"  "Toggle mark"       magit-dash-toggle-mark
+    ("SPC"  "Toggle mark"    magit-dash-toggle-mark
      :inapt-if-not magit-dash--repo-at-point-p)
-    ("t"    "Toggle mark"       magit-dash-toggle-mark
+    ("mt"   "Mark by tag"    magit-dash-mark-by-tag)
+    ("t"    "Toggle mark"    magit-dash-toggle-mark
      :inapt-if-not magit-dash--repo-at-point-p)
-    ("u"    "Clear marks"       magit-dash-unmark-all
+    ("u"    "Clear marks"    magit-dash-unmark-all
      :inapt-if-not magit-dash--has-marks-p)
-    ("fa"   "Fetch all/marked"  magit-dash-fetch-all)
-    ("pa"   "Pull all/marked"   magit-dash-pull-all)
-    ("pu"   "Push all/marked"   magit-dash-push-all)
-    ("sa"   "Sync all"          magit-dash-sync-all)
-    ("ca"   "Commit all"        magit-dash-commit-all)
-    ("aa"   "Autosync all"      magit-dash-auto-sync)
-    ("mt"   "Mark by tag"       magit-dash-mark-by-tag)
-    ("su"   "Update submodules all/marked" magit-dash-submodule-update-all)]
+    ("fa"   "Fetch"          magit-dash-fetch-all)
+    ("pa"   "Pull"           magit-dash-pull-all)
+    ("pu"   "Push"           magit-dash-push-all)
+    ("sa"   "Sync"           magit-dash-sync-all)
+    ("ca"   "Commit"         magit-dash-commit-all)
+    ("aa"   "Autosync"       magit-dash-auto-sync)
+    ("su"   "Update submodules" magit-dash-submodule-update-all)]
    ["Dashboard"
     ("pr"   "Open PR dashboard" magit-dash-gh-pr-dashboard-open)
     ("nt"   "Filter by tag"     magit-dash-filter-by-tag)
