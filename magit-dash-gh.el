@@ -339,10 +339,15 @@ in-memory cache is already populated."
 ;;; Shared utilities
 
 (defmacro magit-dash-gh--with-repo-dir (path &rest body)
-  "Execute BODY with `default-directory' set to PATH."
+  "Execute BODY with `default-directory' set to PATH.
+Binds via let (the standard with- idiom) and also sets it buffer-locally
+so the value persists through transient interactions."
   (declare (indent 1))
-  `(let ((default-directory ,path))
-     ,@body))
+  (let ((p (make-symbol "path")))
+    `(let* ((,p ,path)
+             (default-directory ,p))
+       (setq-local default-directory ,p)
+       ,@body)))
 
 (defun magit-dash-gh--add-file (ctx path type)
   "Return CTX with a new {:path PATH :type TYPE} entry appended to :files."

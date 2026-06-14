@@ -1225,8 +1225,8 @@ Repos are ordered by :sort-hint; discovered worktrees follow their parent."
 (defun magit-dash-magit-status ()
   "Open a magit status buffer for the repository at point."
   (interactive)
-  (magit-status-setup-buffer
-   (magit-dash-repo-path (magit-dash--repo-at-point))))
+  (with-magit-from-dashboard (magit-dash--repo-at-point)
+    (magit-status-setup-buffer default-directory)))
 
 (defun magit-dash-magit-diff ()
   "Open a magit diff (dwim) buffer for the repository at point."
@@ -1597,11 +1597,16 @@ Signals `user-error' when `magit-dash-repo-list' is empty."
 
 (defmacro with-magit-from-dashboard (repo &rest body)
   "Execute BODY with default-directory set to REPO path.
-Designed for magit operations invoked from the dashboard.
-Lighter than `with-magit-dash'; repo is already fetched."
+Binds default-directory via let (the standard with- idiom) and also sets
+it buffer-locally so the value persists through transient interactions:
+transient prefixes return immediately after showing their popup, meaning
+a let-binding alone would exit before the user selects a suffix."
   (declare (indent 1))
-  `(let ((default-directory (magit-dash-repo-path ,repo)))
-     ,@body))
+  (let ((path (make-symbol "path")))
+    `(let* ((,path (magit-dash-repo-path ,repo))
+             (default-directory ,path))
+       (setq-local default-directory ,path)
+       ,@body)))
 
 ;;;; Repo overview buffer
 
@@ -1661,8 +1666,8 @@ Lighter than `with-magit-dash'; repo is already fetched."
 (defun magit-dash-overview-magit-status ()
   "Open magit status for this overview's repository."
   (interactive)
-  (magit-status-setup-buffer
-   (magit-dash-repo-path (magit-dash-overview--current-repo))))
+  (magit-dash-gh--with-repo-dir (magit-dash-repo-path (magit-dash-overview--current-repo))
+    (magit-status-setup-buffer default-directory)))
 
 (defun magit-dash-overview-magit-diff ()
   "Open magit diff (dwim) for this overview's repository."
@@ -1739,7 +1744,7 @@ Signals `user-error' when no auto operations are configured for this repo."
 (defun magit-dash-overview-push ()
   "Push current branch to its push remote for this overview's repository."
   (interactive)
-  (let ((default-directory (magit-dash-repo-path (magit-dash-overview--current-repo))))
+  (magit-dash-gh--with-repo-dir (magit-dash-repo-path (magit-dash-overview--current-repo))
     (magit-push-current-to-pushremote nil)))
 
 (defun magit-dash-overview-run-command ()
