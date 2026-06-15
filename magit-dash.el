@@ -735,11 +735,70 @@ ON-ALL-DONE with an alist of (NAME . STATUS)."
   (magit-dash--maybe-refresh))
 
 (defun magit-dash-cache-reset-at-point ()
-  "Clear cache for repository at point and refresh its stats asynchronously."
+  "Clear cache for repository at point, re-collect stats synchronously, and refresh."
   (interactive)
   (when-let* ((repo (magit-dash--repo-at-point)))
-    (magit-dash-gh--cache-remove (magit-dash-repo-path repo))
-    (magit-dash-refresh)))
+    (let* ((path (magit-dash-repo-path repo))
+           (stats (progn
+                    (magit-dash-gh--cache-remove path)
+                    (magit-dash--collect-stats repo))))
+      (magit-dash-gh--cache-set path :stats stats)
+      (magit-dash--maybe-refresh))))
+
+(defun magit-dash-cache-diagnose ()
+  "Report cache health for all registered repos.
+Shows a one-line summary message and opens a detail buffer when issues are found."
+  (interactive)
+  (let ((warnings 0)
+        (errors 0)
+        (lines nil))
+    (seq-do
+     (lambda (repo)
+       (let* ((path (magit-dash-repo-path repo))
+              (name (magit-dash-repo-name repo))
+              (stats (magit-dash-gh--cache-get path :stats)))
+         (cond
+          ((null stats)
+           (setq warnings (1+ warnings))
+           (push (format "  WARNING %s: no stats cached" name) lines))
+          ((not (plist-member stats :head-hash))
+           (setq errors (1+ errors))
+           (push (format "  ERROR %s: stats missing :head-hash field" name) lines)))))
+     magit-dash-repo-list)
+    (message "%d repo(s): %d warning(s), %d error(s)"
+             (length magit-dash-repo-list) warnings errors)
+    (when (or (> warnings 0) (> errors 0))
+      (let ((buf (get-buffer-create "*magit-dash-cache-diagnose*")))
+        (with-current-buffer buf
+          (let ((inhibit-read-only t))
+            (erase-buffer)
+            (insert (format "Cache diagnostics — %d warning(s), %d error(s)\n\n"
+                            warnings errors))
+            (seq-do (lambda (l) (insert l "\n")) (nreverse lines))))
+        (pop-to-buffer buf)
+        (view-mode 1)))))
+
+(defun magit-dash-cache-stats ()
+  "Show per-repository cache status in a read-only buffer."
+  (interactive)
+  (let ((buf (get-buffer-create "*magit-dash-cache-stats*")))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (seq-do
+         (lambda (repo)
+           (let* ((path (magit-dash-repo-path repo))
+                  (stats (magit-dash-gh--cache-get path :stats))
+                  (pr-counts (magit-dash-gh--cache-get path :pr-counts))
+                  (ci (magit-dash-gh--cache-get path :ci-status)))
+             (insert (format "Repository: %s\n" (magit-dash-repo-name repo)))
+             (insert (format "  Stats cached: %s\n" (if stats "yes" "no")))
+             (insert (format "  PR counts cached: %s\n" (if pr-counts "yes" "no")))
+             (insert (format "  CI status cached: %s\n" (if ci "yes" "no")))
+             (insert "\n")))
+         magit-dash-repo-list)))
+    (pop-to-buffer buf)
+    (view-mode 1)))
 
 ;;;; Worktree support
 
@@ -1205,12 +1264,12 @@ Emits a status message with repo counts; updates dashboard rows as each finishes
 (defun magit-dash--repo-type-rank (repo)
   "Return a sort rank for REPO based on its git context type.
 0 = plain repo, 1 = worktree, 2 = tracked submodule, 3 = missing submodule."
-  (+ (magit-dash-repo-sort-hint repo)
+  (+ (or (magit-dash-repo-sort-hint repo) 0)
      (cond
       ((magit-dash-repo-worktree repo) 1)
-      ((eq (magit-dash-repo-submodule repo) 'missing) 5)
+      ((eq (magit-dash-repo-submodule repo) 'missing) 3)
       ((and magit-dash--submodule-path-set
-            (map-elt magit-dash--submodule-path-set (magit-dash-repo-path repo))) 5)
+            (map-elt magit-dash--submodule-path-set (magit-dash-repo-path repo))) 3)
       ((magit-dash-repo-submodule repo) 2)
       (t 0))))
 

@@ -104,7 +104,7 @@ Returns a list of plists :id :resolved :path :creator :last-commentor.
          (author   (map-elt (map-elt pr-info 'author) 'login))
          (has-unresolved (seq-some (lambda (th) (not (plist-get th :resolved)))
                                    threads))
-         (data (magit-gh--index-table
+         (data (magit-dash-gh--index-table
                 "collected_at"           (format-time-string "%Y-%m-%dT%H:%M:%SZ" nil t)
                 "type"                   "pr"
                 "pr_number"              (or (map-elt pr-info 'number) 0)
@@ -117,14 +117,14 @@ Returns a list of plists :id :resolved :path :creator :last-commentor.
                 "artifact_count"         (length files)
                 "files"                  (apply #'vector
                                                 (seq-map (lambda (f)
-                                                           (magit-gh--file-table
+                                                           (magit-dash-gh--file-table
                                                             (plist-get f :path)
                                                             (plist-get f :type)))
                                                          files))
                 "threads"                (apply #'vector
                                                 (seq-map #'magit-dash-gh-pr--thread-table
                                                          threads)))))
-    (magit-gh--write-index dir data)
+    (magit-dash-gh--write-index dir data)
     (message "magit-gh-pr: done — %d file(s) in %s" (length files) dir)))
 
 (defun magit-dash-gh-pr--step-comments (ctx)
@@ -135,7 +135,7 @@ Returns a list of plists :id :resolved :path :creator :last-commentor.
          (repo-dir (plist-get ctx :repo-dir))
          (endpoint (format "/repos/%s/%s/issues/%s/comments" owner repo pr-num)))
     (message "magit-gh-pr: fetching issue comments...")
-    (magit-gh--run-process
+    (magit-dash-gh--run-process
      (list "api" endpoint "--paginate")
      repo-dir
      (lambda (output)
@@ -143,8 +143,8 @@ Returns a list of plists :id :resolved :path :creator :last-commentor.
          (with-temp-file (expand-file-name file (plist-get ctx :dir))
            (insert output))
          (magit-dash-gh-pr--step-finalize
-          (magit-gh--add-file ctx file "issue-comments"))))
-     (magit-gh--make-error-handler "magit-gh-pr" "issue-comments"))))
+          (magit-dash-gh--add-file ctx file "issue-comments"))))
+     (magit-dash-gh--make-error-handler "magit-gh-pr" "issue-comments"))))
 
 (defun magit-dash-gh-pr--step-threads (ctx)
   "Fetch review threads via GraphQL, write pr-review-threads.json."
@@ -153,7 +153,7 @@ Returns a list of plists :id :resolved :path :creator :last-commentor.
          (pr-num   (plist-get ctx :pr-number))
          (repo-dir (plist-get ctx :repo-dir)))
     (message "magit-gh-pr: fetching review threads...")
-    (magit-gh--run-process
+    (magit-dash-gh--run-process
      (list "api" "graphql"
            "-f" (format "query=%s" (magit-dash-gh-pr--graphql-query))
            "-F" (format "owner=%s" owner)
@@ -169,10 +169,10 @@ Returns a list of plists :id :resolved :path :creator :last-commentor.
          (with-temp-file (expand-file-name file (plist-get ctx :dir))
            (insert output))
          (magit-dash-gh-pr--step-comments
-          (magit-gh--add-file
+          (magit-dash-gh--add-file
            (plist-put ctx :threads threads)
            file "review-threads"))))
-     (magit-gh--make-error-handler "magit-gh-pr" "review-threads"))))
+     (magit-dash-gh--make-error-handler "magit-gh-pr" "review-threads"))))
 
 (defun magit-dash-gh-pr--step-info (ctx)
   "Fetch PR metadata, write pr-info.json, then continue to threads."
@@ -184,7 +184,7 @@ Returns a list of plists :id :resolved :path :creator :last-commentor.
                     '("--json"
                       "number,title,state,author,body,createdAt,updatedAt,reviewDecision,headRefName,baseRefName"))))
     (message "magit-gh-pr: fetching PR info...")
-    (magit-gh--run-process
+    (magit-dash-gh--run-process
      args
      repo-dir
      (lambda (output)
@@ -192,8 +192,8 @@ Returns a list of plists :id :resolved :path :creator :last-commentor.
               (pr-num   (map-elt pr-info 'number))
               (branch   (or (map-elt pr-info 'headRefName)
                             (plist-get ctx :branch)))
-              (slug     (magit-gh--branch-slug branch))
-              (dir      (magit-gh--collect-dir
+              (slug     (magit-dash-gh--branch-slug branch))
+              (dir      (magit-dash-gh--collect-dir
                          (plist-get ctx :root) 'pr slug pr-num))
               (file     "pr-info.json")
               (ctx2     (copy-sequence ctx))
@@ -203,8 +203,8 @@ Returns a list of plists :id :resolved :path :creator :last-commentor.
          (with-temp-file (expand-file-name file dir)
            (insert output))
          (magit-dash-gh-pr--step-threads
-          (magit-gh--add-file ctx2 file "metadata"))))
-     (magit-gh--make-error-handler "magit-gh-pr" "pr-info"))))
+          (magit-dash-gh--add-file ctx2 file "metadata"))))
+     (magit-dash-gh--make-error-handler "magit-gh-pr" "pr-info"))))
 
 ;;; Public API
 
@@ -219,12 +219,12 @@ Creates an artifact directory under plans/ containing:
   pr-issue-comments.json  — top-level (non-review) comments
   index.json              — collection summary with per-thread creator/last-commentor"
   (interactive)
-  (magit-gh--check-gh)
-  (let* ((repo-dir  (magit-gh--repo-dir))
+  (magit-dash-gh--check-gh)
+  (let* ((repo-dir  (magit-dash-gh--repo-dir))
          (root      (or (magit-toplevel)
                         (user-error "Not inside a git repository")))
          (branch    (magit-get-current-branch))
-         (repo-info (magit-gh--repo-info))
+         (repo-info (magit-dash-gh--repo-info))
          (ctx       (list :branch   branch
                           :root     root
                           :repo-dir repo-dir
@@ -316,9 +316,15 @@ with a minimum of 12."
       (error "?"))))
 
 (defun magit-dash-gh-pr-dashboard--comments-count (pr)
-  "Return the comment count from PR alist."
-  (let ((c (map-elt pr 'commentsCount)))
-    (if (numberp c) c 0)))
+  "Return the comment count from PR alist.
+Handles both an integer `comments' field and a nested `(totalCount . N)' alist,
+as well as a top-level `commentsCount' integer."
+  (let ((c (map-elt pr 'comments)))
+    (cond
+     ((numberp c) c)
+     ((and c (map-elt c 'totalCount)) (map-elt c 'totalCount))
+     (t (let ((n (map-elt pr 'commentsCount)))
+          (if (numberp n) n 0))))))
 
 (defun magit-dash-gh-pr-dashboard--build-args (filters)
   "Return a gh args list for fetching PRs matching FILTERS plist.
@@ -384,12 +390,12 @@ Returns nil when OUTPUT is not a JSON array."
   (let* ((filters magit-dash-gh-pr-dashboard--filters)
          (args (magit-dash-gh-pr-dashboard--build-args filters))
          (buf (current-buffer))
-         (dir (or (ignore-errors (magit-gh--repo-dir))
+         (dir (or (ignore-errors (magit-dash-gh--repo-dir))
                   (expand-file-name "~"))))
     (setq tabulated-list-entries nil)
     (tabulated-list-print t)
     (message "magit-gh: fetching PRs...")
-    (magit-gh--run-process
+    (magit-dash-gh--run-process
      args dir
      (lambda (output)
        (when (buffer-live-p buf)
@@ -452,7 +458,7 @@ Returns nil when OUTPUT is not a JSON array."
 (defun magit-dash-gh-pr-dashboard-open ()
   "Open the pull request dashboard buffer."
   (interactive)
-  (magit-gh--check-gh)
+  (magit-dash-gh--check-gh)
   (let ((buf (get-buffer-create "*magit-gh-prs*")))
     (with-current-buffer buf
       (magit-dash-gh-pr-dashboard-mode)
@@ -478,12 +484,12 @@ component of REPO-SLUG against the final directory component of each entry."
 (defun magit-dash-gh-pr-dashboard-fetch-ci ()
   "Fetch GitHub Actions CI logs for the pull request at point."
   (interactive)
-  (require 'magit-gh-ci)
+  (require 'magit-dash-gh-actions)
   (let* ((entry (magit-dash-gh-pr-dashboard--entry-at-point))
          (repo (plist-get entry :repo))
          (path (or (magit-dash-gh-pr-dashboard--find-local-path repo)
                    (user-error "No registered local checkout for %s" repo))))
-    (magit-gh-ci-fetch-for-pr (plist-get entry :number) path)))
+    (magit-dash-gh-actions-fetch-for-pr (plist-get entry :number) path)))
 
 (transient-define-prefix magit-dash-gh-pr-dashboard-menu ()
   "Actions for the PR dashboard."

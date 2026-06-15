@@ -257,13 +257,13 @@
 ;;; magit-dash-gh-pr-dashboard-fetch-ci
 
 (ert-deftest magit-dash-gh-pr/dashboard-fetch-ci-calls-ci-fetch ()
-  "fetch-ci extracts pr-number and local path, then calls magit-gh-ci-fetch-for-pr."
+  "fetch-ci extracts pr-number and local path, then calls magit-dash-gh-actions-fetch-for-pr."
   (let ((fetch-args nil))
     (cl-letf (((symbol-function 'magit-dash-gh-pr-dashboard--entry-at-point)
                (lambda () '(:number 42 :repo "owner/myrepo" :pr nil)))
               ((symbol-function 'magit-dash-gh-pr-dashboard--find-local-path)
                (lambda (_) "/repos/myrepo"))
-              ((symbol-function 'magit-gh-ci-fetch-for-pr)
+              ((symbol-function 'magit-dash-gh-actions-fetch-for-pr)
                (lambda (num path) (setq fetch-args (list num path)))))
       (magit-dash-gh-pr-dashboard-fetch-ci)
       (should (equal '(42 "/repos/myrepo") fetch-args)))))

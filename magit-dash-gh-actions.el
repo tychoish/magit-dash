@@ -110,7 +110,7 @@ When RUNS has exactly one entry it is returned directly without prompting."
          (run-info (plist-get ctx :run-info))
          (files    (plist-get ctx :files))
          (conclusion (or (map-elt run-info 'conclusion) "in_progress"))
-         (data (magit-gh--index-table
+         (data (magit-dash-gh--index-table
                 "collected_at"  (format-time-string "%Y-%m-%dT%H:%M:%SZ" nil t)
                 "type"          "ci"
                 "branch"        (or (map-elt run-info 'headBranch) "")
@@ -122,11 +122,11 @@ When RUNS has exactly one entry it is returned directly without prompting."
                 "artifact_count" (length files)
                 "files"         (apply #'vector
                                        (seq-map (lambda (f)
-                                                  (magit-gh--file-table
+                                                  (magit-dash-gh--file-table
                                                    (plist-get f :path)
                                                    (plist-get f :type)))
                                                 files)))))
-    (magit-gh--write-index dir data)
+    (magit-dash-gh--write-index dir data)
     (message "magit-gh-ci: done — %d file(s) in %s" (length files) dir)
     (when magit-dash-gh-actions-open-dired
       (dired dir))))
@@ -140,7 +140,7 @@ When RUNS has exactly one entry it is returned directly without prompting."
     (if (and magit-dash-gh-actions-include-failed-log (magit-dash-gh-actions--failure-p conclusion))
         (progn
           (message "magit-gh-ci: fetching failed-step logs...")
-          (magit-gh--run-process
+          (magit-dash-gh--run-process
            (list "run" "view" run-id "--log-failed")
            repo-dir
            (lambda (output)
@@ -148,8 +148,8 @@ When RUNS has exactly one entry it is returned directly without prompting."
                (with-temp-file (expand-file-name file (plist-get ctx :dir))
                  (insert output))
                (magit-dash-gh-actions--step-finalize
-                (magit-gh--add-file ctx file "failed-logs"))))
-           (magit-gh--make-error-handler "magit-gh-ci" "failed-logs")))
+                (magit-dash-gh--add-file ctx file "failed-logs"))))
+           (magit-dash-gh--make-error-handler "magit-gh-ci" "failed-logs")))
       (magit-dash-gh-actions--step-finalize ctx))))
 
 (defun magit-dash-gh-actions--step-logs (ctx)
@@ -158,7 +158,7 @@ When RUNS has exactly one entry it is returned directly without prompting."
          (run-id   (number-to-string (map-elt run-info 'databaseId)))
          (repo-dir (plist-get ctx :repo-dir)))
     (message "magit-gh-ci: fetching full logs (run #%s, may be large)..." run-id)
-    (magit-gh--run-process
+    (magit-dash-gh--run-process
      (list "run" "view" run-id "--log")
      repo-dir
      (lambda (output)
@@ -166,25 +166,25 @@ When RUNS has exactly one entry it is returned directly without prompting."
          (with-temp-file (expand-file-name file (plist-get ctx :dir))
            (insert output))
          (magit-dash-gh-actions--step-failed-logs
-          (magit-gh--add-file ctx file "logs"))))
-     (magit-gh--make-error-handler "magit-gh-ci" "logs"))))
+          (magit-dash-gh--add-file ctx file "logs"))))
+     (magit-dash-gh--make-error-handler "magit-gh-ci" "logs"))))
 
 (defun magit-dash-gh-actions--step-run-info (ctx)
   "Fetch full run metadata, write run-info.json, then fetch logs."
   (let* ((run-id   (number-to-string (plist-get ctx :run-id)))
          (repo-dir (plist-get ctx :repo-dir)))
     (message "magit-gh-ci: fetching run info for #%s..." run-id)
-    (magit-gh--run-process
+    (magit-dash-gh--run-process
      (list "run" "view" run-id "--json"
            "databaseId,name,status,conclusion,createdAt,updatedAt,headBranch,headSha,event,workflowName,jobs")
      repo-dir
      (lambda (output)
        (let* ((run-info (json-parse-string output :object-type 'alist))
               (file     "run-info.json")
-              (slug     (magit-gh--branch-slug
+              (slug     (magit-dash-gh--branch-slug
                          (or (map-elt run-info 'headBranch)
                              (plist-get ctx :branch))))
-              (dir      (magit-gh--collect-dir
+              (dir      (magit-dash-gh--collect-dir
                          (plist-get ctx :root) 'ci slug
                          (map-elt run-info 'databaseId)))
               (ctx2     (plist-put (copy-sequence ctx) :run-info run-info))
@@ -192,15 +192,15 @@ When RUNS has exactly one entry it is returned directly without prompting."
          (with-temp-file (expand-file-name file dir)
            (insert output))
          (magit-dash-gh-actions--step-logs
-          (magit-gh--add-file ctx2 file "metadata"))))
-     (magit-gh--make-error-handler "magit-gh-ci" "run-info"))))
+          (magit-dash-gh--add-file ctx2 file "metadata"))))
+     (magit-dash-gh--make-error-handler "magit-gh-ci" "run-info"))))
 
 (defun magit-dash-gh-actions--step-list (ctx)
   "List recent CI runs for the current branch and let the user select one."
   (let* ((branch   (plist-get ctx :branch))
          (repo-dir (plist-get ctx :repo-dir)))
     (message "magit-gh-ci: listing runs for %s..." branch)
-    (magit-gh--run-process
+    (magit-dash-gh--run-process
      (list "run" "list"
            "--branch" branch
            "--limit" (number-to-string magit-dash-gh-actions-run-limit)
@@ -214,7 +214,7 @@ When RUNS has exactly one entry it is returned directly without prompting."
                 (run-id (map-elt run 'databaseId)))
            (magit-dash-gh-actions--step-run-info
             (plist-put ctx :run-id run-id)))))
-     (magit-gh--make-error-handler "magit-gh-ci" "run-list"))))
+     (magit-dash-gh--make-error-handler "magit-gh-ci" "run-list"))))
 
 ;;; PR-scoped pipeline entry
 
@@ -223,7 +223,7 @@ When RUNS has exactly one entry it is returned directly without prompting."
   (let* ((pr-number (plist-get ctx :pr-number))
          (repo-dir (plist-get ctx :repo-dir)))
     (message "magit-gh-ci: listing runs for PR #%d..." pr-number)
-    (magit-gh--run-process
+    (magit-dash-gh--run-process
      (list "run" "list"
            "--pr" (number-to-string pr-number)
            "--limit" (number-to-string magit-dash-gh-actions-run-limit)
@@ -238,7 +238,7 @@ When RUNS has exactly one entry it is returned directly without prompting."
                 (branch (or (map-elt run 'headBranch) "")))
            (magit-dash-gh-actions--step-run-info
             (plist-put (plist-put ctx :run-id run-id) :branch branch)))))
-     (magit-gh--make-error-handler "magit-gh-ci" "pr-run-list"))))
+     (magit-dash-gh--make-error-handler "magit-gh-ci" "pr-run-list"))))
 
 ;;; Public API
 
@@ -247,7 +247,7 @@ When RUNS has exactly one entry it is returned directly without prompting."
   "Fetch GitHub Actions CI logs for PR-NUMBER using REPO-DIR as the working directory.
 PR-NUMBER is an integer.  REPO-DIR must be a local checkout of the repository
 so that `gh' can resolve the remote when listing and downloading runs."
-  (magit-gh--check-gh)
+  (magit-dash-gh--check-gh)
   (let ((ctx (list :pr-number pr-number
                    :branch ""
                    :root repo-dir
@@ -267,8 +267,8 @@ Creates an artifact directory under plans/ containing:
   run-failed-logs.ghlog — failed-step logs (when `magit-dash-gh-actions-include-failed-log')
   index.json           — collection summary"
   (interactive)
-  (magit-gh--check-gh)
-  (let* ((repo-dir (magit-gh--repo-dir))
+  (magit-dash-gh--check-gh)
+  (let* ((repo-dir (magit-dash-gh--repo-dir))
          (root     (or (magit-toplevel)
                        (user-error "Not inside a git repository")))
          (branch   (or (magit-get-current-branch)

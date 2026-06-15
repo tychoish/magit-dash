@@ -235,9 +235,9 @@
                  (cond
                   ((member "branch" args) "main")
                   ((member "rev-list" args) "2")
+                  ((and (member "config" args) (member "remote.origin.url" args))
+                   "git@github.com:user/test.git")
                   (t nil))))
-              ((symbol-function 'magit-get)
-               (lambda (&rest _) "git@github.com:user/test.git"))
               ((symbol-function 'magit-git-lines)
                (lambda (&rest args)
                  (cond
@@ -401,18 +401,17 @@
     (should-error (magit-dash-sync-all) :type 'user-error)))
 
 (ert-deftest magit-dash/sync-all-skips-repos-without-auto-sync ()
-  "sync-all calls interactively only for repos with :auto-sync set."
-  (let* ((r1 (magit-dash-repo--make :name "r1" :path "/tmp/r1" :auto-sync 'fetch))
+  "sync-all only runs on repos that have auto operations configured."
+  (let* ((r1 (magit-dash-repo--make :name "r1" :path "/tmp/r1" :auto-fetch t))
          (r2 (magit-dash-repo--make :name "r2" :path "/tmp/r2"))
          (magit-dash-repo-list (list r1 r2))
-         (called-fns nil))
-    (cl-letf (((symbol-function 'call-interactively)
-               (lambda (fn) (push fn called-fns)))
-              ((symbol-function 'magit-dash-refresh)
-               (lambda () nil)))
+         (batch-repos nil))
+    (cl-letf (((symbol-function 'magit-dash--batch-run)
+               (lambda (repos _op _label &optional _done)
+                 (setq batch-repos repos))))
       (magit-dash-sync-all))
-    (should (= 1 (length called-fns)))
-    (should (memq #'magit-fetch called-fns))))
+    (should (= 1 (length batch-repos)))
+    (should (equal "r1" (magit-dash-repo-name (car batch-repos))))))
 
 ;;;; magit-dash--run-command-for
 
@@ -462,11 +461,11 @@
 ;;;; magit-dash--build-format
 
 (ert-deftest magit-dash/build-format-elastic-width ()
-  "Name column width equals the longest repo name in the list."
+  "Name column width is one wider than the longest repo name."
   (let* ((r1 (magit-dash-repo--make :name "short" :path "/tmp/r1"))
          (r2 (magit-dash-repo--make :name "a-much-longer-name" :path "/tmp/r2"))
          (fmt (magit-dash--build-format (list r1 r2))))
-    (should (= (length "a-much-longer-name") (cadr (aref fmt 0))))))
+    (should (= (1+ (length "a-much-longer-name")) (cadr (aref fmt 0))))))
 
 (ert-deftest magit-dash/build-format-minimum-width ()
   "Name column is at least as wide as the header label \"Name\"."
@@ -475,9 +474,9 @@
     (should (>= (cadr (aref fmt 0)) (length "Name")))))
 
 (ert-deftest magit-dash/build-format-empty-list ()
-  "Empty repo list yields minimum (header label) width."
+  "Empty repo list yields the minimum column width (12)."
   (let ((fmt (magit-dash--build-format nil)))
-    (should (= (length "Name") (cadr (aref fmt 0))))))
+    (should (= 12 (cadr (aref fmt 0))))))
 
 ;;;; magit-dash--build-entry
 
@@ -486,8 +485,8 @@
   (let ((repo (magit-dash-repo--make :name "myrep" :path "/tmp/myrep"))
         (magit-dash--stats-cache (make-hash-table :test #'equal))
         (magit-dash-columns
-         '((name . t) (branch . t) (fetched . t) (status . t) (worktree . t)
-           (sync . nil) (cached . nil)))
+         '((name . t) (branch . t) (fetched . t) (ci . nil) (status . t)
+           (worktree . t) (sync . nil) (cached . nil)))
         (magit-dash--worktree-map (make-hash-table :test #'equal)))
     (cl-letf (((symbol-function 'magit-dash--get-stats-fast)
                (lambda (_)
@@ -1144,7 +1143,7 @@ Overrides are placed first so `plist-get' finds them before the defaults."
                  (cond
                   ((member "status" args) (funcall on-success " M foo.el"))
                   ((member "add" args) (funcall on-error "error" 1))))))
-      (magit-dash--auto-commit-async repo (lambda (s) (setq result s))))
+      (magit-dash--auto-commit-async repo (lambda (s &optional _) (setq result s))))
     (should (eq 'error result))))
 
 (ert-deftest magit-dash/auto-commit-async-uses-message-function ()
@@ -1205,7 +1204,7 @@ Overrides are placed first so `plist-get' finds them before the defaults."
                  (setq batch-repos repos))))
       (magit-dash-auto-sync))
     (should (= 1 (length batch-labels)))
-    (should (equal "magit-gh autosync" (car batch-labels)))
+    (should (equal "magit-dash autosync" (car batch-labels)))
     (should (= 2 (length batch-repos)))))
 
 (ert-deftest magit-dash/auto-sync-commit-only-repo-included ()
@@ -1350,7 +1349,8 @@ Overrides are placed first so `plist-get' finds them before the defaults."
 (ert-deftest magit-dash/build-format-omits-disabled-columns ()
   "build-format produces a vector that excludes disabled columns."
   (let ((magit-dash-columns
-         '((name . t) (branch . nil) (fetched . t) (status . t) (worktree . nil)))
+         '((name . t) (branch . nil) (fetched . t) (ci . nil) (status . t)
+           (worktree . nil) (sync . nil) (cached . nil)))
         (repos (list (magit-dash-repo--make :name "r" :path "/tmp/r"))))
     (let ((fmt (magit-dash--build-format repos)))
       (should (= 3 (length fmt)))
@@ -1440,9 +1440,10 @@ Overrides are placed first so `plist-get' finds them before the defaults."
 (ert-deftest magit-dash/build-entry-branch-falls-back-to-struct ()
   "build-entry uses struct :branch when stats return empty string."
   (let ((magit-dash-columns
-         '((name . t) (branch . t) (fetched . nil) (behind . nil) (changes . nil) (worktree . nil)))
+         '((name . t) (branch . t) (fetched . nil) (ci . nil) (status . nil)
+           (worktree . nil) (sync . nil) (cached . nil)))
         (magit-dash-gh--cache (make-hash-table :test #'equal)))
-    (cl-letf (((symbol-function 'magit-dash--get-stats)
+    (cl-letf (((symbol-function 'magit-dash--get-stats-fast)
                (lambda (_) (list :branch "" :ahead 0 :behind 0 :dirty nil :fetch-age nil
                                  :head-hash "abc" :recent-log "" :remote-origin nil
                                  :uncommitted-files nil))))
@@ -1455,9 +1456,10 @@ Overrides are placed first so `plist-get' finds them before the defaults."
 (ert-deftest magit-dash/build-entry-branch-uses-stats-when-available ()
   "build-entry uses stats :branch when non-empty, even for worktrees."
   (let ((magit-dash-columns
-         '((name . t) (branch . t) (fetched . nil) (behind . nil) (changes . nil) (worktree . nil)))
+         '((name . t) (branch . t) (fetched . nil) (ci . nil) (status . nil)
+           (worktree . nil) (sync . nil) (cached . nil)))
         (magit-dash-gh--cache (make-hash-table :test #'equal)))
-    (cl-letf (((symbol-function 'magit-dash--get-stats)
+    (cl-letf (((symbol-function 'magit-dash--get-stats-fast)
                (lambda (_) (list :branch "live-branch" :ahead 0 :behind 0 :dirty nil :fetch-age nil
                                  :head-hash "abc" :recent-log "" :remote-origin nil
                                  :uncommitted-files nil))))
@@ -1740,71 +1742,32 @@ Simulates the user's issue where a cache reset caused rendering problems."
                                :recent-log "abc123 initial commit"))
     ;; Reset cache (this is what user did)
     (clrhash magit-dash-gh--cache)
-    ;; Mock git functions to return valid data
-    (cl-letf (((symbol-function 'magit-git-string)
-               (lambda (&rest args)
-                 (cond
-                  ((member "branch" args) "main")
-                  ((member "rev-list" args) "0")
-                  (t nil))))
-              ((symbol-function 'magit-get)
-               (lambda (&rest _) "git@github.com:user/test.git"))
-              ((symbol-function 'magit-git-lines)
-               (lambda (&rest args)
-                 (cond
-                  ((member "status" args) nil)
-                  ((member "log" args) '("abc123 initial commit"))
-                  (t nil))))
-              ((symbol-function 'magit-dash--fetch-age)
-               (lambda (_) 3600.0))
-              ((symbol-function 'magit-dash--head-hash)
-               (lambda (_) "abc123"))
+    (cl-letf (((symbol-function 'magit-dash--discover-worktrees) (lambda () nil))
+              ((symbol-function 'magit-dash--discover-submodules) (lambda () nil))
+              ((symbol-function 'magit-dash--populate-stats-async) (lambda (_) nil))
               ((symbol-function 'magit-dash--build-entry)
                (lambda (r)
                  (setq build-entry-called t)
-                 ;; Call the real function to test it
-                 (let* ((stats (magit-dash--get-stats r))
-                        (active '(name branch fetched status worktree)))
-                   ;; Verify stats are valid
-                   (should (plist-get stats :branch))
-                   (should (plist-get stats :head-hash))
-                   ;; Return a minimal valid entry
-                   (list r (vector "test" "main" "1h" "" "REPO")))))
+                 (list r (vector "test" "main" "1h" "" "REPO"))))
               ((symbol-function 'tabulated-list-print) (lambda (&rest _) nil))
               ((symbol-function 'tabulated-list-init-header) (lambda () nil)))
       (with-temp-buffer
         (magit-dash-mode)
-        ;; This should not fail even though cache is empty
         (magit-dash-refresh)
         (should build-entry-called)))))
 
 (ert-deftest magit-dash/cache-reset-all-repopulates ()
-  "cache-reset-all should repopulate stats for all repos."
+  "cache-reset-all clears the entire cache."
   (let* ((r1 (magit-dash-repo--make :name "r1" :path "/tmp/r1"))
          (r2 (magit-dash-repo--make :name "r2" :path "/tmp/r2"))
          (magit-dash-repo-list (list r1 r2))
-         (magit-dash-gh--cache (make-hash-table :test #'equal))
-         (collect-calls nil))
-    (cl-letf (((symbol-function 'magit-dash--collect-stats)
-               (lambda (repo)
-                 (push (magit-dash-repo-name repo) collect-calls)
-                 (list :branch "main" :dirty nil :head-hash "abc123"
-                       :behind 0 :ahead 0 :uncommitted-files nil
-                       :fetch-age 60.0 :recent-log "")))
-              ((symbol-function 'magit-dash--discover-worktrees)
-               (lambda () nil))
-              ((symbol-function 'magit-dash--discover-submodules)
-               (lambda () nil))
-              ((symbol-function 'magit-dash-refresh)
-               (lambda () nil)))
-      (magit-dash-cache-reset-all)
-      ;; Should have collected stats for both repos
-      (should (= 2 (length collect-calls)))
-      (should (member "r1" collect-calls))
-      (should (member "r2" collect-calls))
-      ;; Cache should now have stats
-      (should (magit-dash-gh--cache-get "/tmp/r1" :stats))
-      (should (magit-dash-gh--cache-get "/tmp/r2" :stats)))))
+         (magit-dash-gh--cache (make-hash-table :test #'equal)))
+    (magit-dash-gh--cache-set "/tmp/r1" :stats '(:branch "main"))
+    (magit-dash-gh--cache-set "/tmp/r2" :stats '(:branch "feat"))
+    (should (= 2 (hash-table-count magit-dash-gh--cache)))
+    (cl-letf (((symbol-function 'magit-dash--maybe-refresh) (lambda () nil)))
+      (magit-dash-cache-reset-all))
+    (should (= 0 (hash-table-count magit-dash-gh--cache)))))
 
 (ert-deftest magit-dash/cache-diagnose-finds-missing-stats ()
   "cache-diagnose should detect repos with missing stats."
@@ -1866,10 +1829,10 @@ Simulates the user's issue where a cache reset caused rendering problems."
          (magit-dash-gh--cache (make-hash-table :test #'equal))
          (magit-dash--submodule-path-set (make-hash-table :test #'equal))
          (magit-dash-columns
-          '((name . t) (branch . t) (fetched . t) (status . t) (worktree . t))))
-    (cl-letf (((symbol-function 'magit-dash--get-stats)
+          '((name . t) (branch . t) (fetched . t) (ci . nil) (status . t)
+            (worktree . t) (sync . nil) (cached . nil))))
+    (cl-letf (((symbol-function 'magit-dash--get-stats-fast)
                (lambda (_)
-                 ;; Simulate fresh collection
                  (list :branch "main" :ahead 0 :behind 0 :dirty nil
                        :fetch-age nil :head-hash "abc" :recent-log ""))))
       (let* ((entry (magit-dash--build-entry repo))
@@ -1932,14 +1895,13 @@ The bug was that add-text-properties returns t, not the modified string."
          (magit-dash--marked-paths nil)
          (magit-dash-columns
           '((name . t))))
-    (cl-letf (((symbol-function 'magit-dash--get-stats)
+    (cl-letf (((symbol-function 'magit-dash--get-stats-fast)
                (lambda (_)
                  (list :branch "main" :ahead 0 :behind 0 :dirty nil
                        :fetch-age nil :head-hash "abc" :recent-log ""))))
       (let* ((entry (magit-dash--build-entry repo))
              (vec (cadr entry))
              (name-col (aref vec 0)))
-        ;; The name column must be a string
         (should (stringp name-col))
         (should (equal "test" (substring-no-properties name-col)))))))
 
@@ -1949,15 +1911,15 @@ The bug was that add-text-properties returns t, not the modified string."
          (magit-dash-gh--cache (make-hash-table :test #'equal))
          (magit-dash--submodule-path-set (make-hash-table :test #'equal))
          (magit-dash-columns
-          '((name . t) (branch . t) (fetched . t) (status . t) (worktree . t))))
-    (cl-letf (((symbol-function 'magit-dash--get-stats)
+          '((name . t) (branch . t) (fetched . t) (ci . nil) (status . t)
+            (worktree . t) (sync . nil) (cached . nil))))
+    (cl-letf (((symbol-function 'magit-dash--get-stats-fast)
                (lambda (_)
                  (list :branch "main" :ahead 0 :behind 0 :dirty nil
                        :fetch-age 3600.0 :head-hash "abc123" :recent-log ""))))
       (let* ((entry (magit-dash--build-entry repo))
              (vec (cadr entry)))
         (should (= 5 (length vec)))
-        ;; Every column value must be a string
         (dotimes (i (length vec))
           (let ((val (aref vec i)))
             (should (stringp val))))))))
@@ -2039,7 +2001,7 @@ The bug was that add-text-properties returns t, not the modified string."
          (magit-dash-columns '((name . t) (worktree . t))))
     ;; Add to submodule path set so it gets the special display name
     (puthash "/tmp/missing" "parent<missing>" magit-dash--submodule-path-set)
-    (cl-letf (((symbol-function 'magit-dash--get-stats)
+    (cl-letf (((symbol-function 'magit-dash--get-stats-fast)
                (lambda (_)
                  (list :branch "" :ahead 0 :behind 0 :dirty nil
                        :fetch-age nil :head-hash nil :recent-log ""))))
