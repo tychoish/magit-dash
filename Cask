@@ -15,6 +15,7 @@
 (depends-on "magit")
 (depends-on "transient")
 (depends-on "projectile")
+(depends-on "sprite" :git "https://github.com/tychoish/sprite.git" :branch "main")
 (depends-on "annotated-completing-read" :git "https://github.com/tychoish/annotated-completing-read.git" :branch "main")
 
 (development
