@@ -26,6 +26,7 @@
 
 (require 'cl-lib)
 (require 'map)
+
 (require 'magit-dash-gh)
 
 (declare-function magit-toplevel "magit-git")

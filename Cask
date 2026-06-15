@@ -14,6 +14,8 @@
 
 (depends-on "magit")
 (depends-on "transient")
+(depends-on "projectile")
+(depends-on "annotated-completing-read" :git "https://github.com/tychoish/annotated-completing-read.git" :branch "main")
 
 (development
  (depends-on "ert-runner"))

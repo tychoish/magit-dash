@@ -34,11 +34,12 @@
 (require 'tabulated-list)
 (require 'transient)
 (require 'magit)
-(require 'magit-dash-gh)
 
 (require 'annotated-completing-read)
 (require 'sprite)
+
 (require 'magit-dash-gh-ci)
+(require 'magit-dash-gh)
 
 (declare-function magit-status-setup-buffer "magit-status")
 (declare-function magit-diff-dwim "magit-diff")
