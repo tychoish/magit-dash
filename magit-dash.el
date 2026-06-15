@@ -3,7 +3,7 @@
 ;; Author: sam kleinman
 ;; Maintainer: tychoish
 ;; Version: 0.1
-;; Package-Requires: ((emacs "29.1") (magit "4.0") (transient "0.4") (magit-dash-gh "0.1"))
+;; Package-Requires: ((emacs "29.1") (magit "4.0") (transient "0.4"))
 ;; Keywords: vc, tools, magit, github
 ;; URL: https://github.com/tychoish/dot-emacs
 

@@ -4,6 +4,14 @@
 
 (package-file "magit-dash.el")
 
+(files "magit-dash.el"
+       "magit-dash-gh.el"
+       "magit-dash-gh-ci.el"
+       "magit-dash-gh-actions.el"
+       "magit-dash-gh-pr.el"
+       "magit-dash-open.el"
+       "magit-dash-submodules.el")
+
 (depends-on "magit")
 (depends-on "transient")
 
