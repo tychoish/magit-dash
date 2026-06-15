@@ -423,8 +423,14 @@
 ;;;; magit-dash-filter-by-tag
 
 (defmacro magit-dash-test--with-refresh-stubs (&rest body)
-  "Run BODY with tabulated-list side-effecting functions stubbed out."
-  `(cl-letf (((symbol-function 'tabulated-list-print) (lambda (&rest _) nil))
+  "Run BODY with `magit-dash-refresh' infrastructure stubbed out.
+Stubs discover-worktrees/submodules, populate-stats-async, and the
+tabulated-list render functions so tests can call `magit-dash-refresh'
+without real git repos or a live dashboard buffer."
+  `(cl-letf (((symbol-function 'magit-dash--discover-worktrees) (lambda () nil))
+             ((symbol-function 'magit-dash--discover-submodules) (lambda () nil))
+             ((symbol-function 'magit-dash--populate-stats-async) (lambda (_) nil))
+             ((symbol-function 'tabulated-list-print) (lambda (&rest _) nil))
              ((symbol-function 'tabulated-list-init-header) (lambda () nil)))
      ,@body))
 
@@ -1515,12 +1521,14 @@ Overrides are placed first so `plist-get' finds them before the defaults."
       (should (seq-every-p #'magit-dash-repo-submodule result)))))
 
 (ert-deftest magit-dash/parse-submodules-skips-missing-paths ()
-  "parse-submodules omits entries whose paths don't exist on disk."
+  "parse-submodules marks entries with non-existent paths as :submodule \\='missing."
   (cl-letf (((symbol-function 'file-directory-p) (lambda (_) nil)))
     (let ((result (magit-dash--parse-submodules
                    "/tmp/main"
                    magit-dash-test--submodule-output)))
-      (should (null result)))))
+      (should (= 4 (length result)))
+      (should (seq-every-p (lambda (r) (eq 'missing (magit-dash-repo-submodule r)))
+                           result)))))
 
 (ert-deftest magit-dash/parse-submodules-empty-output ()
   "parse-submodules returns nil for empty output."
@@ -1998,7 +2006,8 @@ The bug was that add-text-properties returns t, not the modified string."
          (magit-dash-gh--cache (make-hash-table :test #'equal))
          (magit-dash--submodule-path-set (make-hash-table :test #'equal))
          (magit-dash--marked-paths nil)
-         (magit-dash-columns '((name . t) (worktree . t))))
+         (magit-dash-columns '((name . t) (branch . nil) (fetched . nil) (ci . nil)
+                              (status . nil) (worktree . t) (sync . nil) (cached . nil))))
     ;; Add to submodule path set so it gets the special display name
     (puthash "/tmp/missing" "parent<missing>" magit-dash--submodule-path-set)
     (cl-letf (((symbol-function 'magit-dash--get-stats-fast)
