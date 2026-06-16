@@ -913,12 +913,12 @@ Persisted across sessions via `savehist-additional-variables'.")
   "All available dashboard columns in display order.")
 
 (defconst magit-dash--column-defs
-  '((fetched  . ("Fetched"  8 nil))
-    (status   . ("Status"  10 nil))
-    (worktree . ("Type"    10 nil))
+  '((fetched  . ("Fetched"  7 nil))
+    (status   . ("Status"   8 nil))
+    (worktree . ("Type"     8 nil))
     (sync     . ("Sync"     8 nil))
     (cached   . ("Cached"   7 nil))
-    (ci       . ("CI"       8 nil)))
+    (ci       . ("CI"       4 nil)))
   "Alist of COLUMN-SYMBOL to (LABEL WIDTH SORTABLE) for non-name columns.
 Name and Branch widths are computed dynamically in `magit-dash--build-format'.")
 
