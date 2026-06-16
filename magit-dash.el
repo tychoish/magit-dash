@@ -922,12 +922,12 @@ Persisted across sessions via `savehist-additional-variables'.")
   "All available dashboard columns in display order.")
 
 (defconst magit-dash--column-defs
-  '((fetched  . ("Fetched"  7 nil))
+  '((fetched  . ("Fetched"  8 nil))
     (status   . ("Status"   8 nil))
     (worktree . ("Type"     8 nil))
     (sync     . ("Sync"     8 nil))
     (cached   . ("Cached"   7 nil))
-    (ci       . ("CI"       4 nil)))
+    (ci       . ("CI"       3 nil)))
   "Alist of COLUMN-SYMBOL to (LABEL WIDTH SORTABLE) for non-name columns.
 Name and Branch widths are computed dynamically in `magit-dash--build-format'.")
 
@@ -2420,7 +2420,7 @@ Falls back to `magit-dash-repo-list' when not in a dashboard buffer."
      :inapt-if-not magit-dash--repo-at-point-p)
     ("lf"  "Log…"            magit-dash-magit-log-full
      :inapt-if-not magit-dash--repo-at-point-p)
-    ("C-c" "Commit"          magit-dash-magit-commit
+    ("cc" "Commit"          magit-dash-magit-commit
      :inapt-if-not magit-dash--dirty-or-unknown-p)
     ("ga"  "Stage all"       magit-dash-stage-all
      :inapt-if-not magit-dash--dirty-or-unknown-p)
@@ -2493,9 +2493,9 @@ Falls back to `magit-dash-repo-list' when not in a dashboard buffer."
     ("q"   "Quit"            quit-window)]
    ["Cache"
     ("ci"  "Cache info"      magit-dash-cache-info)
-    ("ccr" "Reset cache"     magit-dash-cache-reset-at-point
+    ("chr" "Reset cache"     magit-dash-cache-reset-at-point
      :inapt-if-not magit-dash--repo-at-point-p)
-    ("cca" "Reset all"       magit-dash-cache-reset-all)]])
+    ("cha" "Reset all"       magit-dash-cache-reset-all)]])
 
 (transient-define-prefix magit-dash-overview-menu ()
   "Magit actions for the repository shown in this overview buffer."
@@ -2506,7 +2506,7 @@ Falls back to `magit-dash-repo-list' when not in a dashboard buffer."
      :if magit-dash-overview--has-changes-p)
     ("lc"  "Log (current)"   magit-dash-overview-magit-log)
     ("lf"  "Log…"            magit-dash-overview-magit-log-full)
-    ("C-c"  "Commit"          magit-dash-overview-magit-commit
+    ("cc"  "Commit"          magit-dash-overview-magit-commit
      :if magit-dash-overview--has-changes-p)
     ("ga"   "Stage all"       magit-dash-overview-stage-all
      :if magit-dash-overview--has-changes-p)

@@ -87,9 +87,9 @@ Returns a shadow \"—\" when CI-STATUS is nil."
           (status (plist-get ci-status :status)))
       (cond
        ((equal conclusion "success")
-        (propertize "pass" 'face 'magit-dash-ci-pass-face))
+        (propertize "✓" 'face 'magit-dash-ci-pass-face))
        ((magit-dash-gh-ci--failure-p conclusion)
-        (propertize "fail" 'face 'magit-dash-ci-fail-face))
+        (propertize "x" 'face 'magit-dash-ci-fail-face))
        ((member status '("in_progress" "queued"))
         (propertize "pend" 'face 'magit-dash-ci-pending-face))
        (t (propertize "—" 'face 'shadow))))))
