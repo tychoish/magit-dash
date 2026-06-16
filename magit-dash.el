@@ -966,7 +966,7 @@ Name and Branch widths are computed dynamically in `magit-dash--build-format'.")
 (defun magit-dash--format-age (seconds)
   "Format SECONDS duration as a compact string, or \"never\" if nil."
   (cond
-   ((null seconds) "never")
+   ((null seconds) "┄")
    ((< seconds 60) (format "%ds" (round seconds)))
    ((< seconds 3600) (format "%dm" (round (/ seconds 60))))
    ((< seconds 86400) (format "%dh" (round (/ seconds 3600))))
