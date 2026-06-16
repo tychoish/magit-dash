@@ -171,7 +171,7 @@
 ;;;; magit-dash--format-age
 
 (ert-deftest magit-dash/format-age-nil ()
-  (should (equal "never" (magit-dash--format-age nil))))
+  (should (equal "┄" (magit-dash--format-age nil))))
 
 (ert-deftest magit-dash/format-age-seconds ()
   (should (equal "30s" (magit-dash--format-age 30.0))))
@@ -1859,7 +1859,7 @@ Simulates the user's issue where a cache reset caused rendering problems."
         (should (= 5 (length vec)))
         (should (string-match-p "test" (aref vec 0)))
         (should (equal "main" (substring-no-properties (aref vec 1))))
-        (should (equal "never" (aref vec 2)))))))
+        (should (equal "┄" (aref vec 2)))))))
 
 (ert-deftest magit-dash/cache-reset-at-point-refreshes ()
   "cache-reset-at-point should clear cache for one repo and refresh."
@@ -1888,10 +1888,10 @@ Simulates the user's issue where a cache reset caused rendering problems."
   "Regression: format-age should work consistently after cache reset."
   ;; Test that formatting functions don't depend on cache state
   (let ((magit-dash-gh--cache (make-hash-table :test #'equal)))
-    (should (equal "never" (magit-dash--format-age nil)))
+    (should (equal "┄" (magit-dash--format-age nil)))
     (should (equal "1h" (magit-dash--format-age 3600.0)))
     (clrhash magit-dash-gh--cache)
-    (should (equal "never" (magit-dash--format-age nil)))
+    (should (equal "┄" (magit-dash--format-age nil)))
     (should (equal "1h" (magit-dash--format-age 3600.0)))))
 
 (ert-deftest magit-dash/format-status-consistent-after-cache-reset ()
