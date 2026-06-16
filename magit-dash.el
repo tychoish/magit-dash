@@ -850,9 +850,14 @@ The first block (the main worktree) is always skipped."
 (defun magit-dash--parse-submodules (main-path lines)
   "Parse LINES from `git submodule status' for repo at MAIN-PATH.
 Returns a list of `magit-dash-repo' structs, one per submodule (initialized or not).
-Name is formatted as \"parent<submod>\" where parent is the basename of MAIN-PATH.
+Name is always \"parent<inner>\" where inner is the registered repo name when the path
+matches a `magit-dash-repo-list' entry, otherwise the submodule directory basename.
 Missing/uninitialized submodules are marked with :submodule \\='missing."
-  (let ((main-name (file-name-nondirectory (directory-file-name main-path))))
+  (let* ((main-repo (seq-find (lambda (r) (equal (magit-dash-repo-path r) main-path))
+                              magit-dash-repo-list))
+         (main-name (if main-repo
+                        (magit-dash-repo-name main-repo)
+                      (file-name-nondirectory (directory-file-name main-path)))))
     (thread-last lines
       (seq-filter (lambda (l) (not (string-empty-p l))))
       (seq-map
@@ -861,11 +866,15 @@ Missing/uninitialized submodules are marked with :submodule \\='missing."
            (let* ((prefix (match-string 1 line))
                   (rel-path (match-string 3 line))
                   (abs-path (expand-file-name rel-path main-path))
-                  (submod-name (file-name-nondirectory (directory-file-name rel-path)))
+                  (registered (seq-find (lambda (r) (equal (magit-dash-repo-path r) abs-path))
+                                        magit-dash-repo-list))
                   (missing-p (or (string= prefix "-")
                                  (not (file-directory-p abs-path)))))
              (magit-dash-repo--make
-              :name (format "%s<%s>" main-name submod-name)
+              :name (format "%s<%s>" main-name
+                           (if registered
+                               (magit-dash-repo-name registered)
+                             (file-name-nondirectory (directory-file-name rel-path))))
               :path abs-path
               :submodule (if missing-p 'missing t))))))
       (seq-remove #'null))))
@@ -1834,9 +1843,15 @@ Signals `user-error' when `magit-dash-repo-list' is empty."
     (define-key m (kbd "Q")   #'magit-dash-overview-agent-shell-queue)
     (define-key m (kbd "m")   #'magit-dash-overview-menu)
     (define-key m (kbd "?")   #'magit-dash-overview-menu)
+    (define-key m (kbd "/")   #'magit-dash-overview-raise-dired)
     (define-key m (kbd "q")   #'quit-window)
     m)
   "Keymap for repo overview buffers.")
+
+(defun magit-dash-overview-raise-dired ()
+  "Raises dired for the current directory."
+  (interactive)
+  (dired-other-window default-directory))
 
 (defun magit-dash-overview--current-repo ()
   "Return the repo for the current overview buffer or signal `user-error'."

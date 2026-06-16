@@ -1512,6 +1512,17 @@ Overrides are placed first so `plist-get' finds them before the defaults."
       (should (equal "main<uninit-mod>"  (magit-dash-repo-name (nth 2 result))))
       (should (equal "main<modified-sub>" (magit-dash-repo-name (nth 3 result)))))))
 
+(ert-deftest magit-dash/parse-submodules-uses-registered-name ()
+  "parse-submodules uses registered repo names for both parent and submodule."
+  (let ((magit-dash-repo-list
+         (list (magit-dash-repo--make :name "my-parent" :path "/tmp/main")
+               (magit-dash-repo--make :name "my-lib" :path "/tmp/main/vendor/lib"))))
+    (cl-letf (((symbol-function 'file-directory-p) (lambda (_) t)))
+      (let ((result (magit-dash--parse-submodules "/tmp/main"
+                      magit-dash-test--submodule-output)))
+        (should (equal "my-parent<my-lib>" (magit-dash-repo-name (nth 0 result))))
+        (should (equal "my-parent<other>"  (magit-dash-repo-name (nth 1 result))))))))
+
 (ert-deftest magit-dash/parse-submodules-submodule-flag ()
   "parse-submodules sets :submodule t on all returned structs."
   (cl-letf (((symbol-function 'file-directory-p) (lambda (_) t)))
