@@ -1158,11 +1158,20 @@ These tags are session-local and are not saved to the repo registry.")
 Rebuilt on each refresh. Used to detect explicitly-registered repos that are also
 submodules and to derive their parent<mod> display name.")
 
+(defun magit-dash--update-default-directory ()
+  "Sync `default-directory' with the repo at point, falling back to `~/'."
+  (setq-local default-directory
+              (if-let* ((repo (tabulated-list-get-id)))
+                  (magit-dash-repo-path repo)
+                (expand-file-name "~/"))))
+
 (define-derived-mode magit-dash-mode tabulated-list-mode "Repos"
   "Major mode for the registered repository dashboard."
   (setq tabulated-list-format (magit-dash--build-format magit-dash-repo-list))
   (setq tabulated-list-sort-key nil)
-  (tabulated-list-init-header))
+  (tabulated-list-init-header)
+  (setq-local default-directory (expand-file-name "~/"))
+  (add-hook 'post-command-hook #'magit-dash--update-default-directory nil t))
 
 (defun magit-dash--build-entry (repo)
   "Return a `tabulated-list-entries' entry for REPO using enabled columns.
