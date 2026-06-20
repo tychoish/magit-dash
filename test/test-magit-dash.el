@@ -413,6 +413,35 @@
     (should (= 1 (length batch-repos)))
     (should (equal "r1" (magit-dash-repo-name (car batch-repos))))))
 
+;;;; magit-dash-sync-repo
+
+(ert-deftest magit-dash/sync-repo-errors-when-no-repos ()
+  "Signals user-error when no repos have auto-sync configured."
+  (cl-letf (((symbol-value 'magit-dash-repo-list) nil)
+            ((symbol-function 'magit-dash--auto-sync-steps) #'ignore))
+    (should-error (magit-dash-sync-repo) :type 'user-error)))
+
+(ert-deftest magit-dash/sync-repo-errors-when-none-configured ()
+  "Signals user-error when repos exist but none have auto-sync steps."
+  (cl-letf (((symbol-value 'magit-dash-repo-list)
+             (list (magit-dash-repo--make :name "fake" :path "/tmp/fake")))
+            ((symbol-function 'magit-dash--auto-sync-steps) (lambda (_) nil)))
+    (should-error (magit-dash-sync-repo) :type 'user-error)))
+
+(ert-deftest magit-dash/sync-repo-calls-async-on-selected ()
+  "Calls `magit-dash--auto-sync-async' with the repo matching the selection."
+  (let* ((fake-repo (magit-dash-repo--make :name "my-repo" :path "/tmp/my-repo"))
+         (called-with nil))
+    (cl-letf (((symbol-value 'magit-dash-repo-list) (list fake-repo))
+              ((symbol-function 'magit-dash--auto-sync-steps) (lambda (_) '(fetch)))
+              ((symbol-function 'annotated-completing-read)
+               (lambda (_table &rest _) "my-repo"))
+              ((symbol-function 'magit-dash--auto-sync-async)
+               (lambda (repo _cb) (setq called-with repo)))
+              ((symbol-function 'magit-dash--maybe-refresh) #'ignore))
+      (magit-dash-sync-repo)
+      (should (eq called-with fake-repo)))))
+
 ;;;; magit-dash--run-command-for
 
 (ert-deftest magit-dash/run-command-user-error-when-no-commands ()
