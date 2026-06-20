@@ -181,7 +181,7 @@ Returns t when the commit succeeds, nil otherwise."
            (= 0 (magit-call-git "commit" "-m" message))))))
 
 (defun magit-dash--run-command-for (repo)
-  "Open an ACR command picker for REPO and invoke the selected command."
+  "Open an `annotated-completing-read' command picker for REPO and invoke the selected command."
   (let ((commands (magit-dash-repo-commands repo)))
     (unless commands
       (user-error "No commands registered for %s" (magit-dash-repo-name repo)))
@@ -1500,6 +1500,27 @@ Displays a summary message and refreshes the dashboard when all complete."
      "magit-dash sync"
      (lambda (_) (magit-dash--maybe-refresh)))))
 
+;;;###autoload
+(defun magit-dash-sync-repo ()
+  "Select a repository interactively and run its configured auto-sync operations."
+  (interactive)
+  (let ((repos (seq-filter #'magit-dash--auto-sync-steps magit-dash-repo-list)))
+    (unless repos
+      (user-error "No repositories have auto operations configured"))
+    (when-let* ((name (annotated-completing-read
+                       (seq-map (lambda (r)
+                                  (cons (magit-dash-repo-name r)
+                                        (magit-dash-repo-path r)))
+                                repos)
+                       :prompt "sync repository: "
+                       :require-match t))
+                (repo (seq-find (lambda (r) (equal (magit-dash-repo-name r) name))
+                                repos)))
+      (magit-dash--auto-sync-async
+       repo
+       (lambda (_status &optional _error-text)
+         (magit-dash--maybe-refresh))))))
+
 (defun magit-dash-auto-sync ()
   "Run auto operations for marked repos (or all if none marked) asynchronously.
 Each repo's steps (fetch, pull, commit, push) run sequentially; each step is
@@ -1515,12 +1536,12 @@ logged individually. Dashboard refreshes when all repos complete."
      (lambda (_) (magit-dash--maybe-refresh)))))
 
 (defun magit-dash-run-command ()
-  "Open ACR picker for the repo at point and invoke the selected command."
+  "Open an `annotated-completing-read' picker for the repo at point and invoke the selected command."
   (interactive)
   (magit-dash--run-command-for (magit-dash--repo-at-point)))
 
 (defun magit-dash--build-tag-table ()
-  "Build an ACR alist mapping tag-name strings to annotation strings.
+  "Build an `annotated-completing-read' alist mapping tag-name strings to annotation strings.
 Each annotation lists the count of repos using the tag and up to four names.
 Permanent tags (from repo :tags fields) are sorted before ephemeral-only tags."
   (let* ((permanent-set (magit-dash--permanent-tag-set))
@@ -1949,7 +1970,7 @@ Signals `user-error' when no auto operations are configured for this repo."
     (call-interactively #'magit-push-current-to-pushremote)))
 
 (defun magit-dash-overview-run-command ()
-  "Open ACR picker for this overview's repository and invoke the selected command."
+  "Open an `annotated-completing-read' picker for this overview's repository and invoke the selected command."
   (interactive)
   (magit-dash--run-command-for (magit-dash-overview--current-repo)))
 
