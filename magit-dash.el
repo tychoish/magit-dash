@@ -186,7 +186,7 @@ Returns t when the commit succeeds, nil otherwise."
     (unless commands
       (user-error "No commands registered for %s" (magit-dash-repo-name repo)))
     (let* ((table (seq-map (lambda (cmd)
-                             (cons (format "%s" (car cmd)) (symbol-name (cdr cmd))))
+                             (cons (format "%s" (car cmd)) (format "%s" (cdr cmd))))
                            commands))
            (label (annotated-completing-read table
                                              :prompt (format "%s command: " (magit-dash-repo-name repo))
@@ -958,6 +958,16 @@ Name and Branch widths are computed dynamically in `magit-dash--build-format'.")
         (not magit-dash-show-discovered-submodules))
   (magit-dash-refresh))
 
+(defvar magit-dash-show-discovered-worktrees t
+  "When non-nil, auto-discovered worktrees appear below their parent in the dashboard.")
+
+(defun magit-dash-toggle-discovered-worktrees ()
+  "Toggle visibility of auto-discovered worktrees in the dashboard and refresh."
+  (interactive)
+  (setq magit-dash-show-discovered-worktrees
+        (not magit-dash-show-discovered-worktrees))
+  (magit-dash-refresh))
+
 (with-eval-after-load 'savehist
   (add-to-list 'savehist-additional-variables 'magit-dash-columns))
 
@@ -1117,6 +1127,7 @@ When both together exceed the available window space they split it proportionall
     (define-key m (kbd "k")   #'magit-dash-worktree-delete)
     (define-key m (kbd "T")   #'magit-dash-toggle-column)
     (define-key m (kbd "M-s") #'magit-dash-toggle-discovered-submodules)
+    (define-key m (kbd "M-t") #'magit-dash-toggle-discovered-worktrees)
     (define-key m (kbd "j")   #'magit-dash-builder)
     (define-key m (kbd "z")   #'magit-dash-agent-shell)
     (define-key m (kbd "Z")   #'magit-dash-agent-shell-new)
@@ -1150,6 +1161,10 @@ These tags are session-local and are not saved to the repo registry.")
 (defvar-local magit-dash--marked-paths nil
   "List of repo paths currently marked for batch operations.")
 
+(defvar-local magit-dash--batch-all nil
+  "When non-nil, batch operations act on all repos in the table.
+Disabled by default; toggle with `magit-dash-toggle-batch-all'.")
+
 (defvar magit-dash-show-discovered-submodules t
   "When non-nil, auto-discovered submodules appear below their parent in the dashboard.")
 
@@ -1161,16 +1176,17 @@ submodules and to derive their parent<mod> display name.")
 (defun magit-dash--update-default-directory ()
   "Sync `default-directory' with the repo at point, falling back to `~/'."
   (setq-local default-directory
-              (if-let* ((repo (tabulated-list-get-id)))
-                  (magit-dash-repo-path repo)
-                (expand-file-name "~/"))))
+	      (file-name-as-directory
+               (if-let* ((repo (tabulated-list-get-id)))
+                   (magit-dash-repo-path repo)
+                 (expand-file-name "~/")))))
 
 (define-derived-mode magit-dash-mode tabulated-list-mode "Repos"
   "Major mode for the registered repository dashboard."
   (setq tabulated-list-format (magit-dash--build-format magit-dash-repo-list))
   (setq tabulated-list-sort-key nil)
   (tabulated-list-init-header)
-  (setq-local default-directory (expand-file-name "~/"))
+  (setq-local default-directory (file-name-as-directory (expand-file-name "~/")))
   (add-hook 'post-command-hook #'magit-dash--update-default-directory nil t))
 
 (defun magit-dash--build-entry (repo)
@@ -1318,7 +1334,8 @@ suppressed to avoid duplicate rows — the registered entry is shown instead."
                              paths)))
     (seq-mapcat (lambda (repo)
                   (cons repo
-                        (append (magit-dash-gh--cache-get (magit-dash-repo-path repo) :worktrees)
+                        (append (when magit-dash-show-discovered-worktrees
+                                  (magit-dash-gh--cache-get (magit-dash-repo-path repo) :worktrees))
                                 (when magit-dash-show-discovered-submodules
                                   (seq-remove
                                    (lambda (sm)
@@ -2385,6 +2402,19 @@ Falls back to `magit-dash-repo-list' when not in a dashboard buffer."
   "Return non-nil when at least one repository is marked."
   (and magit-dash--marked-paths t))
 
+(defun magit-dash--batch-enabled-p ()
+  "Return non-nil when batch operations are permitted.
+True when `magit-dash--batch-all' is set or at least one repo is marked."
+  (or magit-dash--batch-all (magit-dash--has-marks-p)))
+
+(defun magit-dash-toggle-batch-all ()
+  "Toggle whether batch operations act on all repos or only marked ones.
+When enabled, all repos visible in the dashboard are targeted.
+When disabled, only explicitly marked repos are targeted."
+  (interactive)
+  (setq magit-dash--batch-all (not magit-dash--batch-all))
+  (message "Batch: %s" (if magit-dash--batch-all "all repos" "marked repos only (disabled)")))
+
 (defun magit-dash-fetch-all ()
   "Asynchronously fetch marked repos, or all visible repos when none are marked."
   (interactive)
@@ -2437,6 +2467,38 @@ Falls back to `magit-dash-repo-list' when not in a dashboard buffer."
 
 (transient-define-prefix magit-dash-menu ()
   "Actions for the repository at point in the repo dashboard."
+  [["Navigate"
+    ("b"   "Visit buffer"    magit-dash-visit-buffer
+     :inapt-if-not magit-dash--repo-at-point-p)
+    ("ff"  "Find file"       magit-dash-find-file
+     :inapt-if-not magit-dash--repo-at-point-p)
+    ("gb"  "Switch branch"   magit-dash-switch-branch
+     :inapt-if-not magit-dash--repo-at-point-p)
+    ("y"   "Prune branches"  magit-dash-prune-branches
+     :inapt-if-not magit-dash--repo-at-point-p)]
+   ["CI"
+    ("cf"  "Fetch CI status" magit-dash-gh-ci-fetch-at-point
+     :inapt-if-not magit-dash--repo-has-ci-p)
+    ("co"  "Open last run"   magit-dash-gh-ci-open-at-point
+     :inapt-if-not magit-dash--repo-has-ci-status-p)
+    ("cx"  "Fix CI (agent)"  magit-dash-gh-ci-fix-at-point
+     :inapt-if-not magit-dash--repo-has-ci-status-p)]
+   ["Worktree"
+    ("wa"  "Add"             magit-dash-worktree-add
+     :inapt-if-not magit-dash--can-add-worktree-p)
+    ("wd"  "Delete"          magit-dash-worktree-delete
+     :inapt-if-not magit-dash--at-worktree-p)
+    ("wt"  "Toggle"          magit-dash-toggle-discovered-worktrees)]
+   ["Agent Shell"
+    ("as"  "Open"     magit-dash-agent-shell
+     :inapt-if-not agent-shell-menu-project-buffers)
+    ("an"  "New"           magit-dash-agent-shell-new)
+    ("aq"  "Queue"     magit-dash-agent-shell-queue)]
+   ["Cache"
+    ("ci"  "Info"      magit-dash-cache-info)
+    ("chr" "Reset"     magit-dash-cache-reset-at-point
+     :inapt-if-not magit-dash--repo-at-point-p)
+    ("cha" "Reset all"       magit-dash-cache-reset-all)]]
   [["Repository"
     ("!"   "Magit dispatch"  magit-dash-magit-dispatch
      :inapt-if-not magit-dash--repo-at-point-p)
@@ -2460,19 +2522,32 @@ Falls back to `magit-dash-repo-list' when not in a dashboard buffer."
      :inapt-if-not magit-dash--repo-at-point-p)
     ("rs"  "Push"            magit-dash-push
      :inapt-if-not magit-dash--repo-at-point-ahead-p)]
-   ["Navigate"
-    ("b"   "Visit buffer"    magit-dash-visit-buffer
+   ["Batch"
+    ("SPC" "Toggle mark"     magit-dash-toggle-mark
      :inapt-if-not magit-dash--repo-at-point-p)
-    ("ff"  "Find file"       magit-dash-find-file
-     :inapt-if-not magit-dash--repo-at-point-p)
-    ("gb"  "Switch branch"   magit-dash-switch-branch
-     :inapt-if-not magit-dash--repo-at-point-p)
-    ("y"   "Prune branches"  magit-dash-prune-branches
-     :inapt-if-not magit-dash--repo-at-point-p)]
+    ("mt"  "Mark by tag"     magit-dash-mark-by-tag)
+    ("u"   "Clear marks"     magit-dash-unmark-all
+     :inapt-if-not magit-dash--has-marks-p)
+    ("ma"   (lambda () (if magit-dash--batch-all "Batch: all [on]" "Batch: all [off]"))
+     magit-dash-toggle-batch-all)
+    ("fa"  "Fetch all"       magit-dash-fetch-all
+     :inapt-if-not magit-dash--batch-enabled-p)
+    ("pa"  "Pull all"        magit-dash-pull-all
+     :inapt-if-not magit-dash--batch-enabled-p)
+    ("pu"  "Push all"        magit-dash-push-all
+     :inapt-if-not magit-dash--batch-enabled-p)
+    ("sa"  "Sync all"        magit-dash-sync-all
+     :inapt-if-not magit-dash--batch-enabled-p)
+    ("ca"  "Commit all"      magit-dash-commit-all
+     :inapt-if-not magit-dash--batch-enabled-p)
+    ("aa"  "Autosync all"    magit-dash-auto-sync
+     :inapt-if-not magit-dash--batch-enabled-p)
+    ("su"  "Update submodules" magit-dash-submodule-update-all
+     :inapt-if-not magit-dash--batch-enabled-p)]
    ["Manage"
     ("ac"  "Auto-commit"     magit-dash-commit
      :inapt-if-not magit-dash--has-auto-commit-p)
-    ("sy"  "Sync"            magit-dash-sync
+    ("sy"  "Sync one"        magit-dash-sync
      :inapt-if-not magit-dash--has-auto-sync-p)
     ("et"  "Add tag"         magit-dash-add-tag
      :inapt-if-not magit-dash--repo-at-point-p)
@@ -2482,50 +2557,13 @@ Falls back to `magit-dash-repo-list' when not in a dashboard buffer."
      :inapt-if-not magit-dash--has-commands-p)
     ("sb"  "Bump submodules" magit-dash-bump-submodules-menu
      :inapt-if-not magit-dash--repo-at-point-p)]
-   ["CI"
-    ("cf"  "Fetch CI status" magit-dash-gh-ci-fetch-at-point
-     :inapt-if-not magit-dash--repo-has-ci-p)
-    ("co"  "Open last run"   magit-dash-gh-ci-open-at-point
-     :inapt-if-not magit-dash--repo-has-ci-status-p)
-    ("cx"  "Fix CI (agent)"  magit-dash-gh-ci-fix-at-point
-     :inapt-if-not magit-dash--repo-has-ci-status-p)]]
-  [["Batch"
-    ("SPC" "Toggle mark"     magit-dash-toggle-mark
-     :inapt-if-not magit-dash--repo-at-point-p)
-    ("mt"  "Mark by tag"     magit-dash-mark-by-tag)
-    ("t"   "Toggle mark"     magit-dash-toggle-mark
-     :inapt-if-not magit-dash--repo-at-point-p)
-    ("u"   "Clear marks"     magit-dash-unmark-all
-     :inapt-if-not magit-dash--has-marks-p)
-    ("fa"  "Fetch"           magit-dash-fetch-all)
-    ("pa"  "Pull"            magit-dash-pull-all)
-    ("pu"  "Push"            magit-dash-push-all)
-    ("sa"  "Sync"            magit-dash-sync-all)
-    ("ca"  "Commit"          magit-dash-commit-all)
-    ("aa"  "Autosync"        magit-dash-auto-sync)
-    ("su"  "Update submodules" magit-dash-submodule-update-all)]
-   ["Worktree"
-    ("w"   "Add"             magit-dash-worktree-add
-     :inapt-if-not magit-dash--can-add-worktree-p)
-    ("k"   "Delete"          magit-dash-worktree-delete
-     :inapt-if-not magit-dash--at-worktree-p)]
-   ["Shell"
-    ("as"  "Agent shell"     magit-dash-agent-shell
-     :inapt-if-not agent-shell-menu-project-buffers)
-    ("an"  "New agent shell" magit-dash-agent-shell-new)
-    ("aq"  "Agent queue"     magit-dash-agent-shell-queue)]
    ["Dashboard"
     ("pr"  "PR dashboard"    magit-dash-gh-pr-dashboard-open)
     ("nt"  "Filter by tag"   magit-dash-filter-by-tag)
     ("C-t" "Toggle column"   magit-dash-toggle-column)
     ("M-s" "Toggle submodules" magit-dash-toggle-discovered-submodules)
     ("gg"  "Refresh"         magit-dash-refresh)
-    ("q"   "Quit"            quit-window)]
-   ["Cache"
-    ("ci"  "Cache info"      magit-dash-cache-info)
-    ("chr" "Reset cache"     magit-dash-cache-reset-at-point
-     :inapt-if-not magit-dash--repo-at-point-p)
-    ("cha" "Reset all"       magit-dash-cache-reset-all)]])
+    ("q"   "Quit"            quit-window)]])
 
 (transient-define-prefix magit-dash-overview-menu ()
   "Magit actions for the repository shown in this overview buffer."
