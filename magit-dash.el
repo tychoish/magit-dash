@@ -2524,12 +2524,16 @@ When disabled, only explicitly marked repos are targeted."
      :inapt-if-not magit-dash--repo-at-point-ahead-p)]
    ["Batch"
     ("SPC" "Toggle mark"     magit-dash-toggle-mark
-     :inapt-if-not magit-dash--repo-at-point-p)
-    ("mt"  "Mark by tag"     magit-dash-mark-by-tag)
+     :inapt-if-not magit-dash--repo-at-point-p
+     :transient t)
+    ("mt"  "Mark by tag"     magit-dash-mark-by-tag
+     :transient t)
     ("u"   "Clear marks"     magit-dash-unmark-all
-     :inapt-if-not magit-dash--has-marks-p)
+     :inapt-if-not magit-dash--has-marks-p
+     :transient t)
     ("ma"   (lambda () (if magit-dash--batch-all "Batch: all [on]" "Batch: all [off]"))
-     magit-dash-toggle-batch-all)
+     magit-dash-toggle-batch-all
+     :transient t)
     ("fa"  "Fetch all"       magit-dash-fetch-all
      :inapt-if-not magit-dash--batch-enabled-p)
     ("pa"  "Pull all"        magit-dash-pull-all
