@@ -141,15 +141,15 @@ fallback so the annotation function never calls git directly."
    (seq-map (lambda (p) (cons p 'submodule)) (magit-dash-open--submodule-paths dir))))
 
 (defun magit-dash-open--collect-deep (root depth)
-  "Return (path . kind) pairs for all candidates under ROOT up to DEPTH levels.
-Kind is one of: `repo', `worktree', `submodule', `dir'.
-Worktrees and submodules are enumerated for every repo found regardless of depth."
+  "Return (path . kind) pairs for git repos under ROOT up to DEPTH levels.
+Kind is one of: `repo', `worktree', `submodule'.
+Plain (non-git) directories are traversed for scanning but never returned as
+candidates.  Worktrees and submodules are enumerated for every repo found."
   (let* ((subdirs (magit-dash-open--subdirs root))
          (repos (seq-filter #'magit-dash-open--git-p subdirs))
          (plain (seq-remove #'magit-dash-open--git-p subdirs)))
     (append
      (seq-map (lambda (p) (cons p 'repo)) repos)
-     (seq-map (lambda (p) (cons p 'dir)) plain)
      (seq-mapcat (lambda (r)
                    (seq-map (lambda (p) (cons p 'worktree))
                             (magit-dash-open--worktree-paths r)))
