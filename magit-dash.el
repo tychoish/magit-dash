@@ -1846,7 +1846,7 @@ Signals `user-error' when `magit-dash-repo-list' is empty."
   "Execute BODY with default-directory set to REPO path."
   (declare (indent 1))
   (let ((path (make-symbol "path")))
-    `(let* ((,path (magit-dash-repo-path ,repo))
+    `(let* ((,path (file-name-as-directory (magit-dash-repo-path ,repo)))
              (default-directory ,path))
        ,@body)))
 
@@ -2465,6 +2465,12 @@ When disabled, only explicitly marked repos are targeted."
 
 ;;;; Transient menus
 
+(defun magit-dash--agent-shell-project-buffers-p ()
+  "Return non-nil when agent-shell buffers exist for the repo at point."
+  (when-let* ((repo (ignore-errors (magit-dash--repo-at-point))))
+    (let ((default-directory (file-name-as-directory (magit-dash-repo-path repo))))
+      (agent-shell-menu-project-buffers))))
+
 (transient-define-prefix magit-dash-menu ()
   "Actions for the repository at point in the repo dashboard."
   [["Navigate"
@@ -2491,7 +2497,7 @@ When disabled, only explicitly marked repos are targeted."
     ("wt"  "Toggle"          magit-dash-toggle-discovered-worktrees)]
    ["Agent Shell"
     ("as"  "Open"     magit-dash-agent-shell
-     :inapt-if-not agent-shell-menu-project-buffers)
+     :inapt-if-not magit-dash--agent-shell-project-buffers-p)
     ("an"  "New"           magit-dash-agent-shell-new)
     ("aq"  "Queue"     magit-dash-agent-shell-queue)]
    ["Cache"
