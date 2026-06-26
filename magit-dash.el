@@ -2476,9 +2476,9 @@ When disabled, only explicitly marked repos are targeted."
 
 (defun magit-dash--agent-shell-project-buffers-p ()
   "Return non-nil when agent-shell buffers exist for the repo at point."
-  (when-let* ((repo (ignore-errors (magit-dash--repo-at-point))))
-    (let ((default-directory (file-name-as-directory (magit-dash-repo-path repo))))
-      (agent-shell-menu-project-buffers))))
+  (when-let* ((repo (ignore-errors (magit-dash--repo-at-point)))
+	      (default-directory (file-name-as-directory (magit-dash-repo-path repo))))
+    (and (boundp 'agent-shell-menu-project-buffers) (agent-shell-menu-project-buffers) t)))
 
 (transient-define-prefix magit-dash-menu ()
   "Actions for the repository at point in the repo dashboard."
@@ -2623,7 +2623,7 @@ When disabled, only explicitly marked repos are targeted."
     ("pa"   "Push all"          magit-dash-push-all)]
    ["Agent Shell"
     ("as"   "Agent shell (project)"  magit-dash-overview-agent-shell
-     :if agent-shell-menu-project-buffers)
+     :if magit-dash--agent-shell-project-buffers-p)
     ("an"   "New agent shell"        magit-dash-overview-agent-shell-new)
     ("aq"   "Agent shell queue"      magit-dash-overview-agent-shell-queue)]
    ["Worktree"
@@ -2634,6 +2634,7 @@ When disabled, only explicitly marked repos are targeted."
    ["View"
     ("gg"   "Refresh"        magit-dash-overview-refresh)
     ("q"   "Quit"            quit-window)]])
+
 
 (defun ad:magit-dash--quit-window (orig-fn &optional kill window)
   "Around advice for `quit-window': delete split window in dashboard buffers.
