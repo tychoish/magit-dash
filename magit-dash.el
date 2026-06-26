@@ -195,7 +195,13 @@ Returns t when the commit succeeds, nil otherwise."
                                       (equal label (format "%s" (car cmd))))
                                     commands))))
         (magit-dash-gh--with-repo-dir (magit-dash-repo-path repo)
-          (call-interactively fn))))))
+          (cond
+           ((stringp fn)
+            (let ((buf-name (format "*%s-dash-%s*" (magit-dash-repo-name repo) label)))
+              (compilation-start fn nil (lambda (_) buf-name))))
+           ((commandp fn) (call-interactively fn))
+           ((functionp fn) (funcall fn))
+           (t (user-error "Command %s has unsupported type %s" label (type-of fn)))))))))
 
 ;;;; Stats collection
 
@@ -968,8 +974,8 @@ Name and Branch widths are computed dynamically in `magit-dash--build-format'.")
         (not magit-dash-show-discovered-worktrees))
   (magit-dash-refresh))
 
-(with-eval-after-load 'savehist
-  (add-to-list 'savehist-additional-variables 'magit-dash-columns))
+(defvar savehist-additional-variables nil)
+(add-to-list 'savehist-additional-variables 'magit-dash-columns)
 
 ;;;; Formatting helpers
 
