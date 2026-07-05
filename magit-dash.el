@@ -1870,8 +1870,15 @@ Signals `user-error' when `magit-dash-repo-list' is empty."
 (defvar-local magit-dash-overview--pr-counts nil
   "Cached PR counts cons (TOTAL . MINE) for this overview buffer, or nil when loading.")
 
+(defvar magit-dash-overview-info-map (make-sparse-keymap)
+  "Keymap for magit-dash overview info buffers.  Inherits `help-mode-map' once loaded.")
+
+(with-eval-after-load 'help-mode
+  (set-keymap-parent magit-dash-overview-info-map help-mode-map))
+
 (defvar magit-dash-overview-mode-map
   (let ((m (make-sparse-keymap)))
+    (set-keymap-parent m magit-dash-overview-info-map)
     (define-key m (kbd "RET") #'magit-dash-overview-follow)
     (define-key m (kbd "!")   #'magit-dash-overview-magit-dispatch)
     (define-key m (kbd "s")   #'magit-dash-overview-magit-status)
@@ -1903,6 +1910,8 @@ Signals `user-error' when `magit-dash-repo-list' is empty."
     (define-key m (kbd "q")   #'quit-window)
     m)
   "Keymap for repo overview buffers.")
+
+(set-keymap-parent magit-dash-overview-mode-map magit-dash-overview-info-map)
 
 (defun magit-dash-overview-raise-dired ()
   "Raises dired for the current directory."
@@ -2276,21 +2285,20 @@ On a Recent Commits line: show the commit in magit."
 
 (defun magit-dash-overview--open (repo)
   "Pop to a read-only overview buffer for REPO, loading stats asynchronously."
-  (let* ((buf-name (format "*magit-dash: %s*" (magit-dash-repo-name repo)))
-         (buf (get-buffer-create buf-name)))
-    (with-current-buffer buf
-      (let ((inhibit-read-only t))
-        (erase-buffer)
+  (let* ((buf-name (format "*magit-dash: %s*" (magit-dash-repo-name repo))))
+    (with-help-window buf-name
+      (with-current-buffer standard-output
         (setq default-directory (magit-dash-repo-path repo))
         (setq-local magit-dash-overview--repo repo)
         (setq-local magit-dash-overview--stats nil)
         (setq-local magit-dash-overview--pr-counts nil)
-        (use-local-map magit-dash-overview-mode-map)
         (magit-dash-overview--render repo nil nil)
-        (goto-char (point-min)))
-      (setq buffer-read-only t))
-    (pop-to-buffer buf)
-    (magit-dash-overview--start-async-load repo buf)) )
+        (goto-char (point-min))))
+    (let ((buf (get-buffer buf-name)))
+      (when buf
+        (with-current-buffer buf
+          (use-local-map magit-dash-overview-mode-map))
+        (magit-dash-overview--start-async-load repo buf)))))
 
 ;;;; Transient predicates
 

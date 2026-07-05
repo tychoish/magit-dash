@@ -1581,7 +1581,8 @@ Overrides are placed first so `plist-get' finds them before the defaults."
   "sorted-repos places discovered submodules after their parent."
   (let* ((main (magit-dash-repo--make :name "main" :path "/tmp/main"))
          (mod (magit-dash-repo--make :name "main<lib>" :path "/tmp/main/lib" :submodule t))
-         (magit-dash-gh--cache (make-hash-table :test #'equal)))
+         (magit-dash-gh--cache (make-hash-table :test #'equal))
+         (magit-dash-show-discovered-submodules t))
     (magit-dash-gh--cache-set "/tmp/main" :worktrees nil)
     (magit-dash-gh--cache-set "/tmp/main" :submodules (list mod))
     (let ((result (magit-dash--sorted-repos (list main))))
@@ -1594,7 +1595,9 @@ Overrides are placed first so `plist-get' finds them before the defaults."
   (let* ((main (magit-dash-repo--make :name "main" :path "/tmp/main"))
          (wt   (magit-dash-repo--make :name "main@feat" :path "/tmp/wt" :worktree t))
          (mod  (magit-dash-repo--make :name "main<lib>" :path "/tmp/main/lib" :submodule t))
-         (magit-dash-gh--cache (make-hash-table :test #'equal)))
+         (magit-dash-gh--cache (make-hash-table :test #'equal))
+         (magit-dash-show-discovered-worktrees t)
+         (magit-dash-show-discovered-submodules t))
     (magit-dash-gh--cache-set "/tmp/main" :worktrees (list wt))
     (magit-dash-gh--cache-set "/tmp/main" :submodules (list mod))
     (let ((result (magit-dash--sorted-repos (list main))))
@@ -2188,3 +2191,46 @@ The bug was that add-text-properties returns t, not the modified string."
       (magit-dash-push-all))
     (should (equal (list repo) batch-repos))
     (should (eq #'magit-dash--push-async batch-op))))
+
+;;;; Overview buffer (with-help-window migration)
+
+(ert-deftest magit-dash/overview-open-creates-help-mode-buffer ()
+  "magit-dash-overview--open creates a buffer in help-mode."
+  (let* ((repo (magit-dash-repo--make :name "testrepo" :path "/tmp/testrepo")))
+    (cl-letf (((symbol-function 'magit-dash-overview--start-async-load) #'ignore)
+              ((symbol-function 'magit-dash-overview--render) #'ignore))
+      (unwind-protect
+          (progn
+            (magit-dash-overview--open repo)
+            (when-let* ((buf (get-buffer "*magit-dash: testrepo*")))
+              (with-current-buffer buf
+                (should (derived-mode-p 'help-mode)))))
+        (when-let* ((buf (get-buffer "*magit-dash: testrepo*")))
+          (kill-buffer buf))))))
+
+(ert-deftest magit-dash/overview-open-sets-mode-map ()
+  "magit-dash-overview--open sets the local map to magit-dash-overview-mode-map."
+  (let* ((repo (magit-dash-repo--make :name "testrepo2" :path "/tmp/testrepo2")))
+    (cl-letf (((symbol-function 'magit-dash-overview--start-async-load) #'ignore)
+              ((symbol-function 'magit-dash-overview--render) #'ignore))
+      (unwind-protect
+          (progn
+            (magit-dash-overview--open repo)
+            (when-let* ((buf (get-buffer "*magit-dash: testrepo2*")))
+              (with-current-buffer buf
+                (should (eq (current-local-map) magit-dash-overview-mode-map)))))
+        (when-let* ((buf (get-buffer "*magit-dash: testrepo2*")))
+          (kill-buffer buf))))))
+
+(ert-deftest magit-dash/overview-info-map-inherits-help-mode-map ()
+  "magit-dash-overview-info-map has help-mode-map as an ancestor."
+  (require 'help-mode)
+  (let ((map magit-dash-overview-info-map))
+    (while (and map (not (eq map help-mode-map)))
+      (setq map (keymap-parent map)))
+    (should (eq map help-mode-map))))
+
+(ert-deftest magit-dash/overview-mode-map-inherits-info-map ()
+  "magit-dash-overview-mode-map has magit-dash-overview-info-map as parent."
+  (should (eq (keymap-parent magit-dash-overview-mode-map)
+              magit-dash-overview-info-map)))

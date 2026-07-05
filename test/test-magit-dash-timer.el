@@ -199,5 +199,69 @@
       (magit-dash--timer-sync nil nil)
       (should (> magit-dash--last-sync-attempt 0.0)))))
 
+;;;; magit-dash-register :timer integration
+
+(ert-deftest magit-dash-timer/register-with-timer-creates-timer ()
+  ":timer plist in `magit-dash-register' registers a sync timer."
+  (let ((magit-dash-repo-list nil)
+        (magit-dash--sync-timers (make-hash-table :test #'equal)))
+    (magit-dash-register :name "r" :path "/tmp/r"
+                         :timer '(:kind interval :interval 3600))
+    (unwind-protect
+        (should (map-elt magit-dash--sync-timers "r"))
+      (magit-dash-cancel-sync-timer "r"))))
+
+(ert-deftest magit-dash-timer/register-with-timer-uses-repo-name ()
+  ":timer registers the sync timer under the repo :name."
+  (let ((magit-dash-repo-list nil)
+        (magit-dash--sync-timers (make-hash-table :test #'equal)))
+    (magit-dash-register :name "myrepo" :path "/tmp/myrepo"
+                         :timer '(:kind interval :interval 3600))
+    (unwind-protect
+        (should (map-elt magit-dash--sync-timers "myrepo"))
+      (magit-dash-cancel-sync-timer "myrepo"))))
+
+(ert-deftest magit-dash-timer/register-without-timer-does-not-create-timer ()
+  "`magit-dash-register' without :timer leaves the timer table unchanged."
+  (let ((magit-dash-repo-list nil)
+        (magit-dash--sync-timers (make-hash-table :test #'equal)))
+    (magit-dash-register :name "r" :path "/tmp/r")
+    (should (= 0 (hash-table-count magit-dash--sync-timers)))))
+
+(ert-deftest magit-dash-timer/register-with-timer-still-registers-repo ()
+  "The :timer keyword does not prevent the repo from being registered."
+  (let ((magit-dash-repo-list nil)
+        (magit-dash--sync-timers (make-hash-table :test #'equal)))
+    (magit-dash-register :name "r" :path "/tmp/r"
+                         :timer '(:kind interval :interval 3600))
+    (unwind-protect
+        (progn
+          (should (= 1 (length magit-dash-repo-list)))
+          (should (equal "r" (magit-dash-repo-name (car magit-dash-repo-list)))))
+      (magit-dash-cancel-sync-timer "r"))))
+
+(ert-deftest magit-dash-timer/register-re-registration-replaces-timer ()
+  "Re-registering a repo with :timer replaces the existing sync timer."
+  (let ((magit-dash-repo-list nil)
+        (magit-dash--sync-timers (make-hash-table :test #'equal)))
+    (magit-dash-register :name "r" :path "/tmp/r"
+                         :timer '(:kind interval :interval 3600))
+    (let ((first (map-elt magit-dash--sync-timers "r")))
+      (magit-dash-register :name "r" :path "/tmp/r"
+                           :timer '(:kind interval :interval 7200))
+      (unwind-protect
+          (should-not (eq first (map-elt magit-dash--sync-timers "r")))
+        (magit-dash-cancel-sync-timer "r")))))
+
+(ert-deftest magit-dash-timer/register-timer-kind-idle ()
+  ":timer with :kind idle registers an idle timer."
+  (let ((magit-dash-repo-list nil)
+        (magit-dash--sync-timers (make-hash-table :test #'equal)))
+    (magit-dash-register :name "r" :path "/tmp/r"
+                         :timer '(:kind idle :idle-delay 3600))
+    (unwind-protect
+        (should (map-elt magit-dash--sync-timers "r"))
+      (magit-dash-cancel-sync-timer "r"))))
+
 (provide 'test-magit-dash-timer)
 ;;; test-magit-dash-timer.el ends here

@@ -129,5 +129,31 @@ Every firing is subject to the global guards:
   (seq-do #'magit-dash-cancel-sync-timer
           (map-keys magit-dash--sync-timers)))
 
+;;;; magit-dash-register integration
+
+(defun ad:magit-dash-register-with-timer (orig &rest args)
+  "Handle the :timer keyword in `magit-dash-register' calls.
+Strips :timer from ARGS before forwarding to ORIG, then registers a sync
+timer using the :timer plist if present.  The timer name is set to the
+repo :name and :repos is set to a single-element list of that name;
+all other keys in the :timer plist are forwarded to
+`magit-dash-register-sync-timer'.
+
+Example:
+  (magit-dash-register
+    :name \"my-repo\" :path \"~/projects/my-repo\" :auto-pull t
+    :timer \\='(:kind idle :idle-delay 300))"
+  (let ((timer-config (plist-get args :timer))
+        (name (plist-get args :name)))
+    (apply orig
+           (thread-last (seq-partition args 2)
+             (seq-remove (lambda (pair) (eq (car pair) :timer)))
+             (apply #'append)))
+    (when timer-config
+      (apply #'magit-dash-register-sync-timer
+             :name name :repos (list name) timer-config))))
+
+(advice-add 'magit-dash-register :around #'ad:magit-dash-register-with-timer)
+
 (provide 'magit-dash-timer)
 ;;; magit-dash-timer.el ends here
