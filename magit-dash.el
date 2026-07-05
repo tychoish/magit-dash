@@ -96,7 +96,9 @@
   "List of `magit-dash-repo' structs registered for dashboard display.
 Use `magit-dash-register' to add entries.")
 
-(cl-defun magit-dash-register (&key name path include-prs include-ci auto-fetch auto-pull auto-commit auto-push auto-sync-command tags commands sort-hint worktree sync-branches)
+(declare-function magit-dash-register-sync-timer "magit-dash-timer")
+
+(cl-defun magit-dash-register (&key name path include-prs include-ci auto-fetch auto-pull auto-commit auto-push auto-sync-command tags commands sort-hint worktree sync-branches timer)
   "Register or replace a repository with NAME at absolute PATH.
 Replaces any existing entry with the same name or path.
 
@@ -123,7 +125,9 @@ Keyword arguments:
   :commands       alist of (LABEL . FUNCTION) for the repo command picker.
   :sort-hint      number controlling display order; lower values appear first.
                   Repos without a sort-hint appear after all sorted repos.
-  :worktree       non-nil when this entry represents a git worktree."
+  :worktree       non-nil when this entry represents a git worktree.
+  :timer          plist forwarded to `magit-dash-register-sync-timer' (requires
+                  magit-dash-timer).  Example: \\='(:kind idle :idle-delay 300)."
   (unless (and name path)
     (user-error "must specify name (%s) and path (%s)" name path))
 
@@ -147,7 +151,9 @@ Keyword arguments:
                            :commands commands
                            :sort-hint sort-hint
                            :worktree worktree
-                           :sync-branches sync-branches)))))))
+                           :sync-branches sync-branches))))))
+  (when (and timer (fboundp 'magit-dash-register-sync-timer))
+    (apply #'magit-dash-register-sync-timer :name name :repos (list name) timer)))
 
 ;;;; Registry helpers
 
