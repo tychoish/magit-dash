@@ -1801,7 +1801,7 @@ Signals `user-error' when the current row is not a worktree."
   "Dispatch a fix-CI agent task for the repository at point."
   (interactive)
   (when-let* ((repo (magit-dash--repo-at-point)))
-    (magit-dash-gh-ci-fix-ci repo)))
+    (magit-dash-ci-dispatch-fix-operation repo)))
 
 (defun magit-dash--repo-has-ci-p ()
   "Return non-nil when the repository at point has :include-ci set."
@@ -2507,7 +2507,7 @@ When disabled, only explicitly marked repos are targeted."
     ("co"  "Open last run"   magit-dash-gh-ci-open-at-point
      :inapt-if-not magit-dash--repo-has-ci-status-p)
     ("cx"  "Fix CI (agent)"  magit-dash-gh-ci-fix-at-point
-     :inapt-if-not magit-dash--repo-has-ci-status-p)]
+     :inapt-if-not magit-dash--repo-has-ci-p)]
    ["Worktree"
     ("wa"  "Add"             magit-dash-worktree-add
      :inapt-if-not magit-dash--can-add-worktree-p)

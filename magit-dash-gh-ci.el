@@ -24,11 +24,15 @@
 
 (require 'map)
 (require 'magit-dash-gh)
+(require 'magit-dash-gh-actions)
 
 (declare-function magit-dash-repo-path "magit-dash")
 (declare-function magit-dash-repo-name "magit-dash")
 (declare-function magit-dash-repo-branch "magit-dash")
 (declare-function magit-dash-repo-include-ci "magit-dash")
+(declare-function agent-shell-insert "agent-shell")
+(declare-function agent-shell-menu-project-buffers "agent-shell-menu")
+(declare-function agent-shell-queue-add-unassigned "agent-shell-queue")
 
 ;;; Faces
 
@@ -134,17 +138,104 @@ Does nothing when no CI status is cached for REPO."
               (url (plist-get ci :url)))
     (browse-url url)))
 
+;;; Fix-CI prompt dispatch
+
+(defun magit-dash-ci--build-fix-prompt (repo ctx)
+  "Return a prompt string describing the CI failure downloaded into CTX for REPO.
+CTX is the pipeline context passed to `magit-dash-gh-actions--step-finalize'
+once the run's artifacts (metadata, full log, and failed-step log when
+applicable) have been written to :dir.  The prompt links to every file in
+CTX's :files so an agent can open them for context."
+  (let* ((dir (plist-get ctx :dir))
+         (run-info (plist-get ctx :run-info))
+         (files (plist-get ctx :files))
+         (conclusion (or (map-elt run-info 'conclusion) "in_progress"))
+         (workflow (or (map-elt run-info 'workflowName) "CI"))
+         (branch (or (map-elt run-info 'headBranch) (magit-dash-repo-branch repo) ""))
+         (run-id (map-elt run-info 'databaseId)))
+    (with-temp-buffer
+      (insert (format "The `%s` GitHub Actions workflow %s on branch `%s` of %s (run #%s).\n\n"
+                      workflow
+                      (if (magit-dash-gh-actions--failure-p conclusion)
+                          "failed"
+                        "did not complete successfully")
+                      branch
+                      (magit-dash-repo-name repo)
+                      run-id))
+      (insert (format "Investigate the failure in the repository at %s and fix it.\n\n"
+                      (magit-dash-repo-path repo)))
+      (insert "The following CI artifacts were downloaded for reference:\n\n")
+      (seq-do (lambda (f)
+                (insert (format "- [%s](%s) — %s\n"
+                                (plist-get f :path)
+                                (expand-file-name (plist-get f :path) dir)
+                                (plist-get f :type))))
+              files)
+      (buffer-string))))
+
+(defun magit-dash-ci--dispatch-prompt (repo prompt)
+  "Send PROMPT to an agent for REPO.
+Prefers an open agent-shell buffer for REPO's directory, sending PROMPT
+directly and submitting it.  Falls back to `agent-shell-queue-add-unassigned'
+when the queue is available but no buffer is open for this project.  As a
+last resort (neither agent-shell nor agent-shell-queue is loaded), copies
+PROMPT to the kill ring so it can be pasted manually."
+  (let* ((default-directory (file-name-as-directory (magit-dash-repo-path repo)))
+         (buffers (and (fboundp 'agent-shell-menu-project-buffers)
+                       (agent-shell-menu-project-buffers))))
+    (cond
+     (buffers
+      (agent-shell-insert :text prompt :submit t :shell-buffer (car buffers))
+      (message "magit-dash fix-CI: sent to %s" (buffer-name (car buffers))))
+     ((fboundp 'agent-shell-queue-add-unassigned)
+      (agent-shell-queue-add-unassigned prompt)
+      (message "magit-dash fix-CI: queued (no open agent-shell for %s)"
+               (magit-dash-repo-name repo)))
+     (t
+      (kill-new prompt)
+      (message "magit-dash fix-CI: agent-shell not available — prompt copied to kill ring")))))
+
+(defun magit-dash-ci--download-and-dispatch (repo run-id)
+  "Download RUN-ID's artifacts for REPO and dispatch a fix-CI prompt.
+Reuses the download pipeline from `magit-dash-gh-actions.el' to fetch run
+metadata, the full log, and (when the run failed) the failed-step-only log
+into a directory under plans/, then builds and dispatches a fix-it prompt
+linking those files via `magit-dash-ci--dispatch-prompt'."
+  (let ((path (magit-dash-repo-path repo)))
+    (magit-dash-gh--check-gh)
+    (magit-dash-gh-actions--step-run-info
+     (list :run-id run-id
+           :root path
+           :repo-dir path
+           :branch (magit-dash-repo-branch repo)
+           :files nil
+           :on-complete (lambda (ctx)
+                          (magit-dash-ci--dispatch-prompt
+                           repo (magit-dash-ci--build-fix-prompt repo ctx)))))))
+
 ;;;###autoload
-(defun magit-dash-gh-ci-fix-ci (repo)
-  "Dispatch a fix-CI task for REPO.
-Currently stubbed: logs the run URL for the developer to inspect.
-Future: dispatch to agent-shell-queue with the failed log as context."
+(defun magit-dash-ci-dispatch-fix-operation (repo)
+  "Download the latest CI run's artifacts for REPO and dispatch a fix-CI prompt.
+Uses REPO's cached :ci-status when present; otherwise fetches it first via
+`magit-dash-gh-ci-fetch' before proceeding, so this can be called without a
+prior manual CI-status fetch.  Signals `user-error' when REPO does not have
+:include-ci set, or when no CI run is found for it even after fetching."
+  (unless (magit-dash-repo-include-ci repo)
+    (user-error "magit-dash fix-CI: %s does not have CI enabled (:include-ci)"
+                (magit-dash-repo-name repo)))
   (let* ((path (magit-dash-repo-path repo))
-         (ci (magit-dash-gh--cache-get path :ci-status))
-         (url (and ci (plist-get ci :url))))
-    (message "magit-dash fix-CI: %s — run URL: %s (TODO: dispatch to ASQ)"
-             (magit-dash-repo-name repo)
-             (or url "no cached run"))))
+         (cached (magit-dash-gh--cache-get path :ci-status)))
+    (if-let* ((run-id (plist-get cached :run-id)))
+        (magit-dash-ci--download-and-dispatch repo run-id)
+      (progn
+        (message "magit-dash fix-CI: fetching CI status for %s..." (magit-dash-repo-name repo))
+        (magit-dash-gh-ci-fetch
+         repo
+         (lambda (ci)
+           (if-let* ((run-id (plist-get ci :run-id)))
+               (magit-dash-ci--download-and-dispatch repo run-id)
+             (message "magit-dash fix-CI: no CI runs found for %s"
+                      (magit-dash-repo-name repo)))))))))
 
 (provide 'magit-dash-gh-ci)
 ;;; magit-dash-gh-ci.el ends here

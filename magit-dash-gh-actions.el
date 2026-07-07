@@ -105,7 +105,11 @@ When RUNS has exactly one entry it is returned directly without prompting."
 ;;; Pipeline steps
 
 (defun magit-dash-gh-actions--step-finalize (ctx)
-  "Write the index file and report completion to the user."
+  "Write the index file, report completion, then invoke CTX's :on-complete hook.
+:on-complete, when set, is a function called with CTX after the index is
+written; it lets other callers (e.g. `magit-dash-gh-ci-dispatch-fix-operation')
+reuse this download pipeline and react to its result without altering the
+default behaviour of `magit-dash-gh-actions-fetch'."
   (let* ((dir      (plist-get ctx :dir))
          (run-info (plist-get ctx :run-info))
          (files    (plist-get ctx :files))
@@ -129,7 +133,9 @@ When RUNS has exactly one entry it is returned directly without prompting."
     (magit-dash-gh--write-index dir data)
     (message "magit-gh-ci: done — %d file(s) in %s" (length files) dir)
     (when magit-dash-gh-actions-open-dired
-      (dired dir))))
+      (dired dir))
+    (when-let* ((on-complete (plist-get ctx :on-complete)))
+      (funcall on-complete ctx))))
 
 (defun magit-dash-gh-actions--step-failed-logs (ctx)
   "Fetch failed-step-only logs when applicable, then finalize."
