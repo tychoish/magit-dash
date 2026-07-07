@@ -29,9 +29,6 @@
 (declare-function magit-dash-repo-name "magit-dash")
 (declare-function magit-dash-repo-branch "magit-dash")
 (declare-function magit-dash-repo-include-ci "magit-dash")
-(declare-function magit-dash-gh--cache-get "magit-dash-gh")
-(declare-function magit-dash-gh--cache-set "magit-dash-gh")
-(declare-function magit-dash-gh--run-process "magit-dash-gh")
 
 ;;; Faces
 

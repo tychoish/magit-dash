@@ -64,10 +64,6 @@
 (declare-function magit-dash-bump-submodules-menu "magit-dash-submodules")
 (declare-function magit-dash-gh-pr-dashboard-open "magit-dash-gh-pr")
 (declare-function magit-dash-gh-pr-dashboard-mode "magit-dash-gh-pr")
-(declare-function magit-dash-gh-ci--format-status "magit-dash-gh-ci")
-(declare-function magit-dash-gh-ci-fetch "magit-dash-gh-ci")
-(declare-function magit-dash-gh-ci-open-last-run "magit-dash-gh-ci")
-(declare-function magit-dash-gh-ci-fix-ci "magit-dash-gh-ci")
 
 (defconst magit-dash-buffer-name "*magit-dash-repos*")
 
