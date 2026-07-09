@@ -54,8 +54,8 @@
 (declare-function magit-checkout "magit-branch")
 (declare-function magit-worktree-checkout "magit-worktree")
 (declare-function magit-worktree-delete "magit-worktree")
-(declare-function agent-shell-switch-buffer "agent-shell-menu")
-(declare-function agent-shell-switch-project-session "agent-shell-menu")
+(declare-function agent-shell-switch-buffer "agent-shell")
+(declare-function agent-shell-menu-switch-project-session "agent-shell-menu")
 (declare-function agent-shell-new-shell "agent-shell")
 (declare-function agent-shell-queue-buffer-open "agent-shell-queue")
 (declare-function agent-shell-menu-project-buffers "agent-shell-menu")
@@ -1772,7 +1772,7 @@ Signals `user-error' when the current row is not a worktree."
   "Switch to an agent-shell session for the repository at point."
   (interactive)
   (with-magit-from-dashboard (magit-dash--repo-at-point)
-    (call-interactively #'agent-shell-switch-project-session)))
+    (call-interactively #'agent-shell-menu-switch-project-session)))
 
 (defun magit-dash-agent-shell-new ()
   "Start a new agent-shell session in the repository at point."
@@ -2090,7 +2090,7 @@ Signals `user-error' when the current overview is not a worktree."
   "Switch to an agent-shell session for this overview's repository."
   (interactive)
   (magit-dash-gh--with-repo-dir (magit-dash-repo-path (magit-dash-overview--current-repo))
-    (call-interactively #'agent-shell-switch-project-session)))
+    (call-interactively #'agent-shell-menu-switch-project-session)))
 
 (defun magit-dash-overview-agent-shell-new ()
   "Start a new agent-shell session in this overview's repository."
