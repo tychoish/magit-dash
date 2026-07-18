@@ -1420,6 +1420,7 @@ re-collected asynchronously."
    (tabulated-list-get-id)
    t))
 
+;;;###autoload
 (defun magit-dash-view ()
   "Open the overview buffer for the repository at point."
   (interactive)
