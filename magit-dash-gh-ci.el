@@ -31,7 +31,9 @@
 (declare-function magit-dash-repo-branch "magit-dash")
 (declare-function magit-dash-repo-include-ci "magit-dash")
 (declare-function agent-shell-insert "agent-shell")
-(declare-function agent-shell-menu-project-buffers "agent-shell-menu")
+(declare-function agent-shell-buffers "agent-shell")
+(declare-function agent-shell-get-config "agent-shell")
+(declare-function agent-shell-menu-new-shell-in-dir "agent-shell-menu")
 (declare-function agent-shell-queue-add-unassigned "agent-shell-queue")
 
 ;;; Faces
@@ -173,24 +175,65 @@ CTX's :files so an agent can open them for context."
               files)
       (buffer-string))))
 
+(defun magit-dash-ci--exact-scoped-shell-buffers (dir)
+  "Return live agent-shell buffers whose `default-directory' is exactly DIR.
+Unlike `agent-shell-menu-project-buffers', this never matches a buffer
+belonging to an enclosing superproject — only a session scoped to DIR
+itself qualifies as \"open for this project\"."
+  (seq-filter (lambda (buf)
+                (with-current-buffer buf
+                  (equal (file-name-as-directory default-directory) dir)))
+              (agent-shell-buffers)))
+
+(defun magit-dash-ci--ci-buffer-name (shell-buffer project-name)
+  "Return the CI fix-it buffer name for SHELL-BUFFER's provider and PROJECT-NAME.
+Formatted as `*<agent-shell-provider-name>-ci-<project>*'."
+  (let* ((config (agent-shell-get-config shell-buffer))
+         (provider (downcase (replace-regexp-in-string
+                              " " "-" (or (map-elt config :buffer-name) "agent")))))
+    (format "*%s-ci-%s*" provider project-name)))
+
+(defun magit-dash-ci--new-shell-buffer (dir project-name)
+  "Start a new agent-shell session scoped to DIR, named for PROJECT-NAME.
+Diffs `agent-shell-buffers' before and after creation, since
+`agent-shell-menu-new-shell-in-dir' does not return the new buffer, then
+renames it to `*<agent-shell-provider-name>-ci-<project>*'.  Returns the
+buffer."
+  (let ((before (agent-shell-buffers)))
+    (agent-shell-menu-new-shell-in-dir dir)
+    (when-let* ((buf (seq-find (lambda (b) (not (memq b before))) (agent-shell-buffers))))
+      (with-current-buffer buf
+        (rename-buffer (generate-new-buffer-name (magit-dash-ci--ci-buffer-name buf project-name))))
+      buf)))
+
 (defun magit-dash-ci--dispatch-prompt (repo prompt)
   "Send PROMPT to an agent for REPO.
-Prefers an open agent-shell buffer for REPO's directory, sending PROMPT
-directly and submitting it.  Falls back to `agent-shell-queue-add-unassigned'
-when the queue is available but no buffer is open for this project.  As a
-last resort (neither agent-shell nor agent-shell-queue is loaded), copies
-PROMPT to the kill ring so it can be pasted manually."
+When an agent-shell session already open, scoped exactly to REPO's own
+path (not any enclosing superproject), offers to reuse it.  Otherwise, or
+if declined, starts a new session scoped to REPO's path, named
+`*<agent-shell-provider-name>-ci-<project>*'.  Falls back to
+`agent-shell-queue-add-unassigned' when agent-shell-menu isn't loaded.  As a
+last resort (neither is loaded), copies PROMPT to the kill ring so it can be
+pasted manually."
   (let* ((default-directory (file-name-as-directory (magit-dash-repo-path repo)))
-         (buffers (and (fboundp 'agent-shell-menu-project-buffers)
-                       (agent-shell-menu-project-buffers))))
+         (project-name (magit-dash-repo-name repo))
+         (existing (and (fboundp 'agent-shell-buffers)
+                        (magit-dash-ci--exact-scoped-shell-buffers default-directory))))
     (cond
-     (buffers
-      (agent-shell-insert :text prompt :submit t :shell-buffer (car buffers))
-      (message "magit-dash fix-CI: sent to %s" (buffer-name (car buffers))))
+     ((and existing
+           (y-or-n-p (format "magit-dash fix-CI: reuse open agent-shell %s for %s? "
+                             (buffer-name (car existing)) project-name)))
+      (agent-shell-insert :text prompt :submit t :shell-buffer (car existing))
+      (message "magit-dash fix-CI: sent to %s" (buffer-name (car existing))))
+     ((fboundp 'agent-shell-menu-new-shell-in-dir)
+      (if-let* ((shell-buffer (magit-dash-ci--new-shell-buffer default-directory project-name)))
+          (progn
+            (agent-shell-insert :text prompt :submit t :shell-buffer shell-buffer)
+            (message "magit-dash fix-CI: started %s" (buffer-name shell-buffer)))
+        (message "magit-dash fix-CI: new agent-shell for %s did not initialize" project-name)))
      ((fboundp 'agent-shell-queue-add-unassigned)
       (agent-shell-queue-add-unassigned prompt)
-      (message "magit-dash fix-CI: queued (no open agent-shell for %s)"
-               (magit-dash-repo-name repo)))
+      (message "magit-dash fix-CI: queued (agent-shell-menu not available for %s)" project-name))
      (t
       (kill-new prompt)
       (message "magit-dash fix-CI: agent-shell not available — prompt copied to kill ring")))))
