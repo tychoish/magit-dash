@@ -69,23 +69,27 @@ passes nil explicitly to exercise the disabled case."
          (inserted nil)
          (fake-buf (generate-new-buffer " *fake-agent-shell*")))
     (unwind-protect
-        (cl-letf (((symbol-function 'agent-shell-menu-project-buffers)
-                   (lambda () (list fake-buf)))
-                  ((symbol-function 'agent-shell-insert)
-                   (cl-function
-                    (lambda (&key text submit shell-buffer)
-                      (setq inserted (list text submit shell-buffer))))))
-          (magit-dash-ci--dispatch-prompt repo "fix it please")
-          (should (equal "fix it please" (nth 0 inserted)))
-          (should (nth 1 inserted))
-          (should (eq fake-buf (nth 2 inserted))))
+        (progn
+          (with-current-buffer fake-buf
+            (setq default-directory "/tmp/test/"))
+          (cl-letf (((symbol-function 'agent-shell-buffers)
+                     (lambda () (list fake-buf)))
+                    ((symbol-function 'y-or-n-p) (lambda (_prompt) t))
+                    ((symbol-function 'agent-shell-insert)
+                     (cl-function
+                      (lambda (&key text submit shell-buffer)
+                        (setq inserted (list text submit shell-buffer))))))
+            (magit-dash-ci--dispatch-prompt repo "fix it please")
+            (should (equal "fix it please" (nth 0 inserted)))
+            (should (nth 1 inserted))
+            (should (eq fake-buf (nth 2 inserted)))))
       (kill-buffer fake-buf))))
 
 (ert-deftest magit-dash-gh-ci/dispatch-prompt-queues-when-no-shell-open ()
   "Falls back to the unassigned queue bucket when no shell is open."
   (let* ((repo (magit-dash-gh-ci-test/make-repo))
          (queued nil))
-    (cl-letf (((symbol-function 'agent-shell-menu-project-buffers) (lambda () nil))
+    (cl-letf (((symbol-function 'agent-shell-buffers) (lambda () nil))
               ((symbol-function 'agent-shell-queue-add-unassigned)
                (lambda (prompt &optional _background) (setq queued prompt))))
       (magit-dash-ci--dispatch-prompt repo "fix it please")
@@ -100,7 +104,7 @@ passes nil explicitly to exercise the disabled case."
         (progn
           (when had-binding
             (fmakunbound 'agent-shell-queue-add-unassigned))
-          (cl-letf (((symbol-function 'agent-shell-menu-project-buffers) (lambda () nil)))
+          (cl-letf (((symbol-function 'agent-shell-buffers) (lambda () nil)))
             (kill-new "unrelated")
             (magit-dash-ci--dispatch-prompt repo "fix it please")
             (should (equal "fix it please" (current-kill 0)))))
