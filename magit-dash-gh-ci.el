@@ -193,17 +193,38 @@ Formatted as `*<agent-shell-provider-name>-ci-<project>*'."
                               " " "-" (or (map-elt config :buffer-name) "agent")))))
     (format "*%s-ci-%s*" provider project-name)))
 
+(defun magit-dash-ci--rename-ci-buffer-when-ready (buf project-name)
+  "Rename BUF to its CI name once BUF's agent-shell session is ready.
+Renaming before the ACP handshake reaches `prompt-ready' races with
+agent-shell/shell-maker's buffer-context tracking for in-flight
+responses, which can misroute output to an unrelated agent-shell buffer.
+Mirrors the readiness check `agent-shell--insert-to-shell-buffer' uses
+before submitting to a freshly created session."
+  (if (with-current-buffer buf
+        (or (map-nested-elt agent-shell--state '(:session :id))
+            (eq agent-shell-session-strategy 'new-deferred)))
+      (with-current-buffer buf
+        (rename-buffer (generate-new-buffer-name (magit-dash-ci--ci-buffer-name buf project-name))))
+    (letrec ((token (agent-shell-subscribe-to
+                     :shell-buffer buf
+                     :event 'prompt-ready
+                     :on-event (lambda (_event)
+                                 (agent-shell-unsubscribe :subscription token)
+                                 (when (buffer-live-p buf)
+                                   (magit-dash-ci--rename-ci-buffer-when-ready buf project-name))))))
+      token)))
+
 (defun magit-dash-ci--new-shell-buffer (dir project-name)
   "Start a new agent-shell session scoped to DIR, named for PROJECT-NAME.
 Diffs `agent-shell-buffers' before and after creation, since
 `agent-shell-menu-new-shell-in-dir' does not return the new buffer, then
-renames it to `*<agent-shell-provider-name>-ci-<project>*'.  Returns the
-buffer."
+renames it to `*<agent-shell-provider-name>-ci-<project>*' once the
+session is ready (see `magit-dash-ci--rename-ci-buffer-when-ready').
+Returns the buffer."
   (let ((before (agent-shell-buffers)))
     (agent-shell-menu-new-shell-in-dir dir)
     (when-let* ((buf (seq-find (lambda (b) (not (memq b before))) (agent-shell-buffers))))
-      (with-current-buffer buf
-        (rename-buffer (generate-new-buffer-name (magit-dash-ci--ci-buffer-name buf project-name))))
+      (magit-dash-ci--rename-ci-buffer-when-ready buf project-name)
       buf)))
 
 (defun magit-dash-ci--dispatch-prompt (repo prompt)
