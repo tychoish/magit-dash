@@ -1408,6 +1408,27 @@ re-collected asynchronously."
   (clrhash magit-dash-gh--cache)
   (magit-dash-refresh))
 
+(defmacro with-magit-dash (&rest body)
+  `(progn
+     (magit-dash-repo-ensure-configuration)
+     (let* ((buf (get-buffer-create magit-dash-buffer-name))
+	    (default-directory (if (eq (current-buffer) buf)
+				   (magit-dash-repo-path (magit-dash--repo-at-point))
+				 default-directory)))
+     (with-current-buffer buf
+       (unless (derived-mode-p 'magit-dash-mode)
+	 (magit-dash-mode))
+       (magit-dash-refresh)
+       ,@body))))
+
+(defmacro with-magit-from-dashboard (repo &rest body)
+  "Execute BODY with default-directory set to REPO path."
+  (declare (indent 1))
+  (let ((path (make-symbol "path")))
+    `(let* ((,path (file-name-as-directory (magit-dash-repo-path ,repo)))
+             (default-directory ,path))
+       ,@body)))
+
 (defun magit-dash--repo-at-point ()
   "Return the `magit-dash-repo' struct at point or signal `user-error'."
   (or (tabulated-list-get-id)
@@ -1840,27 +1861,6 @@ Signals `user-error' when `magit-dash-repo-list' is empty."
 (defun magit-dash-create ()
   (with-magit-dash
    (message "magit-dash-repo-dashobard: your (miss)adventure awaits!")))
-
-(defmacro with-magit-dash (&rest body)
-  `(progn
-     (magit-dash-repo-ensure-configuration)
-     (let* ((buf (get-buffer-create magit-dash-buffer-name))
-	    (default-directory (if (eq (current-buffer) buf)
-				   (magit-dash-repo-path (magit-dash--repo-at-point))
-				 default-directory)))
-     (with-current-buffer buf
-       (unless (derived-mode-p 'magit-dash-mode)
-	 (magit-dash-mode))
-       (magit-dash-refresh)
-       ,@body))))
-
-(defmacro with-magit-from-dashboard (repo &rest body)
-  "Execute BODY with default-directory set to REPO path."
-  (declare (indent 1))
-  (let ((path (make-symbol "path")))
-    `(let* ((,path (file-name-as-directory (magit-dash-repo-path ,repo)))
-             (default-directory ,path))
-       ,@body)))
 
 ;;;; Repo overview buffer
 
