@@ -470,13 +470,70 @@ Uses `gh repo view' and `magit-get-current-branch'."
           :repo   (nth 1 parts)
           :branch (magit-get-current-branch))))
 
+;;; Account switching
+
+(defun magit-dash-gh--auth-accounts ()
+  "Return a list of (:host HOST :user USER :active ACTIVE-P) plists.
+Parsed from `gh auth status', across all configured hosts."
+  (magit-dash-gh--check-gh)
+  (with-temp-buffer
+    (insert (shell-command-to-string "gh auth status 2>&1"))
+    (goto-char (point-min))
+    (let (accounts)
+      (while (re-search-forward
+              "Logged in to \\([^[:space:]]+\\) account \\([^[:space:]]+\\).*\n[[:space:]]*- Active account: \\(true\\|false\\)"
+              nil t)
+        (push (list :host (match-string 1)
+                    :user (match-string 2)
+                    :active (string= (match-string 3) "true"))
+              accounts))
+      (nreverse accounts))))
+
+(defun magit-dash-gh--auth-select-account (accounts)
+  "Prompt to select one of ACCOUNTS via `annotated-completing-read'.
+ACCOUNTS is a list of (:host :user :active) plists. Returns the chosen plist."
+  (let* ((label-fn (lambda (a) (format "%s (%s)" (plist-get a :user) (plist-get a :host))))
+         (table (make-hash-table :test #'equal)))
+    (seq-do (lambda (a) (map-put! table (funcall label-fn a) "switch to this account"))
+            accounts)
+    (let ((label (annotated-completing-read table
+                                             :prompt "switch gh account => "
+                                             :category 'magit-dash-gh-auth
+                                             :require-match t)))
+      (seq-find (lambda (a) (equal label (funcall label-fn a))) accounts))))
+
+;;;###autoload
+(defun magit-dash-gh-auth-switch ()
+  "Switch the active `gh' CLI account.
+When more than two accounts are configured, prompt to select which to
+switch to via `annotated-completing-read'. Otherwise switch directly
+to the other configured account."
+  (interactive)
+  (let* ((accounts (magit-dash-gh--auth-accounts))
+         (current (seq-find (lambda (a) (plist-get a :active)) accounts))
+         (others (seq-remove (lambda (a) (plist-get a :active)) accounts)))
+    (unless current
+      (user-error "magit-gh: no active `gh' account found"))
+    (unless others
+      (user-error "magit-gh: no other `gh' accounts configured"))
+    (let ((target (if (= (length others) 1)
+                       (car others)
+                     (magit-dash-gh--auth-select-account others))))
+      (shell-command-to-string
+       (format "gh auth switch --hostname %s --user %s"
+               (shell-quote-argument (plist-get target :host))
+               (shell-quote-argument (plist-get target :user))))
+      (message "magit-gh: switched %s -> %s"
+               (plist-get current :user) (plist-get target :user)))))
+
 ;;;###autoload
 (transient-define-prefix magit-gh ()
   "GitHub workflow commands: branch pruning, CI logs, and PR comments."
   [["GitHub"
-    ("P" "Prune merged/closed PR branches" magit-dash-gh-prune-merged-branches)
-    ("L" "Fetch CI logs"                   magit-dash-gh-actions-fetch)
-    ("R" "Fetch PR comments"               magit-dash-gh-pr-fetch)]])
+    ("p" "Prune merged/closed PR branches" magit-dash-gh-prune-merged-branches)
+    ("l" "Fetch CI logs"                   magit-dash-gh-actions-fetch)
+    ("c" "Fetch PR comments"               magit-dash-gh-pr-fetch)
+    ("u" "Switch gh auth account"          magit-dash-gh-auth-switch)]])
 
 (provide 'magit-dash-gh)
 
