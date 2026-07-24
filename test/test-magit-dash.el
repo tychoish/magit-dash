@@ -1695,6 +1695,42 @@ in magit-dash-repo-list, preventing duplicate rows."
       (should (equal "main"      (magit-dash-repo-name (nth 0 result))))
       (should (equal "main<lib>" (magit-dash-repo-name (nth 1 result)))))))
 
+;;;; magit-dash--resolve-repo-path
+
+(ert-deftest magit-dash/resolve-repo-path-prefers-dashboard-point ()
+  "resolve-repo-path uses the repo at point over `magit-toplevel' when both are available."
+  (let ((repo (magit-dash-repo--make :name "r" :path "/tmp/at-point")))
+    (cl-letf (((symbol-function 'magit-dash--repo-at-point-p) (lambda () t))
+              ((symbol-function 'magit-dash--repo-at-point) (lambda () repo))
+              ((symbol-function 'magit-toplevel) (lambda () "/tmp/toplevel")))
+      (should (equal "/tmp/at-point" (magit-dash--resolve-repo-path))))))
+
+(ert-deftest magit-dash/resolve-repo-path-falls-back-to-toplevel ()
+  "resolve-repo-path uses `magit-toplevel' when there's no dashboard repo at point."
+  (cl-letf (((symbol-function 'magit-dash--repo-at-point-p) (lambda () nil))
+            ((symbol-function 'magit-toplevel) (lambda () "/tmp/toplevel")))
+    (should (equal "/tmp/toplevel" (magit-dash--resolve-repo-path)))))
+
+(ert-deftest magit-dash/resolve-repo-path-prompts-when-nothing-obvious ()
+  "resolve-repo-path prompts among registered repos when point and toplevel both fail."
+  (let ((magit-dash-repo-list
+         (list (magit-dash-repo--make :name "alpha" :path "/tmp/alpha")
+               (magit-dash-repo--make :name "beta" :path "/tmp/beta"))))
+    (cl-letf (((symbol-function 'magit-dash--repo-at-point-p) (lambda () nil))
+              ((symbol-function 'magit-toplevel) (lambda () nil))
+              ((symbol-function 'completing-read)
+               (lambda (_prompt _coll &optional _pred require-match &rest _)
+                 (should require-match)
+                 "beta")))
+      (should (equal "/tmp/beta" (magit-dash--resolve-repo-path))))))
+
+(ert-deftest magit-dash/resolve-repo-path-user-error-when-no-registered-repos ()
+  "prompt-for-repo-path signals `user-error' when there is nothing to choose from."
+  (let ((magit-dash-repo-list nil))
+    (cl-letf (((symbol-function 'magit-dash--repo-at-point-p) (lambda () nil))
+              ((symbol-function 'magit-toplevel) (lambda () nil)))
+      (should-error (magit-dash--resolve-repo-path) :type 'user-error))))
+
 ;;;; Transient menu key conflict detection
 
 (defun test-magit-dash--transient-keys (prefix)

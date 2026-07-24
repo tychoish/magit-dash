@@ -1458,6 +1458,31 @@ re-collected asynchronously."
    (tabulated-list-get-id)
    t))
 
+(defun magit-dash--prompt-for-repo-path ()
+  "Prompt for one of the registered repositories and return its path.
+Signals `user-error' when no repositories are registered."
+  (unless magit-dash-repo-list
+    (user-error "magit-dash: no registered repositories to choose from"))
+  (let* ((names (seq-map #'magit-dash-repo-name magit-dash-repo-list))
+         (name (completing-read "Repository: " names nil t))
+         (repo (seq-find (lambda (r) (equal (magit-dash-repo-name r) name))
+                         magit-dash-repo-list)))
+    (magit-dash-repo-path repo)))
+
+(defun magit-dash--resolve-repo-path ()
+  "Return an absolute path to a git repository for the current command context.
+Tries, in order:
+  - the `magit-dash-repo' at point, when called from a `magit-dash' buffer.
+  - the git repository containing the current buffer's `default-directory',
+    which covers any `magit'-derived buffer (status, log, diff, ...) as well
+    as an ordinary file or `dired' buffer inside a repository.
+  - a `completing-read' prompt over `magit-dash-repo-list', requiring an
+    exact match, when no repository can be determined unambiguously."
+  (or (and (magit-dash--repo-at-point-p)
+           (magit-dash-repo-path (magit-dash--repo-at-point)))
+      (magit-toplevel)
+      (magit-dash--prompt-for-repo-path)))
+
 ;;;###autoload
 (defun magit-dash-view ()
   "Open the overview buffer for the repository at point."
@@ -1770,9 +1795,13 @@ Adds to any existing marks rather than replacing them."
     (call-interactively #'magit-checkout)))
 
 (defun magit-dash-prune-branches ()
-  "Prune merged branches in the repository at point."
+  "Prune merged branches in a repository.
+Uses the repository at point when called from a `magit-dash' buffer,
+otherwise the git repository containing the current buffer (works from any
+`magit' buffer or a file/`dired' buffer inside a repo), and finally prompts
+among the registered repositories when neither applies."
   (interactive)
-  (with-magit-from-dashboard (magit-dash--repo-at-point)
+  (let ((default-directory (file-name-as-directory (magit-dash--resolve-repo-path))))
     (magit-dash-gh-prune-merged-branches)))
 
 (defun magit-dash--at-worktree-p ()
