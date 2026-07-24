@@ -813,9 +813,18 @@ Shows a one-line summary message and opens a detail buffer when issues are found
 (defun magit-dash--parse-worktrees (main-path lines)
   "Parse LINES from `git worktree list --porcelain' for repo at MAIN-PATH.
 Returns a list of `magit-dash-repo' structs for additional worktrees.
-The first block (the main worktree) is always skipped."
-  (let ((main-name (file-name-nondirectory (directory-file-name main-path)))
-	blocks current)
+The first block (the main worktree) is always skipped.
+Each worktree's name uses the registered repo's :name (falling back to the
+MAIN-PATH basename when unregistered) so custom names carry over, and each
+worktree inherits the parent's :sort-hint so it always sorts immediately
+after its parent."
+  (let* ((main-repo (seq-find (lambda (r) (equal (magit-dash-repo-path r) main-path))
+                              magit-dash-repo-list))
+         (main-name (if main-repo
+                        (magit-dash-repo-name main-repo)
+                      (file-name-nondirectory (directory-file-name main-path))))
+         (sort-hint (and main-repo (magit-dash-repo-sort-hint main-repo)))
+         blocks current)
     (seq-do (lambda (line)
               (if (string-empty-p line)
                   (progn
@@ -838,7 +847,8 @@ The first block (the main worktree) is always skipped."
               :name (format "%s@%s" main-name (or branch "detached"))
               :path wt-path
               :worktree t
-              :branch (or branch "detached"))))))
+              :branch (or branch "detached")
+              :sort-hint sort-hint)))))
       (seq-remove #'null))))
 
 (defun magit-dash--discover-worktrees ()
@@ -1216,7 +1226,14 @@ until `magit-dash--populate-stats-async' updates them."
                                               (gethash (magit-dash-repo-path repo) magit-dash--submodule-path-set)))
                               (is-missing (eq (magit-dash-repo-submodule repo) 'missing))
                               (is-marked (member (magit-dash-repo-path repo) magit-dash--marked-paths))
-                              (display (if subm-name subm-name (magit-dash-repo-name repo)))
+                              (display (cond
+                                        (subm-name subm-name)
+                                        ((and (magit-dash-repo-worktree repo)
+                                              (magit-dash-repo-branch repo)
+                                              (not (string-empty-p (magit-dash-repo-branch repo))))
+                                         (string-replace (magit-dash-repo-branch repo) "<B>"
+                                                          (magit-dash-repo-name repo)))
+                                        (t (magit-dash-repo-name repo))))
                               (base-face (if is-marked
                                             '(bold magit-dash-repo-name-face)
                                           'magit-dash-repo-name-face))

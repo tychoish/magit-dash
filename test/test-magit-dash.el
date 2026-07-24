@@ -1352,6 +1352,33 @@ Overrides are placed first so `plist-get' finds them before the defaults."
                  '("worktree /tmp/main" "HEAD abc123" "branch refs/heads/main" ""))))
     (should (null result))))
 
+(ert-deftest magit-dash/parse-worktrees-uses-registered-name ()
+  "parse-worktrees uses the registered repo's :name, not the path basename, when they differ."
+  (let* ((magit-dash-repo-list
+          (list (magit-dash-repo--make :name "custom-name" :path "/tmp/main")))
+         (result (magit-dash--parse-worktrees
+                  "/tmp/main"
+                  magit-dash-test--worktree-output)))
+    (should (equal "custom-name@feature-1" (magit-dash-repo-name (nth 0 result))))
+    (should (equal "custom-name@detached" (magit-dash-repo-name (nth 1 result))))))
+
+(ert-deftest magit-dash/parse-worktrees-inherits-parent-sort-hint ()
+  "parse-worktrees copies the registered parent's :sort-hint onto each worktree."
+  (let* ((magit-dash-repo-list
+          (list (magit-dash-repo--make :name "main" :path "/tmp/main" :sort-hint 7)))
+         (result (magit-dash--parse-worktrees
+                  "/tmp/main"
+                  magit-dash-test--worktree-output)))
+    (should (seq-every-p (lambda (r) (= 7 (magit-dash-repo-sort-hint r))) result))))
+
+(ert-deftest magit-dash/parse-worktrees-no-sort-hint-when-unregistered ()
+  "parse-worktrees leaves :sort-hint nil when the parent isn't a registered repo."
+  (let* ((magit-dash-repo-list nil)
+         (result (magit-dash--parse-worktrees
+                  "/tmp/main"
+                  magit-dash-test--worktree-output)))
+    (should (seq-every-p (lambda (r) (null (magit-dash-repo-sort-hint r))) result))))
+
 ;;;; magit-dash--sorted-repos with worktrees
 
 (ert-deftest magit-dash/sorted-repos-appends-worktrees ()
@@ -1503,6 +1530,38 @@ Overrides are placed first so `plist-get' finds them before the defaults."
              (entry (magit-dash--build-entry repo))
              (branch-cell (aref (cadr entry) 1)))
         (should (equal "live-branch" (substring-no-properties branch-cell)))))))
+
+(ert-deftest magit-dash/build-entry-name-replaces-branch-with-placeholder ()
+  "build-entry's Name column shows <B> in place of the branch for worktree rows,
+since the Branch column already displays it."
+  (let ((magit-dash-columns
+         '((name . t) (branch . t) (fetched . nil) (ci . nil) (status . nil)
+           (worktree . nil) (sync . nil) (cached . nil)))
+        (magit-dash-gh--cache (make-hash-table :test #'equal)))
+    (cl-letf (((symbol-function 'magit-dash--get-stats-fast)
+               (lambda (_) (list :branch nil :ahead 0 :behind 0 :dirty nil :fetch-age nil
+                                 :head-hash "abc" :recent-log "" :remote-origin nil
+                                 :uncommitted-files nil))))
+      (let* ((repo (magit-dash-repo--make :name "main@feature-1" :path "/tmp/wt"
+                                        :worktree t :branch "feature-1"))
+             (entry (magit-dash--build-entry repo))
+             (name-cell (aref (cadr entry) 0)))
+        (should (equal "main@<B>" (substring-no-properties name-cell)))))))
+
+(ert-deftest magit-dash/build-entry-name-unchanged-for-non-worktree ()
+  "build-entry's Name column is untouched for a plain (non-worktree) repo."
+  (let ((magit-dash-columns
+         '((name . t) (branch . t) (fetched . nil) (ci . nil) (status . nil)
+           (worktree . nil) (sync . nil) (cached . nil)))
+        (magit-dash-gh--cache (make-hash-table :test #'equal)))
+    (cl-letf (((symbol-function 'magit-dash--get-stats-fast)
+               (lambda (_) (list :branch "main" :ahead 0 :behind 0 :dirty nil :fetch-age nil
+                                 :head-hash "abc" :recent-log "" :remote-origin nil
+                                 :uncommitted-files nil))))
+      (let* ((repo (magit-dash-repo--make :name "main" :path "/tmp/main"))
+             (entry (magit-dash--build-entry repo))
+             (name-cell (aref (cadr entry) 0)))
+        (should (equal "main" (substring-no-properties name-cell)))))))
 
 ;;;; magit-dash--parse-submodules
 
