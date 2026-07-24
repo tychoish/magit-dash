@@ -40,6 +40,7 @@
 
 (require 'magit-dash-gh-ci)
 (require 'magit-dash-gh)
+(require 'magit-dash-submodules)
 
 (declare-function magit-status-setup-buffer "magit-status")
 (declare-function magit-diff-dwim "magit-diff")
@@ -61,7 +62,6 @@
 (declare-function agent-shell-menu-project-buffers "agent-shell-menu")
 
 (declare-function builder-compile-project "builder")
-(declare-function magit-dash-bump-submodules-menu "magit-dash-submodules")
 (declare-function magit-dash-gh-pr-dashboard-open "magit-dash-gh-pr")
 (declare-function magit-dash-gh-pr-dashboard-mode "magit-dash-gh-pr")
 
