@@ -11,7 +11,7 @@
 
 ;;; Commentary:
 
-;; Provides `magit-gh', an interactive menu for
+;; Provides `magit-dash-gh-menu', an interactive menu for
 ;; pruning local branches whose remote-tracking PRs are merged or
 ;; closed. Per-repo candidate and marked-branch state is cached on a
 ;; hidden state buffer keyed by repository toplevel.
@@ -527,7 +527,7 @@ to the other configured account."
                (plist-get current :user) (plist-get target :user)))))
 
 ;;;###autoload
-(transient-define-prefix magit-gh ()
+(transient-define-prefix magit-dash-gh-menu ()
   "GitHub workflow commands: branch pruning, CI logs, and PR comments."
   [["GitHub"
     ("p" "Prune merged/closed PR branches" magit-dash-gh-prune-merged-branches)
