@@ -207,33 +207,85 @@ Returns t when the commit succeeds, nil otherwise."
 
 ;;;; Stats collection
 
+(defun magit-dash--resolve-git-dir (path)
+  "Return the git directory for the repository, worktree, or submodule at PATH.
+Handles the case where PATH/.git is a file containing a `gitdir: ...' pointer
+\(worktrees and submodules) rather than PATH/.git being a directory itself.
+For a linked worktree this is its private directory, which holds its own
+HEAD but not FETCH_HEAD or refs — see `magit-dash--resolve-common-git-dir'
+for those.  Returns nil when PATH has no .git entry."
+  (let ((dot-git (expand-file-name ".git" path)))
+    (cond
+     ((file-directory-p dot-git) dot-git)
+     ((file-exists-p dot-git)
+      (let ((line (with-temp-buffer
+                    (insert-file-contents dot-git)
+                    (string-trim (buffer-string)))))
+        (when (string-prefix-p "gitdir: " line)
+          (let ((gitdir (substring line 8)))
+            (if (file-name-absolute-p gitdir)
+                gitdir
+              (expand-file-name gitdir path))))))
+     (t nil))))
+
+(defun magit-dash--resolve-common-git-dir (path)
+  "Return the shared git directory for the repository at PATH.
+For a linked worktree, `magit-dash--resolve-git-dir' returns the worktree's
+private directory; this follows that directory's `commondir' file to the
+directory shared across all worktrees, where FETCH_HEAD and refs actually
+live.  Plain repositories and submodules have no `commondir' file, so their
+resolved git directory is returned as-is."
+  (when-let* ((git-dir (magit-dash--resolve-git-dir path)))
+    (let ((commondir-file (expand-file-name "commondir" git-dir)))
+      (if (file-exists-p commondir-file)
+          (expand-file-name
+           (string-trim (with-temp-buffer
+                          (insert-file-contents commondir-file)
+                          (buffer-string)))
+           git-dir)
+        git-dir))))
+
 (defun magit-dash--fetch-age (path)
-  "Return seconds since last git fetch for repo at PATH, or nil if never fetched."
-  (when-let* ((fetch-head (expand-file-name ".git/FETCH_HEAD" path))
+  "Return seconds since last git fetch for repo at PATH, or nil if never fetched.
+Resolves worktree/submodule gitlinks (and, for worktrees, the shared
+commondir) so FETCH_HEAD is read from the correct location instead of
+assuming PATH/.git is a plain directory."
+  (when-let* ((git-dir (magit-dash--resolve-common-git-dir path))
+              (fetch-head (expand-file-name "FETCH_HEAD" git-dir))
               (attrs (and (file-exists-p fetch-head) (file-attributes fetch-head))))
     (float-time (time-since (file-attribute-modification-time attrs)))))
 
 (defun magit-dash--head-hash (path)
   "Return the current HEAD commit hash for repo at PATH without spawning a process.
-Reads .git/HEAD directly and resolves symbolic refs via file I/O.
+Resolves PATH's git directory (following worktree/submodule gitlinks) and
+reads HEAD directly, resolving symbolic refs via file I/O against the
+shared commondir so worktree refs resolve correctly.
 Returns nil if the repo has no commits yet."
-  (when-let* ((head-file (expand-file-name ".git/HEAD" path))
-	      (head (and (file-exists-p head-file)
+  (when-let* ((git-dir (magit-dash--resolve-git-dir path))
+              (head-file (expand-file-name "HEAD" git-dir))
+              (head (and (file-exists-p head-file)
                          (string-trim (with-temp-buffer
                                         (insert-file-contents head-file)
                                         (buffer-string))))))
     (if-let* ((_ (string-prefix-p "ref: " head))
-              (ref-path (expand-file-name (concat ".git/" (substring head 5)) path))
+              (common-dir (magit-dash--resolve-common-git-dir path))
+              (ref-path (expand-file-name (substring head 5) common-dir))
               (_ (file-exists-p ref-path)))
         (string-trim (with-temp-buffer
                        (insert-file-contents ref-path)
                        (buffer-string)))
       head)))
 
+(defun magit-dash--commit-timestamp-to-age (timestamp-string)
+  "Convert TIMESTAMP-STRING (unix seconds, or empty) to a seconds-ago float.
+Returns nil when TIMESTAMP-STRING is empty (no commits yet)."
+  (unless (string-empty-p timestamp-string)
+    (- (float-time) (string-to-number timestamp-string))))
+
 (defun magit-dash--collect-stats (repo)
   "Synchronously collect git stats for REPO and store them in the cache.
 Returns a plist with keys :branch :remote-origin :behind :ahead :dirty
-:uncommitted-files :fetch-age :head-hash :recent-log."
+:uncommitted-files :fetch-age :updated-age :head-hash :recent-log."
   (let* ((path (magit-dash-repo-path repo))
          (default-directory path)
          (branch (or (magit-git-string "branch" "--show-current") ""))
@@ -250,6 +302,7 @@ Returns a plist with keys :branch :remote-origin :behind :ahead :dirty
          (recent-log (mapconcat #'identity
                                 (magit-git-lines "log" "--oneline" "-10")
                                 "\n"))
+         (commit-ts (or (ignore-errors (magit-git-string "log" "-1" "--format=%ct")) ""))
          (stats (list :branch branch
                       :remote-origin remote-origin
                       :behind behind
@@ -257,6 +310,7 @@ Returns a plist with keys :branch :remote-origin :behind :ahead :dirty
                       :dirty dirty
                       :uncommitted-files uncommitted-files
                       :fetch-age (magit-dash--fetch-age path)
+                      :updated-age (magit-dash--commit-timestamp-to-age commit-ts)
                       :head-hash (magit-dash--head-hash path)
                       :recent-log recent-log)))
     (magit-dash-gh--cache-set path :stats stats)
@@ -264,7 +318,7 @@ Returns a plist with keys :branch :remote-origin :behind :ahead :dirty
 
 (defun magit-dash--collect-stats-async (repo callback)
   "Collect git stats for REPO asynchronously; call CALLBACK with a stats plist.
-Runs five git subcommands sequentially via `magit-dash--run-git',
+Runs the git subcommands sequentially via `magit-dash--run-git',
 accumulating their outputs before assembling the stats plist."
   (let* ((path (magit-dash-repo-path repo))
          (commands (list '("branch" "--show-current")
@@ -272,7 +326,8 @@ accumulating their outputs before assembling the stats plist."
                          '("rev-list" "--count" "HEAD..@{u}")
                          '("rev-list" "--count" "@{u}..HEAD")
                          '("status" "--porcelain")
-                         '("log" "--oneline" "-10")))
+                         '("log" "--oneline" "-10")
+                         '("log" "-1" "--format=%ct")))
 	 outputs run)
     (setq run
           (lambda (remaining)
@@ -292,6 +347,7 @@ accumulating their outputs before assembling the stats plist."
                        (dirty (not (null porcelain-lines)))
                        (uncommitted-files (when dirty porcelain-lines))
                        (recent-log (string-trim (or (nth 5 outputs) "")))
+                       (commit-ts (string-trim (or (nth 6 outputs) "")))
                        (stats (list :branch branch
                                     :remote-origin remote-origin
                                     :behind behind
@@ -299,6 +355,7 @@ accumulating their outputs before assembling the stats plist."
                                     :dirty dirty
                                     :uncommitted-files uncommitted-files
                                     :fetch-age (magit-dash--fetch-age path)
+                                    :updated-age (magit-dash--commit-timestamp-to-age commit-ts)
                                     :head-hash (magit-dash--head-hash path)
                                     :recent-log recent-log)))
                   (magit-dash-gh--cache-set path :stats stats)
@@ -816,14 +873,15 @@ Returns a list of `magit-dash-repo' structs for additional worktrees.
 The first block (the main worktree) is always skipped.
 Each worktree's name uses the registered repo's :name (falling back to the
 MAIN-PATH basename when unregistered) so custom names carry over, and each
-worktree inherits the parent's :sort-hint so it always sorts immediately
-after its parent."
+worktree inherits the parent's :sort-hint and :include-ci so it always sorts
+immediately after its parent and gets its own CI status fetched."
   (let* ((main-repo (seq-find (lambda (r) (equal (magit-dash-repo-path r) main-path))
                               magit-dash-repo-list))
          (main-name (if main-repo
                         (magit-dash-repo-name main-repo)
                       (file-name-nondirectory (directory-file-name main-path))))
          (sort-hint (and main-repo (magit-dash-repo-sort-hint main-repo)))
+         (include-ci (and main-repo (magit-dash-repo-include-ci main-repo)))
          blocks current)
     (seq-do (lambda (line)
               (if (string-empty-p line)
@@ -848,7 +906,8 @@ after its parent."
               :path wt-path
               :worktree t
               :branch (or branch "detached")
-              :sort-hint sort-hint)))))
+              :sort-hint sort-hint
+              :include-ci include-ci)))))
       (seq-remove #'null))))
 
 (defun magit-dash--discover-worktrees ()
@@ -931,16 +990,17 @@ Missing/uninitialized submodules are marked with :submodule \\='missing."
 ;;;; Column configuration
 
 (defvar magit-dash-columns
-  '((name . t) (branch . t) (fetched . t) (ci . nil) (status . t) (worktree . t) (sync . t) (cached . nil))
+  '((name . t) (branch . t) (fetched . t) (updated . nil) (ci . nil) (status . t) (worktree . t) (sync . t) (cached . nil))
   "Alist of (COLUMN-SYMBOL . ENABLED) for the repository dashboard.
 Persisted across sessions via `savehist-additional-variables'.")
 
 (defconst magit-dash--all-columns
-  '(name branch fetched ci status worktree sync cached)
+  '(name branch fetched updated ci status worktree sync cached)
   "All available dashboard columns in display order.")
 
 (defconst magit-dash--column-defs
   '((fetched  . ("Fetched"  8 nil))
+    (updated  . ("Updated"  8 nil))
     (status   . ("Status"   8 nil))
     (worktree . ("Type"     8 nil))
     (sync     . ("Sync"     8 nil))
@@ -990,6 +1050,25 @@ Name and Branch widths are computed dynamically in `magit-dash--build-format'.")
 (add-to-list 'savehist-additional-variables 'magit-dash-columns)
 
 ;;;; Formatting helpers
+
+(defvar magit-dash-branch-basename-p nil
+  "When non-nil, the Branch column shows only the basename of a branch.
+Everything up to and including the final \"/\" is dropped (e.g.
+\"feature/some/thing\" displays as \"thing\").  Purely cosmetic — git
+operations always use the full branch name.")
+
+(defun magit-dash-toggle-branch-basename ()
+  "Toggle whether the Branch column shows only a branch's basename."
+  (interactive)
+  (setq magit-dash-branch-basename-p (not magit-dash-branch-basename-p))
+  (magit-dash-refresh))
+
+(defun magit-dash--display-branch-name (branch)
+  "Return BRANCH for display, trimmed to its basename when configured.
+See `magit-dash-branch-basename-p'."
+  (if (and magit-dash-branch-basename-p branch)
+      (file-name-nondirectory branch)
+    branch))
 
 (defun magit-dash--format-age (seconds)
   "Format SECONDS duration as a compact string, or \"┄\" if nil."
@@ -1074,11 +1153,12 @@ When both together exceed the available window space they split it proportionall
                     repos 0))
          (raw-branch (seq-reduce
                       (lambda (w r)
-                        (let ((b (or (plist-get (magit-dash-gh--cache-get
-                                                 (magit-dash-repo-path r) :stats)
-                                                :branch)
-                                     (magit-dash-repo-branch r)
-                                     "")))
+                        (let ((b (magit-dash--display-branch-name
+                                  (or (plist-get (magit-dash-gh--cache-get
+                                                  (magit-dash-repo-path r) :stats)
+                                                 :branch)
+                                      (magit-dash-repo-branch r)
+                                      ""))))
                           (max w (length b))))
                       repos 0))
          (fixed-width (seq-reduce
@@ -1242,13 +1322,16 @@ until `magit-dash--populate-stats-async' updates them."
                                            base-face)))
                          (propertize display 'face final-face)))
                       ('branch
-                       (propertize (let ((b (plist-get stats :branch)))
-                                     (if (and b (not (string-empty-p b)))
-                                         b
-                                       (or (magit-dash-repo-branch repo) "?")))
+                       (propertize (magit-dash--display-branch-name
+                                    (let ((b (plist-get stats :branch)))
+                                      (if (and b (not (string-empty-p b)))
+                                          b
+                                        (or (magit-dash-repo-branch repo) "?"))))
                                    'face 'magit-dash-repo-branch-face))
                       ('fetched
                        (magit-dash--format-age (plist-get stats :fetch-age)))
+                      ('updated
+                       (magit-dash--format-age (plist-get stats :updated-age)))
                       ('status
                        (magit-dash--format-status
                         (or (plist-get stats :ahead) 0)
@@ -2636,6 +2719,11 @@ When disabled, only explicitly marked repos are targeted."
    ["Dashboard"
     ("pr"  "PR dashboard"    magit-dash-gh-pr-dashboard-open)
     ("nt"  "Filter by tag"   magit-dash-filter-by-tag)
+    ("nb"  (lambda () (if magit-dash-branch-basename-p
+                          "Branch basename [on]"
+                        "Branch basename [off]"))
+     magit-dash-toggle-branch-basename
+     :transient t)
     ("C-t" "Toggle column"   magit-dash-toggle-column)
     ("M-s" "Toggle submodules" magit-dash-toggle-discovered-submodules)
     ("gg"  "Refresh"         magit-dash-refresh)

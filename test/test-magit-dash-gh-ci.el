@@ -23,6 +23,44 @@ passes nil explicitly to exercise the disabled case."
                           :branch branch
                           :include-ci include-ci))
 
+;;; magit-dash-gh-ci-fetch
+
+(ert-deftest magit-dash-gh-ci/fetch-uses-live-checked-out-branch ()
+  "Queries the branch currently checked out at REPO's path, not a stale cached one."
+  (let* ((repo (magit-dash-gh-ci-test/make-repo "test" "/tmp/test" "stale-cached-branch"))
+         (queried-branch nil))
+    (magit-dash-gh--cache-set "/tmp/test" :stats (list :branch "stale-cached-branch"))
+    (cl-letf (((symbol-function 'magit-dash--current-branch)
+               (lambda (_path) "live-branch"))
+              ((symbol-function 'magit-dash-gh--run-process)
+               (lambda (args _dir on-success &optional _on-error)
+                 (setq queried-branch (nth (1+ (seq-position args "--branch")) args))
+                 (funcall on-success "[]"))))
+      (magit-dash-gh-ci-fetch repo #'ignore)
+      (should (equal "live-branch" queried-branch)))))
+
+(ert-deftest magit-dash-gh-ci/fetch-falls-back-to-repo-branch-when-detached ()
+  "Falls back to the repo struct's :branch when the current branch is detached (empty)."
+  (let* ((repo (magit-dash-gh-ci-test/make-repo "test" "/tmp/test" "fallback-branch"))
+         (queried-branch nil))
+    (cl-letf (((symbol-function 'magit-dash--current-branch)
+               (lambda (_path) ""))
+              ((symbol-function 'magit-dash-gh--run-process)
+               (lambda (args _dir on-success &optional _on-error)
+                 (setq queried-branch (nth (1+ (seq-position args "--branch")) args))
+                 (funcall on-success "[]"))))
+      (magit-dash-gh-ci-fetch repo #'ignore)
+      (should (equal "fallback-branch" queried-branch)))))
+
+(ert-deftest magit-dash-gh-ci/fetch-does-nothing-when-ci-disabled ()
+  "Does not query anything when REPO's :include-ci is nil."
+  (let ((repo (magit-dash-gh-ci-test/make-repo "test" "/tmp/test" "main" nil))
+        (called nil))
+    (cl-letf (((symbol-function 'magit-dash-gh--run-process)
+               (lambda (&rest _) (setq called t))))
+      (magit-dash-gh-ci-fetch repo #'ignore)
+      (should-not called))))
+
 ;;; magit-dash-ci--build-fix-prompt
 
 (ert-deftest magit-dash-gh-ci/build-fix-prompt-mentions-workflow-and-branch ()
@@ -63,6 +101,23 @@ passes nil explicitly to exercise the disabled case."
 
 ;;; magit-dash-ci--dispatch-prompt
 
+(defun magit-dash-gh-ci-test--call-with-unbound (symbols thunk)
+  "Call THUNK with each function symbol in SYMBOLS temporarily unbound.
+Only symbols that are currently `fboundp' are unbound; each is restored to
+its original definition afterward.  Used to simulate an environment where an
+optional package (e.g. agent-shell-menu) isn't loaded, so a test exercises
+the intended fallback branch regardless of what the running Emacs session
+happens to have loaded — a `cl-letf' mock of the symbol's function cell
+isn't enough here, since the dispatch code branches on `fboundp', not on
+what the function does."
+  (let* ((bound (seq-filter #'fboundp symbols))
+         (saved (seq-map #'symbol-function bound)))
+    (unwind-protect
+        (progn
+          (seq-do #'fmakunbound bound)
+          (funcall thunk))
+      (seq-mapn (lambda (s f) (fset s f)) bound saved))))
+
 (ert-deftest magit-dash-gh-ci/dispatch-prompt-sends-to-open-shell ()
   "Prefers an existing agent-shell buffer for the repo's project directory."
   (let* ((repo (magit-dash-gh-ci-test/make-repo "test" "/tmp/test"))
@@ -86,30 +141,29 @@ passes nil explicitly to exercise the disabled case."
       (kill-buffer fake-buf))))
 
 (ert-deftest magit-dash-gh-ci/dispatch-prompt-queues-when-no-shell-open ()
-  "Falls back to the unassigned queue bucket when no shell is open."
-  (let* ((repo (magit-dash-gh-ci-test/make-repo))
-         (queued nil))
-    (cl-letf (((symbol-function 'agent-shell-buffers) (lambda () nil))
-              ((symbol-function 'agent-shell-queue-add-unassigned)
-               (lambda (prompt &optional _background) (setq queued prompt))))
-      (magit-dash-ci--dispatch-prompt repo "fix it please")
-      (should (equal "fix it please" queued)))))
+  "Falls back to the unassigned queue bucket when no shell is open and no
+agent-shell-menu is loaded."
+  (magit-dash-gh-ci-test--call-with-unbound
+   '(agent-shell-menu-new-shell-in-dir)
+   (lambda ()
+     (let* ((repo (magit-dash-gh-ci-test/make-repo))
+            (queued nil))
+       (cl-letf (((symbol-function 'agent-shell-buffers) (lambda () nil))
+                 ((symbol-function 'agent-shell-queue-add-unassigned)
+                  (lambda (prompt &optional _background) (setq queued prompt))))
+         (magit-dash-ci--dispatch-prompt repo "fix it please")
+         (should (equal "fix it please" queued)))))))
 
 (ert-deftest magit-dash-gh-ci/dispatch-prompt-falls-back-to-kill-ring ()
-  "Copies to the kill ring when neither agent-shell nor the queue is available."
-  (let* ((repo (magit-dash-gh-ci-test/make-repo))
-         (had-binding (fboundp 'agent-shell-queue-add-unassigned))
-         (orig (and had-binding (symbol-function 'agent-shell-queue-add-unassigned))))
-    (unwind-protect
-        (progn
-          (when had-binding
-            (fmakunbound 'agent-shell-queue-add-unassigned))
-          (cl-letf (((symbol-function 'agent-shell-buffers) (lambda () nil)))
-            (kill-new "unrelated")
-            (magit-dash-ci--dispatch-prompt repo "fix it please")
-            (should (equal "fix it please" (current-kill 0)))))
-      (when had-binding
-        (fset 'agent-shell-queue-add-unassigned orig)))))
+  "Copies to the kill ring when neither agent-shell-menu nor the queue is available."
+  (magit-dash-gh-ci-test--call-with-unbound
+   '(agent-shell-menu-new-shell-in-dir agent-shell-queue-add-unassigned)
+   (lambda ()
+     (let ((repo (magit-dash-gh-ci-test/make-repo)))
+       (cl-letf (((symbol-function 'agent-shell-buffers) (lambda () nil)))
+         (kill-new "unrelated")
+         (magit-dash-ci--dispatch-prompt repo "fix it please")
+         (should (equal "fix it please" (current-kill 0))))))))
 
 ;;; magit-dash-ci-dispatch-fix-operation
 

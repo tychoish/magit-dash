@@ -30,6 +30,7 @@
 (declare-function magit-dash-repo-name "magit-dash")
 (declare-function magit-dash-repo-branch "magit-dash")
 (declare-function magit-dash-repo-include-ci "magit-dash")
+(declare-function magit-dash--current-branch "magit-dash")
 (declare-function agent-shell-insert "agent-shell")
 (declare-function agent-shell-buffers "agent-shell")
 (declare-function agent-shell-get-config "agent-shell")
@@ -103,12 +104,17 @@ Returns a shadow \"—\" when CI-STATUS is nil."
   "Fetch CI status for REPO asynchronously and call CALLBACK with the result.
 CALLBACK receives a CI status plist (see `magit-dash-gh-ci--parse-runs') or
 nil on error.  Does nothing when REPO does not have :include-ci set.
+Always queries the branch currently checked out at REPO's path rather than a
+possibly-stale cached branch, so the CI status reflects what is actually
+checked out — important for worktrees, which are frequently switched to a
+different branch than their cached stats reflect.
 Caches the result as :ci-status in the shared magit-dash-gh cache."
   (when (magit-dash-repo-include-ci repo)
     (let* ((path (magit-dash-repo-path repo))
-           (stats (magit-dash-gh--cache-get path :stats))
-           (branch (or (and stats (plist-get stats :branch))
-                       (magit-dash-repo-branch repo))))
+           (current (magit-dash--current-branch path))
+           (branch (if (string-empty-p current)
+                       (magit-dash-repo-branch repo)
+                     current)))
       (if (not branch)
           (funcall callback nil)
         (magit-dash-gh--run-process

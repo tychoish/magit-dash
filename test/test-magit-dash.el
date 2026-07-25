@@ -225,6 +225,171 @@
   "head-hash returns nil for a path with no .git/HEAD."
   (should (null (magit-dash--head-hash "/tmp/nonexistent-no-git-here"))))
 
+;;;; gitlink resolution: worktrees and submodules
+;;
+;; A linked worktree's PATH/.git is a *file* containing "gitdir: ..." that
+;; points at a private directory (own HEAD) whose "commondir" file points
+;; back at the main repo's real .git (shared FETCH_HEAD/refs).  A
+;; submodule's PATH/.git is likewise a file, pointing at a self-contained
+;; module directory with no commondir.  `magit-dash--fetch-age' and
+;; `magit-dash--head-hash' used to assume PATH/.git was always a plain
+;; directory, so both silently returned nil for worktrees and submodules.
+
+(defun magit-dash-test--write-file (path content)
+  "Write CONTENT to PATH, creating parent directories as needed."
+  (make-directory (file-name-directory path) t)
+  (with-temp-file path (insert content)))
+
+(ert-deftest magit-dash/resolve-git-dir-plain-repo ()
+  "resolve-git-dir returns PATH/.git as-is when it is already a directory."
+  (let ((root (make-temp-file "magit-dash-test-" t)))
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name ".git" root))
+          (should (equal (expand-file-name ".git" root)
+                         (magit-dash--resolve-git-dir root))))
+      (delete-directory root t))))
+
+(ert-deftest magit-dash/resolve-git-dir-follows-worktree-gitlink ()
+  "resolve-git-dir follows a worktree's \"gitdir: ...\" pointer file."
+  (let ((root (make-temp-file "magit-dash-test-" t)))
+    (unwind-protect
+        (let* ((private-dir (expand-file-name "main/.git/worktrees/wt" root))
+               (wt-checkout (expand-file-name "wt-checkout" root)))
+          (make-directory private-dir t)
+          (magit-dash-test--write-file
+           (expand-file-name ".git" wt-checkout)
+           (format "gitdir: %s\n" private-dir))
+          (should (equal private-dir (magit-dash--resolve-git-dir wt-checkout))))
+      (delete-directory root t))))
+
+(ert-deftest magit-dash/resolve-common-git-dir-follows-commondir ()
+  "resolve-common-git-dir follows a worktree's private dir to the shared common dir."
+  (let ((root (make-temp-file "magit-dash-test-" t)))
+    (unwind-protect
+        (let* ((main-git-dir (expand-file-name "main/.git" root))
+               (private-dir (expand-file-name "main/.git/worktrees/wt" root))
+               (wt-checkout (expand-file-name "wt-checkout" root)))
+          (make-directory private-dir t)
+          (magit-dash-test--write-file
+           (expand-file-name ".git" wt-checkout)
+           (format "gitdir: %s\n" private-dir))
+          (magit-dash-test--write-file
+           (expand-file-name "commondir" private-dir)
+           "../..\n")
+          (should (equal main-git-dir
+                         (magit-dash--resolve-common-git-dir wt-checkout))))
+      (delete-directory root t))))
+
+(ert-deftest magit-dash/resolve-common-git-dir-no-commondir-returns-git-dir ()
+  "resolve-common-git-dir returns the resolved git-dir as-is when there is no commondir.
+Covers plain repos and submodules, whose module directory is self-contained."
+  (let ((root (make-temp-file "magit-dash-test-" t)))
+    (unwind-protect
+        (let ((module-dir (expand-file-name "main/.git/modules/subm" root))
+              (subm-checkout (expand-file-name "subm-checkout" root)))
+          (make-directory module-dir t)
+          (magit-dash-test--write-file
+           (expand-file-name ".git" subm-checkout)
+           (format "gitdir: %s\n" module-dir))
+          (should (equal module-dir
+                         (magit-dash--resolve-common-git-dir subm-checkout))))
+      (delete-directory root t))))
+
+(ert-deftest magit-dash/fetch-age-non-nil-for-worktree ()
+  "fetch-age reads the shared FETCH_HEAD via the worktree's commondir, not PATH/.git."
+  (let ((root (make-temp-file "magit-dash-test-" t)))
+    (unwind-protect
+        (let* ((main-git-dir (expand-file-name "main/.git" root))
+               (private-dir (expand-file-name "main/.git/worktrees/wt" root))
+               (wt-checkout (expand-file-name "wt-checkout" root)))
+          (make-directory private-dir t)
+          (magit-dash-test--write-file
+           (expand-file-name ".git" wt-checkout)
+           (format "gitdir: %s\n" private-dir))
+          (magit-dash-test--write-file (expand-file-name "commondir" private-dir) "../..\n")
+          (magit-dash-test--write-file (expand-file-name "FETCH_HEAD" main-git-dir) "irrelevant\n")
+          (should (numberp (magit-dash--fetch-age wt-checkout))))
+      (delete-directory root t))))
+
+(ert-deftest magit-dash/fetch-age-non-nil-for-submodule ()
+  "fetch-age reads FETCH_HEAD from a submodule's resolved module directory."
+  (let ((root (make-temp-file "magit-dash-test-" t)))
+    (unwind-protect
+        (let ((module-dir (expand-file-name "main/.git/modules/subm" root))
+              (subm-checkout (expand-file-name "subm-checkout" root)))
+          (make-directory module-dir t)
+          (magit-dash-test--write-file
+           (expand-file-name ".git" subm-checkout)
+           (format "gitdir: %s\n" module-dir))
+          (magit-dash-test--write-file (expand-file-name "FETCH_HEAD" module-dir) "irrelevant\n")
+          (should (numberp (magit-dash--fetch-age subm-checkout))))
+      (delete-directory root t))))
+
+(ert-deftest magit-dash/head-hash-resolves-worktree-private-head-via-common-refs ()
+  "head-hash reads a worktree's own HEAD but resolves its ref against the common dir."
+  (let ((root (make-temp-file "magit-dash-test-" t)))
+    (unwind-protect
+        (let* ((main-git-dir (expand-file-name "main/.git" root))
+               (private-dir (expand-file-name "main/.git/worktrees/wt" root))
+               (wt-checkout (expand-file-name "wt-checkout" root)))
+          (make-directory private-dir t)
+          (magit-dash-test--write-file
+           (expand-file-name ".git" wt-checkout)
+           (format "gitdir: %s\n" private-dir))
+          (magit-dash-test--write-file (expand-file-name "commondir" private-dir) "../..\n")
+          (magit-dash-test--write-file (expand-file-name "HEAD" private-dir) "ref: refs/heads/feature\n")
+          (magit-dash-test--write-file
+           (expand-file-name "refs/heads/feature" main-git-dir) "1111222233334444\n")
+          (should (equal "1111222233334444" (magit-dash--head-hash wt-checkout))))
+      (delete-directory root t))))
+
+(ert-deftest magit-dash/head-hash-resolves-submodule-head ()
+  "head-hash resolves a submodule's HEAD and ref from its own module directory."
+  (let ((root (make-temp-file "magit-dash-test-" t)))
+    (unwind-protect
+        (let ((module-dir (expand-file-name "main/.git/modules/subm" root))
+              (subm-checkout (expand-file-name "subm-checkout" root)))
+          (make-directory module-dir t)
+          (magit-dash-test--write-file
+           (expand-file-name ".git" subm-checkout)
+           (format "gitdir: %s\n" module-dir))
+          (magit-dash-test--write-file (expand-file-name "HEAD" module-dir) "ref: refs/heads/main\n")
+          (magit-dash-test--write-file (expand-file-name "refs/heads/main" module-dir) "deadbeef\n")
+          (should (equal "deadbeef" (magit-dash--head-hash subm-checkout))))
+      (delete-directory root t))))
+
+;;;; magit-dash--commit-timestamp-to-age
+
+(ert-deftest magit-dash/commit-timestamp-to-age-empty-is-nil ()
+  "commit-timestamp-to-age returns nil for an empty timestamp (no commits yet)."
+  (should (null (magit-dash--commit-timestamp-to-age ""))))
+
+(ert-deftest magit-dash/commit-timestamp-to-age-converts-unix-seconds ()
+  "commit-timestamp-to-age converts a unix-seconds string to a seconds-ago float."
+  (let ((age (magit-dash--commit-timestamp-to-age
+              (number-to-string (round (- (float-time) 120))))))
+    (should (numberp age))
+    (should (> age 100))
+    (should (< age 140))))
+
+;;;; magit-dash--display-branch-name
+
+(ert-deftest magit-dash/display-branch-name-unchanged-when-disabled ()
+  "display-branch-name returns BRANCH unchanged when the basename toggle is off."
+  (let ((magit-dash-branch-basename-p nil))
+    (should (equal "feature/some/thing" (magit-dash--display-branch-name "feature/some/thing")))))
+
+(ert-deftest magit-dash/display-branch-name-trims-to-basename-when-enabled ()
+  "display-branch-name trims everything up to the final \"/\" when the toggle is on."
+  (let ((magit-dash-branch-basename-p t))
+    (should (equal "thing" (magit-dash--display-branch-name "feature/some/thing")))))
+
+(ert-deftest magit-dash/display-branch-name-no-slash-unaffected ()
+  "display-branch-name returns a branch with no slash unchanged, toggle on or off."
+  (let ((magit-dash-branch-basename-p t))
+    (should (equal "main" (magit-dash--display-branch-name "main")))))
+
 ;;;; magit-dash--collect-stats (via mock)
 
 (ert-deftest magit-dash/collect-stats-extracts-fields ()
@@ -520,7 +685,7 @@ without real git repos or a live dashboard buffer."
   (let ((repo (magit-dash-repo--make :name "myrep" :path "/tmp/myrep"))
         (magit-dash--stats-cache (make-hash-table :test #'equal))
         (magit-dash-columns
-         '((name . t) (branch . t) (fetched . t) (ci . nil) (status . t)
+         '((name . t) (branch . t) (fetched . t) (updated . nil) (ci . nil) (status . t)
            (worktree . t) (sync . nil) (cached . nil)))
         (magit-dash--worktree-map (make-hash-table :test #'equal)))
     (cl-letf (((symbol-function 'magit-dash--get-stats-fast)
@@ -536,6 +701,36 @@ without real git repos or a live dashboard buffer."
         (should (string-match-p "main" (aref vec 1)))
         (should (equal "2m" (aref vec 2)))
         (should (equal "" (aref vec 3)))))))
+
+(ert-deftest magit-dash/build-entry-updated-column-shows-commit-age ()
+  "build-entry's Updated column formats :updated-age like :fetch-age does."
+  (let ((repo (magit-dash-repo--make :name "myrep" :path "/tmp/myrep"))
+        (magit-dash-columns '((name . t) (branch . nil) (fetched . nil) (updated . t)
+                              (ci . nil) (status . nil) (worktree . nil)
+                              (sync . nil) (cached . nil))))
+    (cl-letf (((symbol-function 'magit-dash--get-stats-fast)
+               (lambda (_)
+                 (list :branch "main" :ahead 0 :behind 0 :dirty nil
+                       :fetch-age nil :updated-age 3600.0
+                       :head-hash "abc" :recent-log ""))))
+      (let* ((entry (magit-dash--build-entry repo))
+             (vec (cadr entry)))
+        (should (equal "1h" (aref vec 1)))))))
+
+(ert-deftest magit-dash/build-entry-updated-column-nil-age-shows-placeholder ()
+  "build-entry's Updated column shows the \"never\" placeholder when :updated-age is nil."
+  (let ((repo (magit-dash-repo--make :name "myrep" :path "/tmp/myrep"))
+        (magit-dash-columns '((name . t) (branch . nil) (fetched . nil) (updated . t)
+                              (ci . nil) (status . nil) (worktree . nil)
+                              (sync . nil) (cached . nil))))
+    (cl-letf (((symbol-function 'magit-dash--get-stats-fast)
+               (lambda (_)
+                 (list :branch "main" :ahead 0 :behind 0 :dirty nil
+                       :fetch-age nil :updated-age nil
+                       :head-hash "abc" :recent-log ""))))
+      (let* ((entry (magit-dash--build-entry repo))
+             (vec (cadr entry)))
+        (should (equal "┄" (aref vec 1)))))))
 
 ;;;; magit-dash-gh-pr-dashboard--build-args
 
@@ -1379,6 +1574,24 @@ Overrides are placed first so `plist-get' finds them before the defaults."
                   magit-dash-test--worktree-output)))
     (should (seq-every-p (lambda (r) (null (magit-dash-repo-sort-hint r))) result))))
 
+(ert-deftest magit-dash/parse-worktrees-inherits-parent-include-ci ()
+  "parse-worktrees copies the registered parent's :include-ci onto each worktree."
+  (let* ((magit-dash-repo-list
+          (list (magit-dash-repo--make :name "main" :path "/tmp/main" :include-ci t)))
+         (result (magit-dash--parse-worktrees
+                  "/tmp/main"
+                  magit-dash-test--worktree-output)))
+    (should (seq-every-p #'magit-dash-repo-include-ci result))))
+
+(ert-deftest magit-dash/parse-worktrees-no-include-ci-when-parent-disabled ()
+  "parse-worktrees leaves :include-ci nil when the parent doesn't have it set."
+  (let* ((magit-dash-repo-list
+          (list (magit-dash-repo--make :name "main" :path "/tmp/main")))
+         (result (magit-dash--parse-worktrees
+                  "/tmp/main"
+                  magit-dash-test--worktree-output)))
+    (should (seq-every-p (lambda (r) (null (magit-dash-repo-include-ci r))) result))))
+
 ;;;; magit-dash--sorted-repos with worktrees
 
 (ert-deftest magit-dash/sorted-repos-appends-worktrees ()
@@ -1411,7 +1624,7 @@ Overrides are placed first so `plist-get' finds them before the defaults."
 (ert-deftest magit-dash/build-format-omits-disabled-columns ()
   "build-format produces a vector that excludes disabled columns."
   (let ((magit-dash-columns
-         '((name . t) (branch . nil) (fetched . t) (ci . nil) (status . t)
+         '((name . t) (branch . nil) (fetched . t) (updated . nil) (ci . nil) (status . t)
            (worktree . nil) (sync . nil) (cached . nil)))
         (repos (list (magit-dash-repo--make :name "r" :path "/tmp/r"))))
     (let ((fmt (magit-dash--build-format repos)))
@@ -1975,7 +2188,7 @@ Simulates the user's issue where a cache reset caused rendering problems."
          (magit-dash-gh--cache (make-hash-table :test #'equal))
          (magit-dash--submodule-path-set (make-hash-table :test #'equal))
          (magit-dash-columns
-          '((name . t) (branch . t) (fetched . t) (ci . nil) (status . t)
+          '((name . t) (branch . t) (fetched . t) (updated . nil) (ci . nil) (status . t)
             (worktree . t) (sync . nil) (cached . nil))))
     (cl-letf (((symbol-function 'magit-dash--get-stats-fast)
                (lambda (_)
@@ -2057,7 +2270,7 @@ The bug was that add-text-properties returns t, not the modified string."
          (magit-dash-gh--cache (make-hash-table :test #'equal))
          (magit-dash--submodule-path-set (make-hash-table :test #'equal))
          (magit-dash-columns
-          '((name . t) (branch . t) (fetched . t) (ci . nil) (status . t)
+          '((name . t) (branch . t) (fetched . t) (updated . nil) (ci . nil) (status . t)
             (worktree . t) (sync . nil) (cached . nil))))
     (cl-letf (((symbol-function 'magit-dash--get-stats-fast)
                (lambda (_)
@@ -2144,7 +2357,7 @@ The bug was that add-text-properties returns t, not the modified string."
          (magit-dash-gh--cache (make-hash-table :test #'equal))
          (magit-dash--submodule-path-set (make-hash-table :test #'equal))
          (magit-dash--marked-paths nil)
-         (magit-dash-columns '((name . t) (branch . nil) (fetched . nil) (ci . nil)
+         (magit-dash-columns '((name . t) (branch . nil) (fetched . nil) (updated . nil) (ci . nil)
                               (status . nil) (worktree . t) (sync . nil) (cached . nil))))
     ;; Add to submodule path set so it gets the special display name
     (puthash "/tmp/missing" "parent<missing>" magit-dash--submodule-path-set)
