@@ -1051,7 +1051,7 @@ Name and Branch widths are computed dynamically in `magit-dash--build-format'.")
 
 ;;;; Formatting helpers
 
-(defvar magit-dash-branch-basename-p nil
+(defvar magit-dash-render-branch-name-as-basename nil
   "When non-nil, the Branch column shows only the basename of a branch.
 Everything up to and including the final \"/\" is dropped (e.g.
 \"feature/some/thing\" displays as \"thing\").  Purely cosmetic — git
@@ -1060,13 +1060,13 @@ operations always use the full branch name.")
 (defun magit-dash-toggle-branch-basename ()
   "Toggle whether the Branch column shows only a branch's basename."
   (interactive)
-  (setq magit-dash-branch-basename-p (not magit-dash-branch-basename-p))
+  (setq magit-dash-render-branch-name-as-basename (not magit-dash-render-branch-name-as-basename))
   (magit-dash-refresh))
 
 (defun magit-dash--display-branch-name (branch)
   "Return BRANCH for display, trimmed to its basename when configured.
-See `magit-dash-branch-basename-p'."
-  (if (and magit-dash-branch-basename-p branch)
+See `magit-dash-render-branch-name-as-basename'."
+  (if (and magit-dash-render-branch-name-as-basename branch)
       (file-name-nondirectory branch)
     branch))
 
@@ -2719,7 +2719,7 @@ When disabled, only explicitly marked repos are targeted."
    ["Dashboard"
     ("pr"  "PR dashboard"    magit-dash-gh-pr-dashboard-open)
     ("nt"  "Filter by tag"   magit-dash-filter-by-tag)
-    ("nb"  (lambda () (if magit-dash-branch-basename-p
+    ("nb"  (lambda () (if magit-dash-render-branch-name-as-basename
                           "Branch basename [on]"
                         "Branch basename [off]"))
      magit-dash-toggle-branch-basename

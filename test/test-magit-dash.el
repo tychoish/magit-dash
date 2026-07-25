@@ -377,17 +377,17 @@ Covers plain repos and submodules, whose module directory is self-contained."
 
 (ert-deftest magit-dash/display-branch-name-unchanged-when-disabled ()
   "display-branch-name returns BRANCH unchanged when the basename toggle is off."
-  (let ((magit-dash-branch-basename-p nil))
+  (let ((magit-dash-render-branch-name-as-basename nil))
     (should (equal "feature/some/thing" (magit-dash--display-branch-name "feature/some/thing")))))
 
 (ert-deftest magit-dash/display-branch-name-trims-to-basename-when-enabled ()
   "display-branch-name trims everything up to the final \"/\" when the toggle is on."
-  (let ((magit-dash-branch-basename-p t))
+  (let ((magit-dash-render-branch-name-as-basename t))
     (should (equal "thing" (magit-dash--display-branch-name "feature/some/thing")))))
 
 (ert-deftest magit-dash/display-branch-name-no-slash-unaffected ()
   "display-branch-name returns a branch with no slash unchanged, toggle on or off."
-  (let ((magit-dash-branch-basename-p t))
+  (let ((magit-dash-render-branch-name-as-basename t))
     (should (equal "main" (magit-dash--display-branch-name "main")))))
 
 ;;;; magit-dash--collect-stats (via mock)
