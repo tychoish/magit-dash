@@ -56,7 +56,7 @@
       (should (null (magit-dash-repo-auto-pull r)))
       (should (null (magit-dash-repo-auto-commit r)))
       (should (null (magit-dash-repo-auto-push r)))
-      (should (null (magit-dash-repo-auto-sync-command r)))
+      (should (null (magit-dash-repo-hooks r)))
       (should (null (magit-dash-repo-tags r)))
       (should (null (magit-dash-repo-commands r)))
       (should (null (magit-dash-repo-sort-hint r)))
@@ -1447,6 +1447,263 @@ Overrides are placed first so `plist-get' finds them before the defaults."
                  (setq batch-repos repos))))
       (magit-dash-auto-sync))
     (should (= 1 (length batch-repos)))))
+
+;;;; magit-dash-register :hooks
+
+(ert-deftest magit-dash/register-hooks-stored ()
+  ":hooks plist is stored verbatim on the struct."
+  (let ((magit-dash-repo-list nil)
+        (hooks '(:fetch (:post (docs)) :sync (:operation orchestrate))))
+    (magit-dash-register :name "r" :path "/tmp/r" :hooks hooks)
+    (should (equal hooks (magit-dash-repo-hooks (car magit-dash-repo-list))))))
+
+(ert-deftest magit-dash/register-hooks-rejects-unknown-operation ()
+  ":hooks with an operation outside fetch/pull/commit/push/sync signals user-error."
+  (let ((magit-dash-repo-list nil))
+    (should-error
+     (magit-dash-register :name "r" :path "/tmp/r" :hooks '(:rebase (:pre (foo))))
+     :type 'user-error)))
+
+(ert-deftest magit-dash/register-hooks-rejects-unknown-slot ()
+  ":hooks with a slot outside :pre/:post/:operation signals user-error."
+  (let ((magit-dash-repo-list nil))
+    (should-error
+     (magit-dash-register :name "r" :path "/tmp/r" :hooks '(:fetch (:during (foo))))
+     :type 'user-error)))
+
+(ert-deftest magit-dash/register-auto-sync-command-deprecation-warning ()
+  ":auto-sync-command emits a one-time `display-warning'."
+  (let ((magit-dash-repo-list nil)
+        (warned nil))
+    (cl-letf (((symbol-function 'display-warning)
+               (lambda (&rest _) (setq warned t))))
+      (magit-dash-register :name "r" :path "/tmp/r" :auto-sync-command "make sync"))
+    (should warned)))
+
+(ert-deftest magit-dash/register-auto-sync-command-aliases-to-sync-operation ()
+  ":auto-sync-command translates to :hooks (:sync (:operation VALUE))."
+  (let ((magit-dash-repo-list nil))
+    (cl-letf (((symbol-function 'display-warning) #'ignore))
+      (magit-dash-register :name "r" :path "/tmp/r" :auto-sync-command "make sync"))
+    (should (equal "make sync"
+                    (magit-dash--repo-operation (car magit-dash-repo-list) :sync)))))
+
+(ert-deftest magit-dash/register-auto-sync-command-merges-with-explicit-hooks ()
+  "Explicit :hooks and the :auto-sync-command alias merge rather than clobber."
+  (let ((magit-dash-repo-list nil))
+    (cl-letf (((symbol-function 'display-warning) #'ignore))
+      (magit-dash-register :name "r" :path "/tmp/r"
+                            :auto-sync-command "make sync"
+                            :hooks '(:sync (:pre (notify)))))
+    (let ((hooks (magit-dash-repo-hooks (car magit-dash-repo-list))))
+      (should (equal "make sync" (magit-dash--hook-slot hooks :sync :operation)))
+      (should (equal '(notify) (magit-dash--hook-slot hooks :sync :pre))))))
+
+;;;; magit-dash-set-global-hooks
+
+(ert-deftest magit-dash/set-global-hooks-stores-value ()
+  (let (magit-dash-global-hooks)
+    (magit-dash-set-global-hooks '(:fetch (:post (docs))))
+    (should (equal '(:fetch (:post (docs))) magit-dash-global-hooks))))
+
+(ert-deftest magit-dash/set-global-hooks-rejects-operation ()
+  ":operation is not valid in `magit-dash-global-hooks'."
+  (let (magit-dash-global-hooks)
+    (should-error
+     (magit-dash-set-global-hooks '(:sync (:operation orchestrate)))
+     :type 'user-error)))
+
+;;;; magit-dash--run-target
+
+(ert-deftest magit-dash/run-target-string-runs-shell-command ()
+  (let ((repo (magit-dash-repo--make :name "r" :path "/tmp/r"))
+        (ran nil))
+    (cl-letf (((symbol-function 'magit-dash--run-shell-string-async)
+               (lambda (cmd _path cb) (setq ran cmd) (funcall cb 'ok))))
+      (magit-dash--run-target repo "echo hi" (lambda (status &optional _) (should (eq 'ok status)))))
+    (should (equal "echo hi" ran))))
+
+(ert-deftest magit-dash/run-target-function-called-with-repo-and-callback ()
+  (let* ((repo (magit-dash-repo--make :name "r" :path "/tmp/r"))
+         (called-with nil))
+    (magit-dash--run-target
+     repo (lambda (r cb) (setq called-with r) (funcall cb 'ok))
+     #'ignore)
+    (should (eq repo called-with))))
+
+(ert-deftest magit-dash/run-target-symbol-resolves-via-commands ()
+  (let ((repo (magit-dash-repo--make :name "r" :path "/tmp/r"
+                                     :commands '((docs . "make docs"))))
+        (ran nil))
+    (cl-letf (((symbol-function 'magit-dash--run-shell-string-async)
+               (lambda (cmd _path cb) (setq ran cmd) (funcall cb 'ok))))
+      (magit-dash--run-target repo 'docs #'ignore))
+    (should (equal "make docs" ran))))
+
+(ert-deftest magit-dash/run-target-symbol-not-in-commands-errors ()
+  (let ((repo (magit-dash-repo--make :name "r" :path "/tmp/r"))
+        (result nil))
+    (magit-dash--run-target repo 'missing (lambda (status &optional text) (setq result (cons status text))))
+    (should (eq 'error (car result)))))
+
+(ert-deftest magit-dash/run-target-unsupported-type-errors ()
+  (let ((repo (magit-dash-repo--make :name "r" :path "/tmp/r"))
+        (result nil))
+    (magit-dash--run-target repo 42 (lambda (status &optional _) (setq result status)))
+    (should (eq 'error result))))
+
+;;;; magit-dash--run-operation: hooks and operation resolution
+
+(ert-deftest magit-dash/run-operation-runs-pre-then-operation-then-post ()
+  "pre, operation, and post run in that order for a single op."
+  (let* ((order nil)
+         (repo (magit-dash-repo--make
+                :name "r" :path "/tmp/r"
+                :hooks (list :fetch (list :pre (list (lambda (_r cb) (push 'pre order) (funcall cb 'ok)))
+                                          :post (list (lambda (_r cb) (push 'post order) (funcall cb 'ok)))
+                                          :operation (lambda (_r cb) (push 'op order) (funcall cb 'ok)))))))
+    (magit-dash--run-operation repo :fetch (lambda (&rest _) (push 'done order)))
+    (should (equal '(done post op pre) order))))
+
+(ert-deftest magit-dash/run-operation-global-outermost-for-pre ()
+  "Global :pre hooks run before repo :pre hooks."
+  (let* ((order nil)
+         (magit-dash-global-hooks
+          (list :fetch (list :pre (list (lambda (_r cb) (push 'global order) (funcall cb 'ok))))))
+         (repo (magit-dash-repo--make
+                :name "r" :path "/tmp/r"
+                :hooks (list :fetch (list :pre (list (lambda (_r cb) (push 'local order) (funcall cb 'ok)))
+                                          :operation (lambda (_r cb) (funcall cb 'ok)))))))
+    (magit-dash--run-operation repo :fetch #'ignore)
+    (should (equal '(local global) order))))
+
+(ert-deftest magit-dash/run-operation-repo-outermost-for-post ()
+  "Repo :post hooks run before global :post hooks (global closes last)."
+  (let* ((order nil)
+         (magit-dash-global-hooks
+          (list :fetch (list :post (list (lambda (_r cb) (push 'global order) (funcall cb 'ok))))))
+         (repo (magit-dash-repo--make
+                :name "r" :path "/tmp/r"
+                :hooks (list :fetch (list :post (list (lambda (_r cb) (push 'local order) (funcall cb 'ok)))
+                                          :operation (lambda (_r cb) (funcall cb 'ok)))))))
+    (magit-dash--run-operation repo :fetch #'ignore)
+    (should (equal '(global local) order))))
+
+(ert-deftest magit-dash/run-operation-multiple-pre-targets-run-in-order ()
+  (let* ((order nil)
+         (repo (magit-dash-repo--make
+                :name "r" :path "/tmp/r"
+                :hooks (list :fetch (list :pre (list (lambda (_r cb) (push 'a order) (funcall cb 'ok))
+                                                      (lambda (_r cb) (push 'b order) (funcall cb 'ok)))
+                                          :operation (lambda (_r cb) (funcall cb 'ok)))))))
+    (magit-dash--run-operation repo :fetch #'ignore)
+    (should (equal '(b a) order))))
+
+(ert-deftest magit-dash/run-operation-pre-failure-skips-operation ()
+  "A `:pre' hook signaling `error' skips the operation; ON-COMPLETE gets `skipped'."
+  (let* ((op-ran nil)
+         (result nil)
+         (repo (magit-dash-repo--make
+                :name "r" :path "/tmp/r"
+                :hooks (list :fetch (list :pre (list (lambda (_r cb) (funcall cb 'error "boom")))
+                                          :operation (lambda (_r cb) (setq op-ran t) (funcall cb 'ok)))))))
+    (magit-dash--run-operation repo :fetch (lambda (status &optional text) (setq result (cons status text))))
+    (should (null op-ran))
+    (should (eq 'skipped (car result)))))
+
+(ert-deftest magit-dash/run-operation-post-failure-does-not-fail-overall-status ()
+  "A `:post' hook failure is not reflected in the status passed to ON-COMPLETE."
+  (let* ((result nil)
+         (repo (magit-dash-repo--make
+                :name "r" :path "/tmp/r"
+                :hooks (list :fetch (list :post (list (lambda (_r cb) (funcall cb 'error "boom")))
+                                          :operation (lambda (_r cb) (funcall cb 'ok)))))))
+    (magit-dash--run-operation repo :fetch (lambda (status &optional _) (setq result status)))
+    (should (eq 'ok result))))
+
+(ert-deftest magit-dash/run-operation-post-does-not-run-after-error ()
+  (let* ((post-ran nil)
+         (repo (magit-dash-repo--make
+                :name "r" :path "/tmp/r"
+                :hooks (list :fetch (list :post (list (lambda (_r cb) (setq post-ran t) (funcall cb 'ok)))
+                                          :operation (lambda (_r cb) (funcall cb 'error "op failed")))))))
+    (magit-dash--run-operation repo :fetch #'ignore)
+    (should (null post-ran))))
+
+(ert-deftest magit-dash/run-operation-step-uses-operation-override-when-auto-flag-set ()
+  "A step's `:operation' override runs instead of the default while the step
+is still gated by its own auto-* flag."
+  (let* ((default-ran nil) (override-ran nil)
+         (repo (magit-dash-repo--make
+                :name "r" :path "/tmp/r" :auto-fetch t
+                :hooks (list :fetch (list :operation (lambda (_r cb) (setq override-ran t) (funcall cb 'ok)))))))
+    (cl-letf (((symbol-function 'magit-dash--auto-fetch-async)
+               (lambda (_r cb) (setq default-ran t) (funcall cb 'ok))))
+      (magit-dash--run-operation repo :fetch #'ignore))
+    (should override-ran)
+    (should (null default-ran))))
+
+(ert-deftest magit-dash/sync-operation-override-bypasses-entire-default-pipeline ()
+  "A `:sync' `:operation' override replaces fetch/pull/commit/push entirely —
+they are not consulted even when their own auto-* flags are set."
+  (let* ((step-ran nil) (override-ran nil)
+         (repo (magit-dash-repo--make
+                :name "r" :path "/tmp/r"
+                :auto-fetch t :auto-pull t :auto-commit t :auto-push t
+                :hooks (list :sync (list :operation (lambda (_r cb) (setq override-ran t) (funcall cb 'ok)))))))
+    (cl-letf (((symbol-function 'magit-dash--auto-fetch-async)
+               (lambda (_r cb) (setq step-ran t) (funcall cb 'ok)))
+              ((symbol-function 'magit-dash--auto-pull-async)
+               (lambda (_r cb) (setq step-ran t) (funcall cb 'ok)))
+              ((symbol-function 'magit-dash--auto-commit-async)
+               (lambda (_r cb) (setq step-ran t) (funcall cb 'ok)))
+              ((symbol-function 'magit-dash--auto-push-async)
+               (lambda (_r cb) (setq step-ran t) (funcall cb 'ok))))
+      (magit-dash--auto-sync-async repo #'ignore))
+    (should override-ran)
+    (should (null step-ran))))
+
+;;;; magit-dash--auto-sync-pipeline-async: default `:sync' implementation
+
+(ert-deftest magit-dash/auto-sync-pipeline-matches-legacy-behavior-fetch-pull ()
+  "The migrated default pipeline runs fetch then pull for :auto-pull, same as before."
+  (let* ((order nil)
+         (repo (magit-dash-repo--make :name "r" :path "/tmp/r" :auto-pull t)))
+    (cl-letf (((symbol-function 'magit-dash--auto-fetch-async)
+               (lambda (_r cb) (push 'fetch order) (funcall cb 'ok)))
+              ((symbol-function 'magit-dash--auto-pull-async)
+               (lambda (_r cb) (push 'pull order) (funcall cb 'ok))))
+      (magit-dash--auto-sync-async repo #'ignore))
+    (should (equal '(pull fetch) order))))
+
+(ert-deftest magit-dash/auto-sync-pipeline-aborts-on-step-error ()
+  (let* ((order nil)
+         (repo (magit-dash-repo--make :name "r" :path "/tmp/r" :auto-fetch t :auto-commit t)))
+    (cl-letf (((symbol-function 'magit-dash--auto-fetch-async)
+               (lambda (_r cb) (push 'fetch order) (funcall cb 'error "boom")))
+              ((symbol-function 'magit-dash--auto-commit-async)
+               (lambda (_r cb) (push 'commit order) (funcall cb 'ok))))
+      (magit-dash--auto-sync-async repo #'ignore))
+    (should (equal '(fetch) order))))
+
+(ert-deftest magit-dash/auto-sync-pipeline-skipped-when-no-steps-configured ()
+  (let ((repo (magit-dash-repo--make :name "r" :path "/tmp/r"))
+        (result nil))
+    (magit-dash--auto-sync-async repo (lambda (status &optional _) (setq result status)))
+    (should (eq 'skipped result))))
+
+;;;; magit-dash--has-sync-configured-p
+
+(ert-deftest magit-dash/has-sync-configured-p-true-for-sync-operation-only ()
+  "A repo with only a `:sync' `:operation' override (no auto-* flags) counts as configured."
+  (let ((repo (magit-dash-repo--make
+               :name "r" :path "/tmp/r"
+               :hooks (list :sync (list :operation "make sync")))))
+    (should (magit-dash--has-sync-configured-p repo))))
+
+(ert-deftest magit-dash/has-sync-configured-p-false-when-nothing-set ()
+  (let ((repo (magit-dash-repo--make :name "r" :path "/tmp/r")))
+    (should (null (magit-dash--has-sync-configured-p repo)))))
 
 ;;;; Builder and agent-shell commands
 

@@ -79,7 +79,7 @@
   (auto-pull nil)
   (auto-commit nil)
   (auto-push nil)
-  (auto-sync-command nil)
+  (hooks nil)
   (tags nil)
   (commands nil)
   (sort-hint nil)
@@ -94,7 +94,66 @@ Use `magit-dash-register' to add entries.")
 
 (declare-function magit-dash-register-sync-timer "magit-dash-timer")
 
-(cl-defun magit-dash-register (&key name path include-prs include-ci auto-fetch auto-pull auto-commit auto-push auto-sync-command tags commands sort-hint worktree sync-branches timer)
+;;;; Hooks and operations
+
+(defconst magit-dash--hook-operations '(:fetch :pull :commit :push :sync)
+  "Fixed vocabulary of operations a `:hooks' or `magit-dash-global-hooks' entry may key on.")
+
+(defconst magit-dash--hook-slots '(:pre :post :operation)
+  "Fixed vocabulary of slots within a single operation's hooks plist.")
+
+(defvar magit-dash-global-hooks nil
+  "Plist of `:pre'/`:post' hooks applied to every repo's operations.
+Same shape as a repo's `:hooks', keyed by operation (`:fetch'/`:pull'/
+`:commit'/`:push'/`:sync'), each value a plist of `:pre'/`:post' target
+lists.  `:operation' is not valid here — a global operation override
+would replace every repo's operation with the same thing, which is not
+a real use case.  Set with `magit-dash-set-global-hooks' so the shape is
+validated; do not `setq' directly.")
+
+(defun magit-dash--validate-hooks (hooks &optional allow-operation)
+  "Signal `user-error' when HOOKS uses an operation or slot outside the
+fixed vocabulary of `magit-dash--hook-operations'/`magit-dash--hook-slots'.
+`:operation' is only valid per-repo; pass ALLOW-OPERATION non-nil when
+validating a `:hooks' argument, nil for `magit-dash-global-hooks'."
+  (seq-do
+   (lambda (op-pair)
+     (let ((op (car op-pair)) (op-plist (cadr op-pair)))
+       (unless (memq op magit-dash--hook-operations)
+         (user-error "magit-dash: unknown hook operation %s" op))
+       (seq-do
+        (lambda (slot-pair)
+          (let ((slot (car slot-pair)))
+            (unless (memq slot magit-dash--hook-slots)
+              (user-error "magit-dash: unknown hook slot %s" slot))
+            (when (and (eq slot :operation) (not allow-operation))
+              (user-error "magit-dash: :operation is not valid in global hooks"))))
+        (seq-partition op-plist 2))))
+   (seq-partition hooks 2)))
+
+(defun magit-dash-set-global-hooks (hooks)
+  "Validate HOOKS and set `magit-dash-global-hooks' to it."
+  (magit-dash--validate-hooks hooks)
+  (setq magit-dash-global-hooks hooks))
+
+(defun magit-dash--merge-hook-op (base addition)
+  "Merge op-plists BASE and ADDITION, preferring BASE's `:operation' and
+appending `:pre'/`:post' lists (BASE's entries first)."
+  (list :pre (append (plist-get base :pre) (plist-get addition :pre))
+        :post (append (plist-get base :post) (plist-get addition :post))
+        :operation (or (plist-get base :operation) (plist-get addition :operation))))
+
+(defun magit-dash--merge-hooks (base addition)
+  "Merge ADDITION's per-operation hooks into BASE without mutating either."
+  (seq-reduce
+   (lambda (acc op-pair)
+     (let ((op (car op-pair)) (op-plist (cadr op-pair)))
+       (plist-put (copy-sequence acc) op
+                  (magit-dash--merge-hook-op (plist-get acc op) op-plist))))
+   (seq-partition addition 2)
+   base))
+
+(cl-defun magit-dash-register (&key name path include-prs include-ci auto-fetch auto-pull auto-commit auto-push auto-sync-command hooks tags commands sort-hint worktree sync-branches timer)
   "Register or replace a repository with NAME at absolute PATH.
 Replaces any existing entry with the same name or path.
 
@@ -109,12 +168,31 @@ Keyword arguments:
                   message string.
   :auto-push      non-nil — run git push during auto-sync.
                   Respects :sync-branches.
-  :auto-sync-command  nil | SYMBOL | STRING | FUNCTION — run a custom command
-                  as the final auto-sync step.
-                  SYMBOL: looked up as a label in :commands, runs its target.
-                  STRING: executed as a shell command in the repo directory.
-                  FUNCTION: called with (REPO ON-COMPLETE) where ON-COMPLETE
-                  accepts `ok', `skipped', or `error'.
+  :hooks          plist keyed by operation (`:fetch'/`:pull'/`:commit'/
+                  `:push'/`:sync'), each value a plist of:
+                    :pre        list of targets run before the operation;
+                                a target signaling `error' skips the
+                                operation (reported as `skipped').
+                    :post       list of targets run after the operation
+                                succeeds (`ok' or a no-op `skipped');
+                                failures are logged but never fail sync.
+                    :operation  a single target that replaces the default
+                                implementation for that operation.  For
+                                `:fetch'/`:pull'/`:commit'/`:push' the step
+                                still only runs when its own auto-* flag is
+                                set; for `:sync' it replaces the *entire*
+                                default pipeline (fetch/pull/commit/push
+                                and their own settings are not consulted).
+                  A target is a SYMBOL (looked up as a label in :commands),
+                  a STRING (run as a shell command in the repo directory),
+                  or a FUNCTION (called with (REPO ON-COMPLETE), where
+                  ON-COMPLETE accepts `ok', `skipped', or `error').
+                  See also `magit-dash-global-hooks' for hooks applied
+                  across every repo.
+  :auto-sync-command  deprecated; nil | SYMBOL | STRING | FUNCTION.
+                  Equivalent to :hooks (:sync (:operation VALUE)) — replaces
+                  the entire sync pipeline for this repo.  Merged with any
+                  explicit :hooks also passed.
   :sync-branches  list of branch names on which auto-pull and auto-push are
                   permitted; nil means any branch.
   :tags           list of symbols for filtering in the dashboard.
@@ -126,6 +204,15 @@ Keyword arguments:
                   magit-dash-timer).  Example: \\='(:kind idle :idle-delay 300)."
   (unless (and name path)
     (user-error "must specify name (%s) and path (%s)" name path))
+
+  (when auto-sync-command
+    (display-warning
+     'magit-dash
+     (format ":auto-sync-command is deprecated for %s; use :hooks (:sync (:operation %S)) instead"
+             name auto-sync-command)
+     :warning)
+    (setq hooks (magit-dash--merge-hooks hooks (list :sync (list :operation auto-sync-command)))))
+  (magit-dash--validate-hooks hooks t)
 
   (let ((abs-path (expand-file-name path)))
     (setq magit-dash-repo-list
@@ -142,7 +229,7 @@ Keyword arguments:
                            :auto-pull auto-pull
                            :auto-commit auto-commit
                            :auto-push auto-push
-                           :auto-sync-command auto-sync-command
+                           :hooks hooks
                            :tags tags
                            :commands commands
                            :sort-hint sort-hint
@@ -640,41 +727,111 @@ Calls ON-COMPLETE with `ok' on exit 0, or `error' and output on failure."
                (funcall on-complete 'ok)
              (funcall on-complete 'error (format "exit %d: %s" code output)))))))))
 
-(defun magit-dash--auto-sync-command-async (repo on-complete)
-  "Run REPO's :auto-sync-command asynchronously.
-Dispatches by type:
-  symbol  — looked up as a label in :commands; runs its target (string or fn).
-  string  — executed as a shell command in the repo directory.
+(defun magit-dash--run-target (repo target on-complete)
+  "Run TARGET for REPO, calling ON-COMPLETE with `ok', `skipped', or `error'.
+The single execution primitive for hook targets, global hook targets, and
+`:operation' overrides.  Dispatches by TARGET's type:
+  symbol   — looked up as a label in REPO's :commands; runs its target
+             (string or function), recursively.
+  string   — executed as a shell command in REPO's directory.
   function — called with (REPO ON-COMPLETE)."
-  (let ((cmd (magit-dash-repo-auto-sync-command repo))
-        (path (magit-dash-repo-path repo)))
+  (let ((path (magit-dash-repo-path repo)))
     (cond
-     ((null cmd)
-      (funcall on-complete 'skipped "no auto-sync-command configured"))
-     ((and (symbolp cmd) (not (functionp cmd)))
-      (if-let* ((entry (seq-find (lambda (c) (eq (car c) cmd))
+     ((and (symbolp target) target (not (functionp target)))
+      (if-let* ((entry (seq-find (lambda (c) (eq (car c) target))
                                  (magit-dash-repo-commands repo)))
-                (target (cdr entry)))
-          (cond
-           ((stringp target)
-            (magit-dash--run-shell-string-async target path on-complete))
-           ((functionp target)
-            (funcall target repo on-complete))
-           (t (funcall on-complete 'error
-                       (format "command %s has unsupported target type" cmd))))
+                (resolved (cdr entry)))
+          (magit-dash--run-target repo resolved on-complete)
         (funcall on-complete 'error
-                 (format "command %s not found in :commands" cmd))))
-     ((stringp cmd)
-      (magit-dash--run-shell-string-async cmd path on-complete))
-     ((functionp cmd)
-      (funcall cmd repo on-complete))
+                 (format "command %s not found in :commands" target))))
+     ((stringp target)
+      (magit-dash--run-shell-string-async target path on-complete))
+     ((functionp target)
+      (funcall target repo on-complete))
      (t
-      (funcall on-complete 'error "auto-sync-command must be a symbol, string, or function")))))
+      (funcall on-complete 'error "target must be a symbol, string, or function")))))
+
+(defun magit-dash--hook-slot (hooks op slot)
+  "Return SLOT (`:pre'/`:post'/`:operation') of OP's plist within HOOKS."
+  (plist-get (plist-get hooks op) slot))
+
+(defun magit-dash--repo-operation (repo op)
+  "Return REPO's `:operation' override for OP, or nil for the default."
+  (magit-dash--hook-slot (magit-dash-repo-hooks repo) op :operation))
+
+(defun magit-dash--hooks-for (repo op phase)
+  "Return the ordered target list for REPO's OP at PHASE (`:pre' or `:post').
+Global hooks run outermost: before repo hooks for `:pre', after repo hooks
+for `:post'."
+  (let ((global (magit-dash--hook-slot magit-dash-global-hooks op phase))
+        (local (magit-dash--hook-slot (magit-dash-repo-hooks repo) op phase)))
+    (if (eq phase :pre)
+        (append global local)
+      (append local global))))
+
+(defun magit-dash--run-hook-chain (repo phase targets on-complete)
+  "Run TARGETS for REPO serially via `magit-dash--run-target'.
+At PHASE `:pre', stops and reports `error' on the first failing target.
+At PHASE `:post', runs every target regardless of failures (logged, not
+propagated) and always reports `ok'."
+  (if (null targets)
+      (funcall on-complete 'ok)
+    (magit-dash--run-target
+     repo (car targets)
+     (lambda (status &optional text)
+       (when (eq status 'error)
+         (magit-dash--log-operation (magit-dash-repo-name repo)
+                                     (format "%s hook" (symbol-name phase))
+                                     status text))
+       (if (and (eq phase :pre) (eq status 'error))
+           (funcall on-complete 'error text)
+         (magit-dash--run-hook-chain repo phase (cdr targets) on-complete))))))
+
+(defun magit-dash--run-hooks-for (repo op phase on-complete)
+  "Run global then repo hooks (or repo then global for `:post') for REPO's
+OP at PHASE, then call ON-COMPLETE with the aggregate status."
+  (magit-dash--run-hook-chain repo phase (magit-dash--hooks-for repo op phase) on-complete))
+
+(defun magit-dash--default-operation (op)
+  "Return the default implementation function for OP."
+  (pcase op
+    (:fetch  #'magit-dash--auto-fetch-async)
+    (:pull   #'magit-dash--auto-pull-async)
+    (:commit #'magit-dash--auto-commit-async)
+    (:push   #'magit-dash--auto-push-async)
+    (:sync   #'magit-dash--auto-sync-pipeline-async)))
+
+(defun magit-dash--resolve-operation (repo op)
+  "Return the (REPO ON-COMPLETE) function that implements OP for REPO:
+REPO's `:operation' override when set, otherwise OP's default implementation."
+  (if-let* ((target (magit-dash--repo-operation repo op)))
+      (lambda (r cb) (magit-dash--run-target r target cb))
+    (magit-dash--default-operation op)))
+
+(defun magit-dash--run-operation (repo op on-complete)
+  "Resolve and run OP for REPO, wrapped by OP's `:pre'/`:post' hooks.
+Calls ON-COMPLETE with `ok', `skipped', or `error' [and message text].
+A `:pre' hook failure skips the operation (reported as `skipped'); `:post'
+hooks never run after an `error' and their own failures never change the
+status passed to ON-COMPLETE."
+  (magit-dash--run-hooks-for
+   repo op :pre
+   (lambda (pre-status &optional pre-text)
+     (if (eq pre-status 'error)
+         (funcall on-complete 'skipped (or pre-text (format "%s pre-hook skipped operation" op)))
+       (funcall (magit-dash--resolve-operation repo op)
+                repo
+                (lambda (status &optional text)
+                  (if (eq status 'error)
+                      (funcall on-complete 'error text)
+                    (magit-dash--run-hooks-for
+                     repo op :post
+                     (lambda (&rest _) (funcall on-complete status text))))))))))
 
 (defun magit-dash--auto-sync-steps (repo)
   "Return an ordered list of (LABEL . FN) pairs for REPO's configured auto ops.
 Steps are: fetch (when :auto-fetch or :auto-pull), pull (when :auto-pull),
-commit (when :auto-commit), push (when :auto-push), cmd (when :auto-sync-command)."
+commit (when :auto-commit), push (when :auto-push)."
   (seq-filter
    #'identity
    (list
@@ -685,38 +842,58 @@ commit (when :auto-commit), push (when :auto-push), cmd (when :auto-sync-command
     (when (magit-dash-repo-auto-commit repo)
       (cons "commit" (lambda (cb) (magit-dash--auto-commit-async repo cb))))
     (when (magit-dash-repo-auto-push repo)
-      (cons "push" (lambda (cb) (magit-dash--auto-push-async repo cb))))
-    (when (magit-dash-repo-auto-sync-command repo)
-      (cons "cmd" (lambda (cb) (magit-dash--auto-sync-command-async repo cb)))))))
+      (cons "push" (lambda (cb) (magit-dash--auto-push-async repo cb)))))))
 
-(defun magit-dash--run-step-chain (repo-name steps on-complete)
-  "Run STEPS sequentially, logging each with bold REPO-NAME.
-STEPS is a list of (LABEL . FN) pairs; FN is called with a callback.
-Aborts on `error'; continues on `ok' or `skipped'.
-Calls ON-COMPLETE with `ok' after all steps, or `error' on first failure."
-  (if (null steps)
+(defun magit-dash--has-sync-configured-p (repo)
+  "Return non-nil when REPO has any sync operation configured — default
+pipeline steps (fetch/pull/commit/push) or a `:hooks' `:sync' `:operation'
+override."
+  (or (magit-dash--auto-sync-steps repo)
+      (magit-dash--repo-operation repo :sync)))
+
+(defun magit-dash--auto-sync-op-symbols (repo)
+  "Return an ordered list of operation keywords configured for REPO's
+default `:sync' pipeline: `:fetch'/`:pull' (pull implies fetch), `:commit',
+`:push' — each only when its own auto-* flag is set."
+  (seq-filter
+   #'identity
+   (list
+    (when (or (magit-dash-repo-auto-fetch repo) (magit-dash-repo-auto-pull repo)) :fetch)
+    (when (magit-dash-repo-auto-pull repo) :pull)
+    (when (magit-dash-repo-auto-commit repo) :commit)
+    (when (magit-dash-repo-auto-push repo) :push))))
+
+(defun magit-dash--run-op-chain (repo ops on-complete)
+  "Run OPS (a list of operation keywords) for REPO in order via
+`magit-dash--run-operation', logging each.  Aborts on `error'; continues
+on `ok' or `skipped'.  Calls ON-COMPLETE with `ok' after all ops, or
+`error' on first failure."
+  (if (null ops)
       (funcall on-complete 'ok)
-    (let* ((step (car steps))
-           (label (car step))
-           (fn (cdr step)))
-      (funcall fn
-               (lambda (status &optional error-text)
-                 (magit-dash--log-operation repo-name label status error-text)
-                 (pcase status
-                   ('error (funcall on-complete 'error error-text))
-                   (_ (magit-dash--run-step-chain
-                       repo-name (cdr steps) on-complete))))))))
+    (magit-dash--run-operation
+     repo (car ops)
+     (lambda (status &optional text)
+       (magit-dash--log-operation (magit-dash-repo-name repo) (symbol-name (car ops)) status text)
+       (pcase status
+         ('error (funcall on-complete 'error text))
+         (_ (magit-dash--run-op-chain repo (cdr ops) on-complete)))))))
+
+(defun magit-dash--auto-sync-pipeline-async (repo on-complete)
+  "Default `:operation' implementation for `:sync': run fetch/pull/commit/push
+per REPO's auto-* flags, in order, each resolved and wrapped through its own
+`:hooks' entry.  Calls ON-COMPLETE with `ok', `skipped', or `error'."
+  (let ((ops (magit-dash--auto-sync-op-symbols repo)))
+    (if (null ops)
+        (funcall on-complete 'skipped "no auto operations configured")
+      (magit-dash--run-op-chain repo ops on-complete))))
 
 (defun magit-dash--auto-sync-async (repo on-complete)
-  "Run all configured auto operations for REPO sequentially.
-Steps run in order: fetch, pull, commit, push — each only when configured.
-auto-pull implies fetch. Each step is logged individually with the repo name.
-Calls ON-COMPLETE with `ok', `skipped', or `error'."
-  (let ((steps (magit-dash--auto-sync-steps repo)))
-    (if (null steps)
-        (funcall on-complete 'skipped "no auto operations configured")
-      (magit-dash--run-step-chain
-       (magit-dash-repo-name repo) steps on-complete))))
+  "Run REPO's configured `:sync' operation — its `:hooks' `:sync' `:operation'
+override (which replaces the default pipeline entirely, including its own
+fetch/pull/commit/push settings) or, absent that, the default pipeline of
+fetch/pull/commit/push per REPO's auto-* flags — wrapped by `:sync''s own
+`:pre'/`:post' hooks.  Calls ON-COMPLETE with `ok', `skipped', or `error'."
+  (magit-dash--run-operation repo :sync on-complete))
 
 (defun magit-dash--log-operation (repo-name operation status &optional error-text)
   "Log REPO-NAME OPERATION with STATUS to *Messages*.
@@ -1125,7 +1302,7 @@ Returns an empty string when nothing is set."
                  (when (magit-dash-repo-auto-pull repo)         "pull")
                  (when (magit-dash-repo-auto-commit repo)       "commit")
                  (when (magit-dash-repo-auto-push repo)         "push")
-                 (when (magit-dash-repo-auto-sync-command repo) "cmd")))))
+                 (when (magit-dash--repo-operation repo :sync)  "cmd")))))
     (if parts
         (propertize (mapconcat #'identity parts "+") 'face 'magit-dash-repo-branch-face)
       "")))
@@ -1651,7 +1828,7 @@ Signals `user-error' when :auto-commit is not configured for this repo."
 Signals `user-error' when no auto operations are configured for this repo."
   (interactive)
   (let ((repo (magit-dash--repo-at-point)))
-    (unless (magit-dash--auto-sync-steps repo)
+    (unless (magit-dash--has-sync-configured-p repo)
       (user-error "No auto operations configured for %s" (magit-dash-repo-name repo)))
     (magit-dash--auto-sync-async
      repo
@@ -1675,7 +1852,7 @@ Displays a summary message and refreshes the dashboard when all complete."
 (defun magit-dash-sync-all ()
   "Run auto operations for marked repos (or all if none marked) asynchronously, then refresh."
   (interactive)
-  (let ((repos (seq-filter #'magit-dash--auto-sync-steps (magit-dash--effective-repos))))
+  (let ((repos (seq-filter #'magit-dash--has-sync-configured-p (magit-dash--effective-repos))))
     (unless repos
       (user-error "No repositories have auto operations configured"))
     (magit-dash--batch-run
@@ -1688,7 +1865,7 @@ Displays a summary message and refreshes the dashboard when all complete."
 (defun magit-dash-sync-repo ()
   "Select a repository interactively and run its configured auto-sync operations."
   (interactive)
-  (let ((repos (seq-filter #'magit-dash--auto-sync-steps magit-dash-repo-list)))
+  (let ((repos (seq-filter #'magit-dash--has-sync-configured-p magit-dash-repo-list)))
     (unless repos
       (user-error "No repositories have auto operations configured"))
     (when-let* ((name (annotated-completing-read
@@ -1710,7 +1887,7 @@ Displays a summary message and refreshes the dashboard when all complete."
 Each repo's steps (fetch, pull, commit, push) run sequentially; each step is
 logged individually. Dashboard refreshes when all repos complete."
   (interactive)
-  (let ((repos (seq-filter #'magit-dash--auto-sync-steps (magit-dash--effective-repos))))
+  (let ((repos (seq-filter #'magit-dash--has-sync-configured-p (magit-dash--effective-repos))))
     (unless repos
       (user-error "No repos have auto operations configured"))
     (magit-dash--batch-run
@@ -2122,7 +2299,7 @@ Signals `user-error' when :auto-commit is not configured for this repo."
 Signals `user-error' when no auto operations are configured for this repo."
   (interactive)
   (let ((repo (magit-dash-overview--current-repo)))
-    (unless (magit-dash--auto-sync-steps repo)
+    (unless (magit-dash--has-sync-configured-p repo)
       (user-error "No auto operations configured for %s" (magit-dash-repo-name repo)))
     (magit-dash--auto-sync-async
      repo
@@ -2449,7 +2626,7 @@ On a Recent Commits line: show the commit in magit."
 (defun magit-dash--has-auto-sync-p ()
   "Return non-nil when the repo at point has any auto operation configured."
   (when-let* ((repo (ignore-errors (magit-dash--repo-at-point))))
-    (and (magit-dash--auto-sync-steps repo) t)))
+    (and (magit-dash--has-sync-configured-p repo) t)))
 
 (defun magit-dash--has-commands-p ()
   "Return non-nil when the repo at point has commands registered."
@@ -2474,7 +2651,7 @@ On a Recent Commits line: show the commit in magit."
 (defun magit-dash-overview--has-auto-sync-p ()
   "Return non-nil when this overview's repository has any auto operation configured."
   (when-let* ((repo (ignore-errors (magit-dash-overview--current-repo))))
-    (and (magit-dash--auto-sync-steps repo) t)))
+    (and (magit-dash--has-sync-configured-p repo) t)))
 
 (defun magit-dash-overview--has-commands-p ()
   "Return non-nil when this overview's repository has commands registered."
