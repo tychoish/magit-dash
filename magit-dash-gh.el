@@ -174,7 +174,9 @@ Stale marked branches are dropped from `:marked'. Returns new candidates."
   "Build a hash-table menu for the prune command.
 CANDIDATES is the alist of (BRANCH . PR-ALIST). MARKED is the list of
 branch names currently marked for batch pruning. Branch entries are
-labeled `prune: BRANCH' with a ` [marked]' suffix when applicable."
+labeled `prune: BRANCH' with a ` [marked]' suffix when applicable, and
+carry BRANCH itself as their `annotated-completing-read' target, so
+selecting one returns the branch name directly."
   (let ((table (make-hash-table :test #'equal)))
     (map-put! table "exit menu" "leave the menu without further action")
     (map-put! table "refresh" "re-scan PRs and rebuild the cache (returns to menu)")
@@ -193,15 +195,9 @@ labeled `prune: BRANCH' with a ` [marked]' suffix when applicable."
               (let* ((branch (car entry))
                      (suffix (if (member branch marked) " [marked]" "")))
                 (map-put! table (format "prune: %s%s" branch suffix)
-                          (magit-dash-gh--prune-format-annotation (cdr entry)))))
+                          (cons (magit-dash-gh--prune-format-annotation (cdr entry)) branch))))
             candidates)
     table))
-
-(defun magit-dash-gh--prune-parse-branch-label (label)
-  "Extract BRANCH from a menu LABEL like `prune: BRANCH [marked]'.
-Returns nil when LABEL is not a branch entry."
-  (when (string-match "\\`prune: \\(.+?\\)\\(?: \\[marked\\]\\)?\\'" label)
-    (match-string 1 label)))
 
 (defun magit-dash-gh--prune-delete-branches (branches path &optional prompt-p)
   "Delete each branch in BRANCHES for repo at PATH, prompting only when PROMPT-P.
@@ -253,13 +249,12 @@ Updates `:marked' in the cached prune state."
               (let* ((branch (car entry))
                      (label (format "%s%s" branch
                                     (if (member branch marked) " [marked]" ""))))
-                (map-put! table label (magit-dash-gh--prune-format-annotation (cdr entry)))))
+                (map-put! table label (cons (magit-dash-gh--prune-format-annotation (cdr entry)) branch))))
             candidates)
-    (let* ((label (annotated-completing-read table
+    (let* ((branch (annotated-completing-read table
 					     :prompt "toggle mark => "
 					     :category 'magit-dash-gh-mark
 					     :require-match t))
-	   (branch (replace-regexp-in-string " \\[marked\\]\\'" "" label))
 	   (new-marked (if (member branch marked)
 			   (delete branch (copy-sequence marked))
 			 (cons branch marked))))
@@ -268,6 +263,9 @@ Updates `:marked' in the cached prune state."
 
 (defun magit-dash-gh--prune-dispatch (label path)
   "Dispatch the menu action for LABEL given repo PATH.
+LABEL is either one of the fixed action strings from
+`magit-dash-gh--prune-build-menu', or a branch name resolved by
+`annotated-completing-read' via that menu's per-branch targets.
 Throws `magit-dash-gh--prune-exit' to terminate the menu loop."
   (let* ((state (magit-dash-gh--cache-get path :prune-state))
 	 (candidates (plist-get state :candidates))
@@ -285,10 +283,10 @@ Throws `magit-dash-gh--prune-exit' to terminate the menu loop."
       (magit-dash-gh--prune-toggle-mark path))
      ((equal label "prune marked branches")
       (magit-dash-gh--prune-delete-branches marked path nil))
+     ((assoc label candidates)
+      (magit-dash-gh--prune-delete-branches (list label) path nil))
      (t
-      (if-let* ((branch (magit-dash-gh--prune-parse-branch-label label)))
-          (magit-dash-gh--prune-delete-branches (list branch) path nil)
-        (user-error "Unknown menu label: %s" label))))))
+      (user-error "Unknown menu label: %s" label)))))
 
 ;;;###autoload
 (defun magit-dash-gh-prune-merged-branches ()

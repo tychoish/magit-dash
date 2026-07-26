@@ -33,29 +33,6 @@
   (should-not (magit-dash-gh--pr-closed-p '((number . 42)))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;;; magit-dash-gh--prune-parse-branch-label (pure)
-
-(ert-deftest magit-dash-gh/parse-branch-label-plain ()
-  (should (equal "feat-x"
-                 (magit-dash-gh--prune-parse-branch-label "prune: feat-x"))))
-
-(ert-deftest magit-dash-gh/parse-branch-label-marked ()
-  (should (equal "feat-x"
-                 (magit-dash-gh--prune-parse-branch-label "prune: feat-x [marked]"))))
-
-(ert-deftest magit-dash-gh/parse-branch-label-with-slashes ()
-  (should (equal "user/feat-x"
-                 (magit-dash-gh--prune-parse-branch-label "prune: user/feat-x")))
-  (should (equal "user/feat-x"
-                 (magit-dash-gh--prune-parse-branch-label "prune: user/feat-x [marked]"))))
-
-(ert-deftest magit-dash-gh/parse-branch-label-non-prune ()
-  (should-not (magit-dash-gh--prune-parse-branch-label "exit menu"))
-  (should-not (magit-dash-gh--prune-parse-branch-label "refresh"))
-  (should-not (magit-dash-gh--prune-parse-branch-label "prune all branches (no prompt)"))
-  (should-not (magit-dash-gh--prune-parse-branch-label "mark branch for pruning")))
-
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; magit-dash-gh--prune-format-annotation (pure)
 
 (ert-deftest magit-dash-gh/format-annotation ()
@@ -106,7 +83,19 @@
   (let* ((candidates '(("feat" . ((number . 99) (state . "MERGED") (title . "Big change")))))
          (table (magit-dash-gh--prune-build-menu candidates nil)))
     (should (equal "PR #99 MERGED: Big change"
-                   (map-elt table "prune: feat")))))
+                   (car (map-elt table "prune: feat"))))))
+
+(ert-deftest magit-dash-gh/build-menu-branch-entry-carries-branch-as-target ()
+  "Each `prune: BRANCH' entry carries BRANCH itself as its ACR target."
+  (let* ((candidates '(("feat" . ((number . 99) (state . "MERGED") (title . "Big change")))))
+         (table (magit-dash-gh--prune-build-menu candidates nil)))
+    (should (equal "feat" (cdr (map-elt table "prune: feat"))))))
+
+(ert-deftest magit-dash-gh/build-menu-marked-branch-entry-target-has-no-suffix ()
+  "The target for a marked branch entry is the bare branch name, not `BRANCH [marked]'."
+  (let* ((candidates '(("feat" . ((number . 99) (state . "MERGED") (title . "Big change")))))
+         (table (magit-dash-gh--prune-build-menu candidates '("feat"))))
+    (should (equal "feat" (cdr (map-elt table "prune: feat [marked]"))))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; magit-dash-gh--prune-scan
@@ -280,7 +269,7 @@
   "Selecting a marked branch removes it from :marked."
   (let ((magit-dash-gh--cache (make-hash-table :test #'equal)))
     (cl-letf (((symbol-function 'annotated-completing-read)
-               (lambda (&rest _) "feat [marked]")))
+               (lambda (&rest _) "feat")))
       (magit-dash-gh--cache-set "/tmp/r" :prune-state
                           (list :candidates '(("feat" . ((number . 1) (state . "MERGED") (title . "F"))))
                                 :marked '("feat")))
@@ -330,7 +319,7 @@
       (should (= 1 scanned)))))
 
 (ert-deftest magit-dash-gh/dispatch-prune-selected ()
-  "Selecting a specific branch line deletes that branch only."
+  "A branch name resolved via ACR's target support deletes that branch only."
   (let ((deleted nil)
         (magit-dash-gh--cache (make-hash-table :test #'equal)))
     (cl-letf (((symbol-function 'magit-branch-delete)
@@ -342,11 +331,12 @@
                           (list :candidates '(("feat" . ((number . 1) (state . "MERGED") (title . "F")))
                                               ("other" . ((number . 2) (state . "CLOSED") (title . "O"))))
                                 :marked nil))
-      (magit-dash-gh--prune-dispatch "prune: feat" "/tmp/r")
+      (magit-dash-gh--prune-dispatch "feat" "/tmp/r")
       (should (equal '("feat") deleted)))))
 
 (ert-deftest magit-dash-gh/dispatch-prune-selected-marked ()
-  "A marked label parses correctly and dispatches deletion of that branch."
+  "A marked branch's target is still the bare branch name, so dispatch
+deletes it the same as an unmarked selection."
   (let ((deleted nil)
         (magit-dash-gh--cache (make-hash-table :test #'equal)))
     (cl-letf (((symbol-function 'magit-branch-delete)
@@ -357,7 +347,7 @@
       (magit-dash-gh--cache-set "/tmp/r" :prune-state
                           (list :candidates '(("feat" . ((number . 1) (state . "MERGED") (title . "F"))))
                                 :marked '("feat")))
-      (magit-dash-gh--prune-dispatch "prune: feat [marked]" "/tmp/r")
+      (magit-dash-gh--prune-dispatch "feat" "/tmp/r")
       (should (equal '("feat") deleted)))))
 
 (ert-deftest magit-dash-gh/dispatch-prune-all-no-prompt ()
@@ -430,6 +420,16 @@
   (let ((magit-dash-gh--cache (make-hash-table :test #'equal)))
     (magit-dash-gh--cache-set "/tmp/r" :prune-state (list :candidates nil :marked nil))
     (should-error (magit-dash-gh--prune-dispatch "bogus" "/tmp/r")
+                  :type 'user-error)))
+
+(ert-deftest magit-dash-gh/dispatch-errors-when-label-not-a-real-candidate ()
+  "A label that is not a fixed action and not among :candidates errors,
+even when other real candidates exist."
+  (let ((magit-dash-gh--cache (make-hash-table :test #'equal)))
+    (magit-dash-gh--cache-set "/tmp/r" :prune-state
+                        (list :candidates '(("feat" . ((number . 1) (state . "MERGED") (title . "F"))))
+                              :marked nil))
+    (should-error (magit-dash-gh--prune-dispatch "not-a-real-branch" "/tmp/r")
                   :type 'user-error)))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
