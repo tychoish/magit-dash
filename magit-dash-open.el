@@ -106,7 +106,7 @@ fallback so the annotation function never calls git directly."
                           :behind behind
                           :dirty (let ((default-directory dir))
                                    (magit-anything-modified-p)))))
-          (map-put! magit-dash-open--info-cache dir info)
+          (setf (map-elt magit-dash-open--info-cache dir) info)
           info)))))
 
 ;;; Directory scanning
@@ -266,38 +266,38 @@ the above context rules."
          (projectile-entries (when (and (featurep 'projectile) projectile-mode)
                                (magit-dash-open--projectile-candidates)))
          (open-buffers (magit-dash-open--open-status-buffers))
-         (path-map (make-hash-table :test #'equal)))
-    ;; Priority: local scan > projectile; open buffers fill gaps
-    (map-do (lambda (path kind) (map-put! path-map path kind)) entries)
+         ;; Priority: local scan > projectile; open buffers fill gaps
+         (path-map (map-into entries '(hash-table :test equal))))
     (map-do (lambda (path kind)
               (unless (map-contains-key path-map path)
-                (map-put! path-map path kind)))
+                (setf (map-elt path-map path) kind)))
             projectile-entries)
     ;; Ensure every open magit-status buffer appears, even if outside the scan
     (map-do (lambda (norm-path _buf)
               (let ((dir (directory-file-name norm-path)))
                 (unless (map-contains-key path-map dir)
-                  (map-put! path-map dir 'repo))))
+                  (setf (map-elt path-map dir) 'repo))))
             open-buffers)
     (when (map-empty-p path-map)
       (user-error "No directories found"))
-    (let ((table (make-hash-table :test #'equal)))
-      (map-do (lambda (path kind)
-                (let* ((display (abbreviate-file-name path))
-                       (already-open (magit-dash-open--find-open-buffer path open-buffers))
-                       (base (magit-dash-open--annotation path kind))
-                       (annotation (if already-open (concat base "  [open]") base)))
-                  (map-put! table display (cons annotation path))))
-              path-map)
-      (when-let* ((full-path (annotated-completing-read
-                              table
-                              :prompt "Open repo: "
-                              :require-match t
-                              :category 'file)))
-        (let ((existing (magit-dash-open--find-open-buffer full-path open-buffers)))
-          (if existing
-              (switch-to-buffer existing)
-            (magit-status-setup-buffer full-path)))))))
+    (when-let* ((full-path (annotated-completing-read
+                            (map-into
+                             (map-apply
+                              (lambda (path kind)
+                                (let* ((display (abbreviate-file-name path))
+                                       (already-open (magit-dash-open--find-open-buffer path open-buffers))
+                                       (base (magit-dash-open--annotation path kind))
+                                       (annotation (if already-open (concat base "  [open]") base)))
+                                  (cons display (cons annotation path))))
+                              path-map)
+                             '(hash-table :test equal))
+                            :prompt "Open repo: "
+                            :require-match t
+                            :category 'file)))
+      (let ((existing (magit-dash-open--find-open-buffer full-path open-buffers)))
+        (if existing
+            (switch-to-buffer existing)
+          (magit-status-setup-buffer full-path))))))
 
 (provide 'magit-dash-open)
 ;;; magit-dash-open.el ends here

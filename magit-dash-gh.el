@@ -98,18 +98,19 @@ The filename uses the repo's directory basename plus a short hash for uniqueness
   "Return a hash table of headRefName→PR-alist from the repo's cache file.
 Returns an empty hash table when caching is disabled, no cache exists,
 or the file is unreadable."
-  (let ((table (make-hash-table :test #'equal)))
-    (when-let* ((file (magit-dash-gh--prune-cache-file)))
-      (when (file-exists-p file)
+  (let ((empty (make-hash-table :test #'equal)))
+    (if-let* ((file (magit-dash-gh--prune-cache-file))
+              ((file-exists-p file)))
         (condition-case err
-            (with-temp-buffer
-              (insert-file-contents file)
-              (goto-char (point-min))
-              (seq-do (lambda (pr)
-                        (map-put! table (map-elt pr 'headRefName) pr))
-                      (read (current-buffer))))
-          (error (message "magit-gh prune: ignoring unreadable cache: %s" err)))))
-    table))
+            (map-into
+             (seq-map (lambda (pr) (cons (map-elt pr 'headRefName) pr))
+                      (with-temp-buffer
+                        (insert-file-contents file)
+                        (goto-char (point-min))
+                        (read (current-buffer))))
+             '(hash-table :test equal))
+          (error (message "magit-gh prune: ignoring unreadable cache: %s" err) empty))
+      empty)))
 
 (defun magit-dash-gh--prune-save-cache (table)
   "Persist the closed-PR hash TABLE to the repo cache file.
@@ -134,7 +135,7 @@ Uses a single gh call fetching up to `magit-dash-gh-prune-pr-limit' PRs."
         (seq-do (lambda (pr)
                   (let ((branch (map-elt pr 'headRefName)))
                     (unless (map-elt table branch)
-                      (map-put! table branch pr)))))))
+                      (setf (map-elt table branch) pr)))))))
     (magit-dash-gh--prune-save-cache table)
     table))
 
@@ -177,27 +178,28 @@ branch names currently marked for batch pruning. Branch entries are
 labeled `prune: BRANCH' with a ` [marked]' suffix when applicable, and
 carry BRANCH itself as their `annotated-completing-read' target, so
 selecting one returns the branch name directly."
-  (let ((table (make-hash-table :test #'equal)))
-    (map-put! table "exit menu" "leave the menu without further action")
-    (map-put! table "refresh" "re-scan PRs and rebuild the cache (returns to menu)")
+  (map-into
+   (append
+    (list (cons "exit menu" "leave the menu without further action")
+          (cons "refresh" "re-scan PRs and rebuild the cache (returns to menu)"))
     (when candidates
-      (map-put! table "prune all branches (no prompt)"
-	       (format "delete all %d candidate branch(es)" (length candidates)))
-      (map-put! table "prune all branches (with prompt)"
-	       (format "delete %d candidate(s), confirming each (y/n/q/!)"
-		       (length candidates)))
-      (map-put! table "mark branch for pruning"
-	       "toggle the mark on a branch for batch pruning"))
+      (list (cons "prune all branches (no prompt)"
+                  (format "delete all %d candidate branch(es)" (length candidates)))
+            (cons "prune all branches (with prompt)"
+                  (format "delete %d candidate(s), confirming each (y/n/q/!)"
+                          (length candidates)))
+            (cons "mark branch for pruning"
+                  "toggle the mark on a branch for batch pruning")))
     (when marked
-      (map-put! table "prune marked branches"
-	       (format "delete %d marked branch(es)" (length marked))))
-    (seq-do (lambda (entry)
-              (let* ((branch (car entry))
-                     (suffix (if (member branch marked) " [marked]" "")))
-                (map-put! table (format "prune: %s%s" branch suffix)
-                          (cons (magit-dash-gh--prune-format-annotation (cdr entry)) branch))))
-            candidates)
-    table))
+      (list (cons "prune marked branches"
+                  (format "delete %d marked branch(es)" (length marked)))))
+    (seq-map (lambda (entry)
+               (let* ((branch (car entry))
+                      (suffix (if (member branch marked) " [marked]" "")))
+                 (cons (format "prune: %s%s" branch suffix)
+                       (cons (magit-dash-gh--prune-format-annotation (cdr entry)) branch))))
+             candidates))
+   '(hash-table :test equal)))
 
 (defun magit-dash-gh--prune-delete-branches (branches path &optional prompt-p)
   "Delete each branch in BRANCHES for repo at PATH, prompting only when PROMPT-P.
@@ -240,26 +242,26 @@ yes-to-all for the remainder, `q' terminates the loop."
   "Prompt for a branch from the cache for repo at PATH and toggle its mark.
 Updates `:marked' in the cached prune state."
   (let* ((state (magit-dash-gh--cache-get path :prune-state))
-	 (candidates (plist-get state :candidates))
+	 (candidates (or (plist-get state :candidates)
+			 (user-error "No candidate branches to mark")))
 	 (marked (plist-get state :marked))
-	 (table (make-hash-table :test #'equal)))
-    (unless candidates
-      (user-error "No candidate branches to mark"))
-    (seq-do (lambda (entry)
-              (let* ((branch (car entry))
-                     (label (format "%s%s" branch
-                                    (if (member branch marked) " [marked]" ""))))
-                (map-put! table label (cons (magit-dash-gh--prune-format-annotation (cdr entry)) branch))))
-            candidates)
-    (let* ((branch (annotated-completing-read table
-					     :prompt "toggle mark => "
-					     :category 'magit-dash-gh-mark
-					     :require-match t))
-	   (new-marked (if (member branch marked)
-			   (delete branch (copy-sequence marked))
-			 (cons branch marked))))
-      (magit-dash-gh--cache-set path :prune-state
-                           (plist-put state :marked new-marked)))))
+	 (branch (annotated-completing-read
+                  (map-into
+                   (seq-map (lambda (entry)
+                              (let* ((branch (car entry))
+                                     (label (format "%s%s" branch
+                                                    (if (member branch marked) " [marked]" ""))))
+                                (cons label (cons (magit-dash-gh--prune-format-annotation (cdr entry)) branch))))
+                            candidates)
+                   '(hash-table :test equal))
+                  :prompt "toggle mark => "
+                  :category 'magit-dash-gh-mark
+                  :require-match t))
+	 (new-marked (if (member branch marked)
+			 (delete branch (copy-sequence marked))
+		       (cons branch marked))))
+    (magit-dash-gh--cache-set path :prune-state
+                              (plist-put state :marked new-marked))))
 
 (defun magit-dash-gh--prune-dispatch (label path)
   "Dispatch the menu action for LABEL given repo PATH.
@@ -490,15 +492,16 @@ Parsed from `gh auth status', across all configured hosts."
 (defun magit-dash-gh--auth-select-account (accounts)
   "Prompt to select one of ACCOUNTS via `annotated-completing-read'.
 ACCOUNTS is a list of (:host :user :active) plists. Returns the chosen plist."
-  (let ((table (make-hash-table :test #'equal)))
-    (seq-do (lambda (a)
-              (map-put! table (format "%s (%s)" (plist-get a :user) (plist-get a :host))
-                        (cons "switch to this account" a)))
-            accounts)
-    (annotated-completing-read table
-                               :prompt "switch gh account => "
-                               :category 'magit-dash-gh-auth
-                               :require-match t)))
+  (annotated-completing-read
+   (map-into
+    (seq-map (lambda (a)
+               (cons (format "%s (%s)" (plist-get a :user) (plist-get a :host))
+                     (cons "switch to this account" a)))
+             accounts)
+    '(hash-table :test equal))
+   :prompt "switch gh account => "
+   :category 'magit-dash-gh-auth
+   :require-match t))
 
 ;;;###autoload
 (defun magit-dash-gh-auth-switch ()

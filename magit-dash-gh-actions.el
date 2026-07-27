@@ -85,18 +85,18 @@ Runs are presented most-recent first.  The annotation shows an ordinal
 When RUNS has exactly one entry it is returned directly without prompting."
   (if (= (length runs) 1)
       (car runs)
-    (let ((table (make-hash-table :test #'equal))
-          (sorted (magit-dash-gh-actions--sort-runs runs)))
+    (annotated-completing-read
+     (map-into
       (seq-map-indexed
        (lambda (run i)
          (let ((key (format "#%s %s"
                             (map-elt run 'databaseId)
                             (or (map-elt run 'name) ""))))
-           (map-put! table key (cons (magit-dash-gh-actions--run-annotation run (1+ i)) run))))
-       sorted)
-      (annotated-completing-read table
-                                 :prompt "CI run => "
-                                 :require-match t))))
+           (cons key (cons (magit-dash-gh-actions--run-annotation run (1+ i)) run))))
+       (magit-dash-gh-actions--sort-runs runs))
+      '(hash-table :test equal))
+     :prompt "CI run => "
+     :require-match t)))
 
 ;;; Pipeline steps
 
@@ -209,14 +209,12 @@ default behaviour of `magit-dash-gh-actions-fetch'."
            "--json" "databaseId,name,status,conclusion,createdAt,headBranch,headSha,event,workflowName")
      repo-dir
      (lambda (output)
-       (let ((runs (json-parse-string output :array-type 'list :object-type 'alist)))
-         (when (null runs)
-           (user-error "magit-gh-ci: no CI runs found for branch %s" branch))
-         (let* ((run    (magit-dash-gh-actions--select-run runs))
-                (run-id (map-elt run 'databaseId)))
+       (let* ((run (magit-dash-gh-actions--select-run (or (json-parse-string output :array-type 'list :object-type 'alist)
+							  (user-error "magit-gh-ci: no CI runs found for branch %s" branch))))
+              (run-id (map-elt run 'databaseId)))
            (magit-dash-gh-actions--step-run-info
             (plist-put ctx :run-id run-id)))))
-     (magit-dash-gh--make-error-handler "magit-gh-ci" "run-list"))))
+     (magit-dash-gh--make-error-handler "magit-gh-ci" "run-list")))
 
 ;;; PR-scoped pipeline entry
 
@@ -232,15 +230,12 @@ default behaviour of `magit-dash-gh-actions-fetch'."
            "--json" "databaseId,name,status,conclusion,createdAt,headBranch,headSha,event,workflowName")
      repo-dir
      (lambda (output)
-       (let ((runs (json-parse-string output :array-type 'list :object-type 'alist)))
-         (when (null runs)
-           (user-error "magit-gh-ci: no CI runs found for PR #%d" pr-number))
-         (let* ((run (magit-dash-gh-actions--select-run runs))
-                (run-id (map-elt run 'databaseId))
-                (branch (or (map-elt run 'headBranch) "")))
-           (magit-dash-gh-actions--step-run-info
-            (plist-put (plist-put ctx :run-id run-id) :branch branch)))))
-     (magit-dash-gh--make-error-handler "magit-gh-ci" "pr-run-list"))))
+       (let* ((run (magit-dash-gh-actions--select-run (or (json-parse-string output :array-type 'list :object-type 'alist)
+							  (user-error "magit-gh-ci: no CI runs found for PR #%d" pr-number))))
+              (run-id (map-elt run 'databaseId))
+              (branch (or (map-elt run 'headBranch) "")))
+           (magit-dash-gh-actions--step-run-info (plist-put (plist-put ctx :run-id run-id) :branch branch)))))
+     (magit-dash-gh--make-error-handler "magit-gh-ci" "pr-run-list")))
 
 ;;; Public API
 
@@ -250,12 +245,11 @@ default behaviour of `magit-dash-gh-actions-fetch'."
 PR-NUMBER is an integer.  REPO-DIR must be a local checkout of the repository
 so that `gh' can resolve the remote when listing and downloading runs."
   (magit-dash-gh--check-gh)
-  (let ((ctx (list :pr-number pr-number
-                   :branch ""
-                   :root repo-dir
-                   :repo-dir repo-dir
-                   :files nil)))
-    (magit-dash-gh-actions--step-list-pr ctx)))
+  (magit-dash-gh-actions--step-list-pr (list :pr-number pr-number
+					     :branch ""
+					     :root repo-dir
+					     :repo-dir repo-dir
+					     :files nil)))
 
 ;;;###autoload
 (defun magit-dash-gh-actions-fetch (&optional run-id)
