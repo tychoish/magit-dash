@@ -1,0 +1,78 @@
+#!/usr/bin/env -S emacs --script
+
+;;; run-tests --- Run the magit-dash ERT test suite -*- lexical-binding: t; -*-
+
+;;; Commentary:
+;;
+;; Standalone test runner: no Cask, no ert-runner. GNU ELPA/MELPA
+;; dependencies (magit, transient, projectile, and their own transitive
+;; deps) are installed on demand via package.el into .deps/elpa; git-only
+;; dependencies (sprite, annotated-completing-read) are cloned on demand
+;; into .deps/vendor. Both directories are gitignored and reused across
+;; runs, so repeat invocations only pay the network cost once.
+;;
+;; Usage:
+;;   ./run-tests
+;;   emacs --script run-tests
+
+;;; Code:
+
+(require 'seq)
+(require 'ert)
+(require 'package)
+
+(defconst magit-dash-test-runner--root
+  (file-name-directory (or load-file-name buffer-file-name))
+  "Directory this script lives in -- the magit-dash package root.")
+
+(defconst magit-dash-test-runner--deps-dir
+  (expand-file-name ".deps" magit-dash-test-runner--root)
+  "Directory holding fetched dependencies, gitignored and cached across runs.")
+
+(defconst magit-dash-test-runner--melpa-packages
+  '(magit transient projectile)
+  "Packages fetched from GNU ELPA/MELPA via package.el.")
+
+(defconst magit-dash-test-runner--git-packages
+  '(("sprite" . "https://github.com/tychoish/sprite.git")
+    ("annotated-completing-read" . "https://github.com/tychoish/annotated-completing-read.git"))
+  "Packages with no ELPA presence, cloned directly from their git repositories.")
+
+(defun magit-dash-test-runner--ensure-melpa-packages ()
+  "Install any missing MELPA-PACKAGES into `package-user-dir', then load them."
+  (setq package-user-dir (expand-file-name "elpa" magit-dash-test-runner--deps-dir))
+  (setq package-archives '(("gnu" . "https://elpa.gnu.org/packages/")
+                            ("melpa" . "https://melpa.org/packages/")
+                            ("nongnu" . "https://elpa.nongnu.org/nongnu/")))
+  (setq package-check-signature nil)
+  (package-initialize)
+  (let ((missing (seq-remove #'package-installed-p magit-dash-test-runner--melpa-packages)))
+    (when missing
+      (package-refresh-contents)
+      (seq-do #'package-install missing)
+      (package-initialize))))
+
+(defun magit-dash-test-runner--ensure-git-packages ()
+  "Clone any missing GIT-PACKAGES, then add each to `load-path'."
+  (let ((vendor-dir (expand-file-name "vendor" magit-dash-test-runner--deps-dir)))
+    (make-directory vendor-dir t)
+    (seq-do
+     (lambda (pkg)
+       (let ((dir (expand-file-name (car pkg) vendor-dir)))
+         (unless (file-directory-p dir)
+           (call-process "git" nil nil nil "clone" "--depth" "1" (cdr pkg) dir))
+         (add-to-list 'load-path dir)))
+     magit-dash-test-runner--git-packages)))
+
+(magit-dash-test-runner--ensure-melpa-packages)
+(magit-dash-test-runner--ensure-git-packages)
+
+(add-to-list 'load-path magit-dash-test-runner--root)
+
+(seq-do (lambda (file) (load file nil t))
+        (directory-files (file-name-concat magit-dash-test-runner--root "test")
+                          t "\\`test-.*\\.el\\'"))
+
+(ert-run-tests-batch-and-exit "^magit-dash")
+
+;;; run-tests ends here
