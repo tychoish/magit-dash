@@ -270,27 +270,24 @@ Returns t when the commit succeeds, nil otherwise."
            (= 0 (magit-call-git "commit" "-m" message))))))
 
 (defun magit-dash--run-command-for (repo)
-  "Open an `annotated-completing-read' command picker for REPO and invoke the selected command."
-  (let ((commands (magit-dash-repo-commands repo)))
-    (unless commands
-      (user-error "No commands registered for %s" (magit-dash-repo-name repo)))
-    (let* ((table (seq-map (lambda (cmd)
-                             (cons (format "%s" (car cmd)) (format "%s" (cdr cmd))))
-                           commands))
-           (label (annotated-completing-read table
-                                             :prompt (format "%s command: " (magit-dash-repo-name repo))
-                                             :require-match t)))
-      (when-let* ((fn (cdr (seq-find (lambda (cmd)
-                                      (equal label (format "%s" (car cmd))))
-                                    commands))))
-        (magit-dash-gh--with-repo-dir (magit-dash-repo-path repo)
-          (cond
-           ((stringp fn)
-            (let ((buf-name (format "*%s-dash-%s*" (magit-dash-repo-name repo) label)))
-              (compilation-start fn nil (lambda (_) buf-name))))
-           ((commandp fn) (call-interactively fn))
-           ((functionp fn) (funcall fn))
-           (t (user-error "Command %s has unsupported type %s" label (type-of fn)))))))))
+  "Open an `annotated-completing-read' command picker for REPO and invoke
+the selected command with `default-directory' set to REPO's repository root."
+  (when-let* ((commands (or (magit-dash-repo-commands repo)
+			    (user-error "No commands registered for %s" (magit-dash-repo-name repo))))
+	      (op (annotated-completing-read
+                   (seq-map (lambda (cmd)
+			      (cons (format "%s" (car cmd)) (cons (format "%s" (cdr cmd)) (cdr cmd))))
+                            commands)
+                   :prompt (format "%s command: " (magit-dash-repo-name repo))
+                   :require-match t)))
+    (magit-dash-gh--with-repo-dir (magit-dash-repo-path repo)
+      (cond
+       ((stringp op)
+        (let ((buf-name (format "*%s-dash-cmd*" (magit-dash-repo-name repo))))
+          (compilation-start op nil (lambda (_) buf-name))))
+       ((commandp op) (call-interactively op))
+       ((functionp op) (funcall op))
+       (t (user-error "Command has unsupported type %s" (type-of op)))))))
 
 ;;;; Stats collection
 
@@ -1868,15 +1865,13 @@ Displays a summary message and refreshes the dashboard when all complete."
   (let ((repos (seq-filter #'magit-dash--has-sync-configured-p magit-dash-repo-list)))
     (unless repos
       (user-error "No repositories have auto operations configured"))
-    (when-let* ((name (annotated-completing-read
+    (when-let* ((repo (annotated-completing-read
                        (seq-map (lambda (r)
                                   (cons (magit-dash-repo-name r)
-                                        (magit-dash-repo-path r)))
+                                        (cons (magit-dash-repo-path r) r)))
                                 repos)
                        :prompt "sync repository: "
-                       :require-match t))
-                (repo (seq-find (lambda (r) (equal (magit-dash-repo-name r) name))
-                                repos)))
+                       :require-match t)))
       (magit-dash--auto-sync-async
        repo
        (lambda (_status &optional _error-text)
@@ -1902,7 +1897,8 @@ logged individually. Dashboard refreshes when all repos complete."
   (magit-dash--run-command-for (magit-dash--repo-at-point)))
 
 (defun magit-dash--build-tag-table ()
-  "Build an `annotated-completing-read' alist mapping tag-name strings to annotation strings.
+  "Build an `annotated-completing-read' alist mapping tag-name strings to
+annotation strings, targeting each entry's own tag symbol.
 Each annotation lists the count of repos using the tag and up to four names.
 Permanent tags (from repo :tags fields) are sorted before ephemeral-only tags."
   (let* ((permanent-set (magit-dash--permanent-tag-set))
@@ -1933,11 +1929,12 @@ Permanent tags (from repo :tags fields) are sorted before ephemeral-only tags."
               (count (length repos))
               (shown (seq-take (seq-map #'magit-dash-repo-name repos) 4)))
          (cons (symbol-name tag)
-               (format "%d repo%s: %s%s"
-                       count
-                       (if (= count 1) "" "s")
-                       (mapconcat #'identity shown ", ")
-                       (if (> count (length shown)) "…" "")))))
+               (cons (format "%d repo%s: %s%s"
+                             count
+                             (if (= count 1) "" "s")
+                             (mapconcat #'identity shown ", ")
+                             (if (> count (length shown)) "…" ""))
+                     tag))))
      sorted-tags)))
 
 (cl-defun magit-dash--read-tag (prompt &key include-clear require-match)
@@ -1951,7 +1948,7 @@ are accepted; otherwise arbitrary input is allowed for new ephemeral tags.
 Returns an interned symbol, `clear', or nil on quit."
   (let* ((permanent-set (magit-dash--permanent-tag-set))
          (full-table (if include-clear
-                         (cons '("(clear)" . "remove tag filter")
+                         (cons (cons "(clear)" (cons "remove tag filter" 'clear))
                                (magit-dash--build-tag-table))
                        (magit-dash--build-tag-table)))
          (group-fn (lambda (candidate)
@@ -1982,7 +1979,7 @@ Returns an interned symbol, `clear', or nil on quit."
                   :or-nil t)))
     (cond
      ((null result) nil)
-     ((equal result "(clear)") 'clear)
+     ((symbolp result) result)
      (t (intern result)))))
 
 (defun magit-dash-filter-by-tag ()

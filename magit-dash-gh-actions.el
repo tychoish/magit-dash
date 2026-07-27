@@ -92,15 +92,11 @@ When RUNS has exactly one entry it is returned directly without prompting."
          (let ((key (format "#%s %s"
                             (map-elt run 'databaseId)
                             (or (map-elt run 'name) ""))))
-           (map-put! table key (magit-dash-gh-actions--run-annotation run (1+ i)))))
+           (map-put! table key (cons (magit-dash-gh-actions--run-annotation run (1+ i)) run))))
        sorted)
-      (let* ((choice (annotated-completing-read
-                      table
-                      :prompt "CI run => "
-                      :require-match t))
-             (id (when (string-match "\\`#\\([0-9]+\\) " choice)
-                   (string-to-number (match-string 1 choice)))))
-        (seq-find (lambda (r) (= (map-elt r 'databaseId) id)) sorted)))))
+      (annotated-completing-read table
+                                 :prompt "CI run => "
+                                 :require-match t))))
 
 ;;; Pipeline steps
 

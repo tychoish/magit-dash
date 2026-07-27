@@ -490,15 +490,15 @@ Parsed from `gh auth status', across all configured hosts."
 (defun magit-dash-gh--auth-select-account (accounts)
   "Prompt to select one of ACCOUNTS via `annotated-completing-read'.
 ACCOUNTS is a list of (:host :user :active) plists. Returns the chosen plist."
-  (let* ((label-fn (lambda (a) (format "%s (%s)" (plist-get a :user) (plist-get a :host))))
-         (table (make-hash-table :test #'equal)))
-    (seq-do (lambda (a) (map-put! table (funcall label-fn a) "switch to this account"))
+  (let ((table (make-hash-table :test #'equal)))
+    (seq-do (lambda (a)
+              (map-put! table (format "%s (%s)" (plist-get a :user) (plist-get a :host))
+                        (cons "switch to this account" a)))
             accounts)
-    (let ((label (annotated-completing-read table
-                                             :prompt "switch gh account => "
-                                             :category 'magit-dash-gh-auth
-                                             :require-match t)))
-      (seq-find (lambda (a) (equal label (funcall label-fn a))) accounts))))
+    (annotated-completing-read table
+                               :prompt "switch gh account => "
+                               :category 'magit-dash-gh-auth
+                               :require-match t)))
 
 ;;;###autoload
 (defun magit-dash-gh-auth-switch ()

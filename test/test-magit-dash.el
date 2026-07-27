@@ -594,13 +594,15 @@ Covers plain repos and submodules, whose module directory is self-contained."
     (should-error (magit-dash-sync-repo) :type 'user-error)))
 
 (ert-deftest magit-dash/sync-repo-calls-async-on-selected ()
-  "Calls `magit-dash--auto-sync-async' with the repo matching the selection."
+  "Calls `magit-dash--auto-sync-async' with the repo matching the selection.
+`annotated-completing-read' resolves the picked candidate's triple-form
+target directly to the repo struct."
   (let* ((fake-repo (magit-dash-repo--make :name "my-repo" :path "/tmp/my-repo"))
          (called-with nil))
     (cl-letf (((symbol-value 'magit-dash-repo-list) (list fake-repo))
               ((symbol-function 'magit-dash--auto-sync-steps) (lambda (_) '(fetch)))
               ((symbol-function 'annotated-completing-read)
-               (lambda (_table &rest _) "my-repo"))
+               (lambda (_table &rest _) fake-repo))
               ((symbol-function 'magit-dash--auto-sync-async)
                (lambda (repo _cb) (setq called-with repo)))
               ((symbol-function 'magit-dash--maybe-refresh) #'ignore))
@@ -2300,7 +2302,7 @@ A conflict (e.g. \"b\" and \"bp\" coexisting) causes transient to raise
       (should (null (memq 'ephemeral-only tags))))))
 
 (ert-deftest magit-dash/build-tag-table-format ()
-  "build-tag-table returns a dotted alist of (name . annotation) strings."
+  "build-tag-table returns a triple-form alist of (name annotation . tag)."
   (let ((magit-dash-repo-list nil)
         (magit-dash--ephemeral-tags (make-hash-table :test #'equal)))
     (magit-dash-register :name "alpha" :path "/tmp/a" :tags '(work))
@@ -2309,9 +2311,11 @@ A conflict (e.g. \"b\" and \"bp\" coexisting) causes transient to raise
            (work-entry (seq-find (lambda (e) (equal (car e) "work")) table))
            (personal-entry (seq-find (lambda (e) (equal (car e) "personal")) table)))
       (should (consp work-entry))
-      (should (string-match-p "2 repos" (cdr work-entry)))
+      (should (string-match-p "2 repos" (car (cdr work-entry))))
+      (should (eq (cdr (cdr work-entry)) 'work))
       (should (consp personal-entry))
-      (should (string-match-p "1 repo:" (cdr personal-entry))))))
+      (should (string-match-p "1 repo:" (car (cdr personal-entry))))
+      (should (eq (cdr (cdr personal-entry)) 'personal)))))
 
 (ert-deftest magit-dash/build-tag-table-permanent-before-ephemeral ()
   "build-tag-table lists permanent tags before ephemeral-only tags."

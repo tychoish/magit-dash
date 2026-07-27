@@ -281,24 +281,20 @@ the above context rules."
             open-buffers)
     (when (map-empty-p path-map)
       (user-error "No directories found"))
-    (let* ((abbrev-map (make-hash-table :test #'equal))
-           (table (make-hash-table :test #'equal)))
+    (let ((table (make-hash-table :test #'equal)))
       (map-do (lambda (path kind)
                 (let* ((display (abbreviate-file-name path))
                        (already-open (magit-dash-open--find-open-buffer path open-buffers))
                        (base (magit-dash-open--annotation path kind))
                        (annotation (if already-open (concat base "  [open]") base)))
-                  (map-put! abbrev-map display path)
-                  (map-put! table display annotation)))
+                  (map-put! table display (cons annotation path))))
               path-map)
-      (when-let* ((chosen (annotated-completing-read
-                           table
-                           :prompt "Open repo: "
-                           :require-match t
-                           :category 'file)))
-        (let* ((full-path (or (map-elt abbrev-map chosen)
-                              (expand-file-name chosen)))
-               (existing (magit-dash-open--find-open-buffer full-path open-buffers)))
+      (when-let* ((full-path (annotated-completing-read
+                              table
+                              :prompt "Open repo: "
+                              :require-match t
+                              :category 'file)))
+        (let ((existing (magit-dash-open--find-open-buffer full-path open-buffers)))
           (if existing
               (switch-to-buffer existing)
             (magit-status-setup-buffer full-path)))))))

@@ -83,14 +83,15 @@
     (should (equal run (magit-dash-gh-actions--select-run (list run))))))
 
 (ert-deftest magit-dash-gh-actions/select-run-multiple-prompts ()
-  "Multiple runs invoke annotated-completing-read."
+  "Multiple runs invoke annotated-completing-read, which resolves the
+selected candidate's triple-form target directly to the run alist."
   (let* ((run1 (magit-dash-gh-actions-test/make-run 1 "CI" "completed" "failure" "Build"))
          (run2 (magit-dash-gh-actions-test/make-run 2 "CI" "completed" "success" "Build"))
          (called nil))
     (cl-letf (((symbol-function 'annotated-completing-read)
                (lambda (table &rest _)
                  (setq called t)
-                 "#2 CI")))
+                 (cdr (map-elt table "#2 CI")))))
       (let ((result (magit-dash-gh-actions--select-run (list run1 run2))))
         (should called)
         (should (= 2 (map-elt result 'databaseId)))))))
