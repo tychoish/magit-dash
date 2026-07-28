@@ -431,32 +431,40 @@ Format is controlled by `magit-dash-gh-collect-index-format'."
   "Run `gh' with ARGS in DIR asynchronously.
 ON-SUCCESS is called with the output string when the process exits 0.
 ON-ERROR is called with the output string and exit code otherwise;
-when nil, a `message' is emitted instead."
-  (let* ((default-directory dir)
-         (buf (generate-new-buffer " *magit-dash-gh-proc*"))
-         (proc (make-process
-                :name "magit-gh"
-                :buffer buf
-                :command (cons "gh" args)
-                :connection-type 'pipe
-                :noquery t
-                :sentinel
-                (lambda (proc _event)
-                  (when (memq (process-status proc) '(exit signal))
-                    (let ((output (with-current-buffer (process-buffer proc)
-                                    (buffer-string)))
-                          (code (process-exit-status proc)))
-                      (kill-buffer (process-buffer proc))
-                      (if (= code 0)
-                          (funcall on-success output)
-                        (if on-error
-                            (funcall on-error output code)
-                          (message "magit-gh: gh %s exited %d: %s"
-                                   (car args) code
-                                   (string-trim output))))))))))
-    (with-current-buffer buf
-      (setq default-directory dir))
-    proc))
+when nil, a `message' is emitted instead.
+When DIR no longer exists on disk (for example a worktree removed outside
+magit-dash), ON-ERROR is called directly instead of letting `make-process'
+signal."
+  (if (not (file-directory-p dir))
+      (let ((msg (format "no such directory: %s" dir)))
+        (if on-error
+            (funcall on-error msg 1)
+          (message "magit-gh: gh %s failed: %s" (car args) msg)))
+    (let* ((default-directory dir)
+           (buf (generate-new-buffer " *magit-dash-gh-proc*"))
+           (proc (make-process
+                  :name "magit-gh"
+                  :buffer buf
+                  :command (cons "gh" args)
+                  :connection-type 'pipe
+                  :noquery t
+                  :sentinel
+                  (lambda (proc _event)
+                    (when (memq (process-status proc) '(exit signal))
+                      (let ((output (with-current-buffer (process-buffer proc)
+                                      (buffer-string)))
+                            (code (process-exit-status proc)))
+                        (kill-buffer (process-buffer proc))
+                        (if (= code 0)
+                            (funcall on-success output)
+                          (if on-error
+                              (funcall on-error output code)
+                            (message "magit-gh: gh %s exited %d: %s"
+                                     (car args) code
+                                     (string-trim output))))))))))
+      (with-current-buffer buf
+        (setq default-directory dir))
+      proc)))
 
 (defun magit-dash-gh--repo-info ()
   "Return a plist :owner :repo :branch for the current repository.

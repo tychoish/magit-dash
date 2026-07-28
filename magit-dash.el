@@ -536,30 +536,39 @@ a placeholder plist when nothing is cached.  Caller is responsible for async col
 (defun magit-dash--run-git (path args on-success &optional on-error)
   "Run git ARGS in PATH asynchronously using magit's configured git executable.
 ON-SUCCESS is called with right-trimmed stdout on exit 0.
-ON-ERROR is called with stdout and exit-code on non-zero exit; defaults to a message."
-  (let* ((default-directory path)
-         (proc-buf (generate-new-buffer " *magit-dash-gh-git*")))
-    (with-current-buffer proc-buf
-      (setq default-directory path))
-    (make-process
-     :name "magit-dash-gh-git"
-     :buffer proc-buf
-     :command (cons magit-git-executable args)
-     :connection-type 'pipe
-     :noquery t
-     :sentinel
-     (lambda (proc _event)
-       (when (memq (process-status proc) '(exit signal))
-         (let ((output (with-current-buffer (process-buffer proc)
-                         (string-trim-right (buffer-string))))
-               (code (process-exit-status proc)))
-           (kill-buffer (process-buffer proc))
-           (if (= code 0)
-               (funcall on-success output)
-             (if on-error
-                 (funcall on-error output code)
-               (message "magit-dash: git %s failed (%d): %s"
-                        (car args) code output)))))))))
+ON-ERROR is called with stdout and exit-code on non-zero exit; defaults to a message.
+When PATH no longer exists on disk (for example a worktree removed outside
+magit-dash), ON-ERROR is called directly instead of letting `make-process'
+signal — callers only ever expect to fail through the callback, not via a
+thrown error."
+  (if (not (file-directory-p path))
+      (let ((msg (format "no such directory: %s" path)))
+        (if on-error
+            (funcall on-error msg 1)
+          (message "magit-dash: git %s failed: %s" (car args) msg)))
+    (let* ((default-directory path)
+           (proc-buf (generate-new-buffer " *magit-dash-gh-git*")))
+      (with-current-buffer proc-buf
+        (setq default-directory path))
+      (make-process
+       :name "magit-dash-gh-git"
+       :buffer proc-buf
+       :command (cons magit-git-executable args)
+       :connection-type 'pipe
+       :noquery t
+       :sentinel
+       (lambda (proc _event)
+         (when (memq (process-status proc) '(exit signal))
+           (let ((output (with-current-buffer (process-buffer proc)
+                           (string-trim-right (buffer-string))))
+                 (code (process-exit-status proc)))
+             (kill-buffer (process-buffer proc))
+             (if (= code 0)
+                 (funcall on-success output)
+               (if on-error
+                   (funcall on-error output code)
+                 (message "magit-dash: git %s failed (%d): %s"
+                          (car args) code output))))))))))
 
 (defun magit-dash--fetch-async (repo on-complete)
   "Run git fetch for REPO asynchronously.
@@ -629,9 +638,13 @@ or `error' when git add or commit fails."
        (funcall on-complete 'error (format "status failed, exit %d: %s" code output))))))
 
 (defun magit-dash--current-branch (path)
-  "Return the current branch name for the repo at PATH synchronously."
-  (let ((default-directory path))
-    (string-trim (or (magit-git-string "branch" "--show-current") ""))))
+  "Return the current branch name for the repo at PATH synchronously.
+Returns \"\" when PATH no longer exists on disk (for example a worktree
+removed outside magit-dash) instead of letting `magit-git-string' signal."
+  (if (not (file-directory-p path))
+      ""
+    (let ((default-directory path))
+      (string-trim (or (magit-git-string "branch" "--show-current") "")))))
 
 (defun magit-dash--branch-allowed-p (repo)
   "Return current branch name if allowed by REPO's sync-branches, nil otherwise.
@@ -1090,18 +1103,33 @@ immediately after its parent and gets its own CI status fetched."
               :include-ci include-ci)))))
       (seq-remove #'null))))
 
+(defun magit-dash--prune-and-list-worktrees (path)
+  "Prune stale worktree entries for the repo at PATH and return the survivors.
+Runs `git worktree prune' first so a worktree whose directory was deleted
+outside of magit-dash (a plain `rm -rf' rather than `git worktree remove')
+is forgotten by git, then parses `git worktree list --porcelain' and drops
+any remaining entry whose path no longer exists on disk as a final guard."
+  (let ((default-directory path))
+    (ignore-errors
+      (process-lines magit-git-executable "worktree" "prune")))
+  (let* ((lines (ignore-errors
+                  (let ((default-directory path))
+                    (process-lines magit-git-executable
+                                   "worktree" "list" "--porcelain"))))
+         (found (when lines (magit-dash--parse-worktrees path lines))))
+    (seq-filter (lambda (wt) (file-directory-p (magit-dash-repo-path wt))) found)))
+
 (defun magit-dash--discover-worktrees ()
-  "Populate the unified cache with worktrees for all registered main repos."
+  "Populate the unified cache with worktrees for all registered main repos.
+Auto-discovered worktrees that no longer exist on disk are pruned rather
+than cached, so they stop appearing in the dashboard."
   (seq-do
    (lambda (repo)
      (unless (magit-dash-repo-worktree repo)
-       (let* ((path (magit-dash-repo-path repo))
-              (lines (ignore-errors
-                       (let ((default-directory path))
-                         (process-lines magit-git-executable
-                                        "worktree" "list" "--porcelain"))))
-              (found (when lines (magit-dash--parse-worktrees path lines))))
-         (magit-dash-gh--cache-set path :worktrees found))))
+       (let ((path (magit-dash-repo-path repo)))
+         (when (file-directory-p path)
+           (magit-dash-gh--cache-set path :worktrees
+                                     (magit-dash--prune-and-list-worktrees path))))))
    magit-dash-repo-list))
 
 (defun magit-dash--parse-submodules (main-path lines)
@@ -1153,17 +1181,15 @@ Missing/uninitialized submodules are marked with :submodule \\='missing."
 			(magit-dash--parse-submodules path lines))))))))
 
 (defun magit-dash-overview--worktrees-for (path)
-  "Return worktree structs for the main repo at PATH, discovering lazily if needed."
+  "Return worktree structs for the main repo at PATH, discovering lazily if needed.
+Auto-discovered worktrees that no longer exist on disk are pruned rather
+than cached, so they stop appearing in the overview."
   (let ((cached (magit-dash-gh--cache-get path :worktrees)))
     (cond
      ((eq cached 'none) nil)
      (cached cached)
      (t
-      (let* ((lines (ignore-errors
-                      (let ((default-directory path))
-                        (process-lines magit-git-executable
-                                       "worktree" "list" "--porcelain"))))
-             (found (when lines (magit-dash--parse-worktrees path lines))))
+      (let ((found (magit-dash--prune-and-list-worktrees path)))
         (magit-dash-gh--cache-set path :worktrees (or found 'none))
         found)))))
 
