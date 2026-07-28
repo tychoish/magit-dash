@@ -904,7 +904,10 @@ When ERROR-TEXT is non-nil it is appended to the message."
 (defun magit-dash--batch-run (repos op-fn label &optional on-all-done)
   "Run OP-FN asynchronously on each repo in REPOS.
 OP-FN is called as (op-fn REPO CALLBACK) where CALLBACK receives a status
-symbol: `ok', `skipped', or `error'.
+symbol: `ok', `skipped', or `error'.  OP-FN may also fail synchronously (for
+example a deleted worktree directory makes `make-process' signal before any
+async work starts); that is caught per-repo so one bad repo cannot stop the
+rest of the batch from running.
 When all repos finish, display a LABEL summary message and optionally call
 ON-ALL-DONE with an alist of (NAME . STATUS)."
   (let* ((remaining (list (length repos)))
@@ -912,26 +915,29 @@ ON-ALL-DONE with an alist of (NAME . STATUS)."
     (message "magit-dash: starting %s batch operation" label)
     (seq-do
      (lambda (repo)
-       (funcall op-fn repo
-                (lambda (status &optional error-text)
-                  (magit-dash--log-operation
-                   (magit-dash-repo-name repo) label status error-text)
-                  (push (cons (magit-dash-repo-name repo) status) results)
-                  (setcar remaining (1- (car remaining)))
-                  (when (= 0 (car remaining))
-                    (let* ((ok (seq-count (lambda (r) (eq 'ok (cdr r))) results))
-                           (skipped (seq-count (lambda (r) (eq 'skipped (cdr r))) results))
-                           (errors (seq-filter (lambda (r) (eq 'error (cdr r))) results)))
-                      (message "%s: %d ok%s%s" label ok
-                               (if (> skipped 0) (format ", %d skipped" skipped) "")
-                               (if errors
-                                   (format ", %d failed (%s)"
-                                           (length errors)
-                                           (mapconcat #'car errors ", "))
-                                 ""))
-                      (message "magit-dash: ending %s batch operation" label)
-                      (when on-all-done
-                        (funcall on-all-done results)))))))
+       (let ((callback
+              (lambda (status &optional error-text)
+                (magit-dash--log-operation
+                 (magit-dash-repo-name repo) label status error-text)
+                (push (cons (magit-dash-repo-name repo) status) results)
+                (setcar remaining (1- (car remaining)))
+                (when (= 0 (car remaining))
+                  (let* ((ok (seq-count (lambda (r) (eq 'ok (cdr r))) results))
+                         (skipped (seq-count (lambda (r) (eq 'skipped (cdr r))) results))
+                         (errors (seq-filter (lambda (r) (eq 'error (cdr r))) results)))
+                    (message "%s: %d ok%s%s" label ok
+                             (if (> skipped 0) (format ", %d skipped" skipped) "")
+                             (if errors
+                                 (format ", %d failed (%s)"
+                                         (length errors)
+                                         (mapconcat #'car errors ", "))
+                               ""))
+                    (message "magit-dash: ending %s batch operation" label)
+                    (when on-all-done
+                      (funcall on-all-done results)))))))
+         (condition-case err
+             (funcall op-fn repo callback)
+           (error (funcall callback 'error (error-message-string err))))))
      repos)))
 
 (defun magit-dash--maybe-refresh ()
