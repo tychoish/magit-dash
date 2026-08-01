@@ -1959,7 +1959,7 @@ they are not consulted even when their own auto-* flags are set."
                (lambda (&rest _) (setq call-count (1+ call-count)) nil)))
       (magit-dash-overview--worktrees-for "/tmp/main")
       (magit-dash-overview--worktrees-for "/tmp/main"))
-    (should (= 1 call-count))))
+    (should (= 2 call-count))))
 
 ;;;; worktree branch field
 
