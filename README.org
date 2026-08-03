@@ -25,20 +25,20 @@ Repositories are registered with =magit-dash-register= (typically in your
   - [[#manual][Manual]]
 - [[#auto-sync-hooks-and-operations][Auto-sync hooks and operations]]
 - [[#api-reference][API Reference]]
-  - [[#magit-dash-open-command][~magit-dash-open~ [Command]]]
-  - [[#magit-dash-view-command][~magit-dash-view~ [Command]]]
-  - [[#magit-dash-sync-repo-command][~magit-dash-sync-repo~ [Command]]]
-  - [[#magit-dash-open-repo-command][~magit-dash-open-repo~ [Command]]]
-  - [[#magit-dash-open-other-window][~magit-dash-open-other-window~]]
-  - [[#magit-dash-ci-dispatch-fix-operation][~magit-dash-ci-dispatch-fix-operation~]]
-  - [[#magit-dash-gh-ci-open-last-run][~magit-dash-gh-ci-open-last-run~]]
-  - [[#magit-dash-gh-actions-fetch-for-pr][~magit-dash-gh-actions-fetch-for-pr~]]
-  - [[#magit-dash-gh-actions-fetch-command][~magit-dash-gh-actions-fetch~ [Command]]]
-  - [[#magit-dash-gh-pr-fetch-command][~magit-dash-gh-pr-fetch~ [Command]]]
-  - [[#magit-dash-gh-pr-dashboard-open-command][~magit-dash-gh-pr-dashboard-open~ [Command]]]
-  - [[#magit-dash-gh-prune-merged-branches-command][~magit-dash-gh-prune-merged-branches~ [Command]]]
-  - [[#magit-dash-gh-prune-prefetch][~magit-dash-gh-prune-prefetch~]]
-  - [[#magit-dash-gh-auth-switch-command][~magit-dash-gh-auth-switch~ [Command]]]
+  - [[#magit-dash-gh-actions-fetch-for-pr][magit-dash-gh-actions-fetch-for-pr]]
+  - [[#magit-dash-gh-actions-fetch][magit-dash-gh-actions-fetch]]
+  - [[#magit-dash-gh-ci-open-last-run][magit-dash-gh-ci-open-last-run]]
+  - [[#magit-dash-ci-dispatch-fix-operation][magit-dash-ci-dispatch-fix-operation]]
+  - [[#magit-dash-gh-pr-fetch][magit-dash-gh-pr-fetch]]
+  - [[#magit-dash-gh-pr-dashboard-open][magit-dash-gh-pr-dashboard-open]]
+  - [[#magit-dash-gh-prune-merged-branches][magit-dash-gh-prune-merged-branches]]
+  - [[#magit-dash-gh-prune-prefetch][magit-dash-gh-prune-prefetch]]
+  - [[#magit-dash-gh-auth-switch][magit-dash-gh-auth-switch]]
+  - [[#magit-dash-open-repo][magit-dash-open-repo]]
+  - [[#magit-dash-view][magit-dash-view]]
+  - [[#magit-dash-sync-repo][magit-dash-sync-repo]]
+  - [[#magit-dash-open-other-window][magit-dash-open-other-window]]
+  - [[#magit-dash-open][magit-dash-open]]
 - [[#license][License]]
 
 * Installation
@@ -151,73 +151,35 @@ Additional symbol kinds are controlled by `include-kinds':
 #+END_SRC
 
 #+RESULTS:
-** ~magit-dash-open~ [Command]
-
-Open the repository dashboard buffer in another window. Signals ‘user-error’ when ‘magit-dash-repo-list’ is empty.
-
-** ~magit-dash-view~ [Command]
-
-Open the overview buffer for the repository at point.
-
-** ~magit-dash-sync-repo~ [Command]
-
-Select a repository interactively and run its configured auto-sync operations.
-
-** ~magit-dash-open-repo~ [Command]
-
-: (fn &optional ROOT)
-
-Select a repository and open its magit status buffer.
-
-Context-aware collection: - In a magit-status buffer: scans from the parent of the current repo and merges ‘~/’ at depth 1, so sibling repos and home-level repos appear together. - In a directory that is itself a git repo: only the repo’s worktrees and submodules are offered (use a prefix arg to override and scan subdirs). - Otherwise: scans subdirectories of ‘default-directory’.
-
-Live magit-status buffers are always included and marked "[open]"; selecting one switches to it directly without reopening it.
-
-With a prefix argument, prompt for ROOT and scan it normally regardless of the above context rules.
-
-** ~magit-dash-open-other-window~
-
-Open the repository dashboard buffer in another window. Signals ‘user-error’ when ‘magit-dash-repo-list’ is empty.
-
-** ~magit-dash-ci-dispatch-fix-operation~
-
-: (fn REPO)
-
-Download the latest CI run’s artifacts for REPO and dispatch a fix-CI prompt. Uses REPO’s cached :ci-status when present; otherwise fetches it first via ‘magit-dash-gh-ci-fetch’ before proceeding, so this can be called without a prior manual CI-status fetch.  Signals ‘user-error’ when REPO does not have :include-ci set, or when no CI run is found for it even after fetching.
-
-** ~magit-dash-gh-ci-open-last-run~
-
-: (fn REPO)
-
-Open the URL of the most recent CI run for REPO in the browser. Does nothing when no CI status is cached for REPO.
-
-** ~magit-dash-gh-actions-fetch-for-pr~
-
-: (fn PR-NUMBER REPO-DIR)
+** magit-dash-gh-actions-fetch-for-pr
 
 Fetch GitHub Actions CI logs for PR-NUMBER using REPO-DIR as the working directory. PR-NUMBER is an integer.  REPO-DIR must be a local checkout of the repository so that ‘gh’ can resolve the remote when listing and downloading runs.
 
-** ~magit-dash-gh-actions-fetch~ [Command]
-
-: (fn &optional RUN-ID)
+** magit-dash-gh-actions-fetch :command:
 
 Download GitHub Actions CI logs for the current branch. When RUN-ID is non-nil, fetch that specific run without prompting. Otherwise list recent runs and prompt for a selection.
 
 Creates an artifact directory under plans/ containing: run-info.json        — full run metadata run-logs.ghlog       — complete step logs (opens in ‘magit-dash-gh-actions-log-mode’) run-failed-logs.ghlog — failed-step logs (when ‘magit-dash-gh-actions-include-failed-log’) index.json           — collection summary
 
-** ~magit-dash-gh-pr-fetch~ [Command]
+** magit-dash-gh-ci-open-last-run
 
-: (fn &optional PR-NUMBER)
+Open the URL of the most recent CI run for REPO in the browser. Does nothing when no CI status is cached for REPO.
+
+** magit-dash-ci-dispatch-fix-operation
+
+Download the latest CI run’s artifacts for REPO and dispatch a fix-CI prompt. Uses REPO’s cached :ci-status when present; otherwise fetches it first via ‘magit-dash-gh-ci-fetch’ before proceeding, so this can be called without a prior manual CI-status fetch.  Signals ‘user-error’ when REPO does not have :include-ci set, or when no CI run is found for it even after fetching.
+
+** magit-dash-gh-pr-fetch :command:
 
 Download comments and review threads for PR-NUMBER (or the current branch’s PR). When PR-NUMBER is nil, auto-detects the PR for the current branch.
 
 Creates an artifact directory under plans/ containing: pr-info.json            — PR metadata and review decision pr-review-threads.json  — all review threads with resolved status pr-issue-comments.json  — top-level (non-review) comments index.json              — collection summary with per-thread creator/last-commentor
 
-** ~magit-dash-gh-pr-dashboard-open~ [Command]
+** magit-dash-gh-pr-dashboard-open :command:
 
 Open the pull request dashboard buffer.
 
-** ~magit-dash-gh-prune-merged-branches~ [Command]
+** magit-dash-gh-prune-merged-branches :command:
 
 Open a menu to prune local branches whose PRs are merged or closed.
 
@@ -231,13 +193,40 @@ Per-repo cache (candidates + marked list) lives on the unified global cache keye
   - prune marked branches (when any are marked)
   - prune: BRANCH [marked]   (one entry per candidate)
 
-** ~magit-dash-gh-prune-prefetch~
+** magit-dash-gh-prune-prefetch
 
 Seed the in-memory closed-PR cache from disk for the current repo. Makes no GitHub API calls; safe to call on status load. Skips silently when caching is disabled, not in a git repo, or the in-memory cache is already populated.
 
-** ~magit-dash-gh-auth-switch~ [Command]
+** magit-dash-gh-auth-switch :command:
 
 Switch the active ‘gh’ CLI account. When more than two accounts are configured, prompt to select which to switch to via ‘annotated-completing-read’. Otherwise switch directly to the other configured account.
+
+** magit-dash-open-repo :command:
+
+Select a repository and open its magit status buffer.
+
+Context-aware collection: - In a magit-status buffer: scans from the parent of the current repo and merges ‘~/’ at depth 1, so sibling repos and home-level repos appear together. - In a directory that is itself a git repo: only the repo’s worktrees and submodules are offered (use a prefix arg to override and scan subdirs). - Otherwise: scans subdirectories of ‘default-directory’.
+
+Live magit-status buffers are always included and marked "[open]"; selecting one switches to it directly without reopening it.
+
+With a prefix argument, prompt for ROOT and scan it normally regardless of the above context rules.
+
+** magit-dash-view :command:
+
+Open the overview buffer for the repository at point.
+
+** magit-dash-sync-repo :command:
+
+Select a repository interactively and run its configured auto-sync operations.
+
+** magit-dash-open-other-window
+
+Open the repository dashboard buffer in another window. Signals ‘user-error’ when ‘magit-dash-repo-list’ is empty.
+
+** magit-dash-open :command:
+
+Open the repository dashboard buffer in another window. Signals ‘user-error’ when ‘magit-dash-repo-list’ is empty.
+
 
 * License
 Copyright (C) sam kleinman. GPL-3.0 or later. See the source file header
