@@ -949,7 +949,8 @@ ON-ALL-DONE with an alist of (NAME . STATUS)."
                     (when on-all-done
                       (funcall on-all-done results)))))))
          (condition-case err
-             (funcall op-fn repo callback)
+             (with-magit-from-dashboard repo
+               (funcall op-fn repo callback))
            (error (funcall callback 'error (error-message-string err))))))
      repos)))
 
@@ -1859,10 +1860,11 @@ Signals `user-error' when no auto operations are configured for this repo."
   (let ((repo (magit-dash--repo-at-point)))
     (unless (magit-dash--has-sync-configured-p repo)
       (user-error "No auto operations configured for %s" (magit-dash-repo-name repo)))
-    (magit-dash--auto-sync-async
-     repo
-     (lambda (_status &optional _error-text)
-       (magit-dash--maybe-refresh)))))
+    (with-magit-from-dashboard repo
+      (magit-dash--auto-sync-async
+       repo
+       (lambda (_status &optional _error-text)
+         (magit-dash--maybe-refresh))))))
 
 (defun magit-dash-commit-all ()
   "Auto-commit marked repos (or all if none marked) with :auto-commit configured.
@@ -1904,10 +1906,11 @@ Displays a summary message and refreshes the dashboard when all complete."
                                 repos)
                        :prompt "sync repository: "
                        :require-match t)))
-      (magit-dash--auto-sync-async
-       repo
-       (lambda (_status &optional _error-text)
-         (magit-dash--maybe-refresh))))))
+      (with-magit-from-dashboard repo
+        (magit-dash--auto-sync-async
+         repo
+         (lambda (_status &optional _error-text)
+           (magit-dash--maybe-refresh)))))))
 
 (defun magit-dash-auto-sync ()
   "Run auto operations for marked repos (or all if none marked) asynchronously.
@@ -2330,10 +2333,11 @@ Signals `user-error' when no auto operations are configured for this repo."
   (let ((repo (magit-dash-overview--current-repo)))
     (unless (magit-dash--has-sync-configured-p repo)
       (user-error "No auto operations configured for %s" (magit-dash-repo-name repo)))
-    (magit-dash--auto-sync-async
-     repo
-     (lambda (_status &optional _error-text)
-       (magit-dash-overview-refresh)))))
+    (with-magit-from-dashboard repo
+      (magit-dash--auto-sync-async
+       repo
+       (lambda (_status &optional _error-text)
+         (magit-dash-overview-refresh))))))
 
 (defun magit-dash-overview-stage-all ()
   "Stage all changes in the current overview's repository."
