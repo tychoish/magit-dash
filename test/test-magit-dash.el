@@ -1533,6 +1533,53 @@ Overrides are placed first so `plist-get' finds them before the defaults."
      #'ignore)
     (should (eq repo called-with))))
 
+(ert-deftest magit-dash/run-target-function-zero-args-called ()
+  (let* ((repo (magit-dash-repo--make :name "r" :path "/tmp/r"))
+         (called nil)
+         (got-dir nil))
+    (magit-dash--run-target
+     repo (lambda () (setq called t got-dir default-directory))
+     (lambda (status &optional _)
+       (should (eq 'ok status))))
+    (should called)
+    (should (string-suffix-p "tmp/r/" got-dir))))
+
+(ert-deftest magit-dash/run-target-function-one-arg-called ()
+  (let* ((repo (magit-dash-repo--make :name "r" :path "/tmp/r"))
+         (called-with nil))
+    (magit-dash--run-target
+     repo (lambda (r) (setq called-with r))
+     (lambda (status &optional _)
+       (should (eq 'ok status))))
+    (should (eq repo called-with))))
+
+(ert-deftest magit-dash/save-project-buffers-falls-back-to-project-el ()
+  (let* ((projectile-mode nil)
+         (project-current-called nil)
+         (project-buffers-called nil)
+         (saved nil)
+         (buf (get-buffer-create "*magit-dash-test-buf*")))
+    (with-current-buffer buf
+      (setq-local buffer-file-name "/tmp/fake-file")
+      (set-buffer-modified-p t))
+    (cl-letf (((symbol-function 'project-current)
+               (lambda (&optional _maybe-prompt _dir) (setq project-current-called t) 'fake-project))
+              ((symbol-function 'project-buffers)
+               (lambda (p)
+                 (should (eq p 'fake-project))
+                 (setq project-buffers-called t)
+                 (list buf)))
+              ((symbol-function 'save-buffer)
+               (lambda () (setq saved t))))
+      (unwind-protect
+          (cl-letf (((symbol-function 'magit-dash--resolve-repo-path)
+                     (lambda () "/tmp/")))
+            (magit-dash-save-project-buffers)
+            (should project-current-called)
+            (should project-buffers-called)
+            (should saved))
+        (kill-buffer buf)))))
+
 (ert-deftest magit-dash/run-target-symbol-resolves-via-commands ()
   (let ((repo (magit-dash-repo--make :name "r" :path "/tmp/r"
                                      :commands '((docs . "make docs"))))

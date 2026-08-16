@@ -34,7 +34,7 @@
 (require 'tabulated-list)
 (require 'transient)
 (require 'magit)
-
+(require 'project)
 (require 'annotated-completing-read)
 (require 'sprite)
 
@@ -43,6 +43,7 @@
 (require 'magit-dash-submodules)
 
 (declare-function magit-status-setup-buffer "magit-status")
+(declare-function projectile-save-project-buffers "projectile")
 (declare-function magit-diff-dwim "magit-diff")
 (declare-function magit-diff "magit-diff")
 (declare-function magit-commit-create "magit-commit")
@@ -745,7 +746,8 @@ The single execution primitive for hook targets, global hook targets, and
              (string or function), recursively.
   string   — executed as a shell command in REPO's directory.
   function — called with (REPO ON-COMPLETE)."
-  (let ((path (magit-dash-repo-path repo)))
+  (let* ((path (magit-dash-repo-path repo))
+         (default-directory (file-name-as-directory (expand-file-name path))))
     (cond
      ((and (symbolp target) target (not (functionp target)))
       (if-let* ((entry (seq-find (lambda (c) (eq (car c) target))
@@ -757,7 +759,17 @@ The single execution primitive for hook targets, global hook targets, and
      ((stringp target)
       (magit-dash--run-shell-string-async target path on-complete))
      ((functionp target)
-      (funcall target repo on-complete))
+      (let* ((arity (func-arity target))
+             (max-args (cdr arity)))
+        (cond
+         ((and (numberp max-args) (= max-args 0))
+          (funcall target)
+          (funcall on-complete 'ok))
+         ((and (numberp max-args) (= max-args 1))
+          (funcall target repo)
+          (funcall on-complete 'ok))
+         (t
+          (funcall target repo on-complete)))))
      (t
       (funcall on-complete 'error "target must be a symbol, string, or function")))))
 
@@ -2096,6 +2108,29 @@ among the registered repositories when neither applies."
   (let ((default-directory (file-name-as-directory (magit-dash--resolve-repo-path))))
     (magit-dash-gh-prune-merged-branches)))
 
+;;;###autoload
+(defun magit-dash-save-project-buffers ()
+  "Save all project buffers for the repository.
+Prefers using projectile if `projectile-mode' and falls back to `project.el'.
+Uses the repository at point when called from a `magit-dash' buffer,
+otherwise the git repository containing the current buffer, and finally
+prompts among the registered repositories when neither applies."
+  (interactive)
+  (let* ((path (magit-dash--resolve-repo-path))
+         (default-directory (file-name-as-directory (expand-file-name path))))
+    (if (and (bound-and-true-p projectile-mode)
+             (fboundp 'projectile-save-project-buffers))
+        (projectile-save-project-buffers)
+      ;; otherwwie fall back to project.el
+      (seq-do (lambda (buf)
+                (with-current-buffer buf
+                  (when (and buffer-file-name (buffer-modified-p))
+                    (save-buffer))))
+	      (when-let* ((pr (project-current)))
+		(project-buffers pr))))))
+
+;;;###autoload
+(defalias 'magit-dash-projectile-save-project-buffers #'magit-dash-save-project-buffers)
 (defun magit-dash--at-worktree-p ()
   "Return non-nil when the repo at point is a worktree."
   (when-let* ((repo (ignore-errors (magit-dash--repo-at-point))))
@@ -2838,8 +2873,6 @@ When disabled, only explicitly marked repos are targeted."
     ("ff"  "Find file"       magit-dash-find-file
      :inapt-if-not magit-dash--repo-at-point-p)
     ("gb"  "Switch branch"   magit-dash-switch-branch
-     :inapt-if-not magit-dash--repo-at-point-p)
-    ("y"   "Prune branches"  magit-dash-prune-branches
      :inapt-if-not magit-dash--repo-at-point-p)]
    ["CI"
     ("cf"  "Fetch CI status" magit-dash-gh-ci-fetch-at-point
@@ -2924,6 +2957,10 @@ When disabled, only explicitly marked repos are targeted."
      :inapt-if-not magit-dash--has-auto-commit-p)
     ("x"   "Run command"     magit-dash-run-command
      :inapt-if-not magit-dash--has-commands-p)
+    ("y"   "Prune branches"  magit-dash-prune-branches
+     :inapt-if-not magit-dash--repo-at-point-p)
+    ("ps"  "projectile/project save buffers" magit-dash-save-project-buffers
+     :inapt-if-not magit-dash--repo-at-point-p)
     ("sb"  "Bump submodules" magit-dash-bump-submodules-menu
      :inapt-if-not magit-dash--repo-at-point-p)]
    ["Dashboard"
