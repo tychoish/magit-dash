@@ -1,4 +1,4 @@
-;;; test-helper.el --- ERT test infrastructure for magit-dash -*- lexical-binding: t -*-
+;;; test-helper.el --- ERT test infrastructure for magit-dash -*- lexical-binding: t; no-byte-compile: t; -*-
 
 ;;; Commentary:
 ;; Loaded before other test files by both `run-tests' and manual

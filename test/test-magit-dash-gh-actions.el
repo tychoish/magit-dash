@@ -1,4 +1,4 @@
-;;; test-magit-dash-gh-actions.el --- ERT tests for magit-dash-gh-actions -*- lexical-binding: t -*-
+;;; test-magit-dash-gh-actions.el --- ERT tests for magit-dash-gh-actions -*- lexical-binding: t; no-byte-compile: t; -*-
 
 ;; Run inside a live Emacs session:
 ;;   (ert "^magit-dash-gh-actions/")

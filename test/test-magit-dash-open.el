@@ -1,4 +1,4 @@
-;;; test-magit-dash-open.el --- ERT tests for magit-dash-open -*- lexical-binding: t -*-
+;;; test-magit-dash-open.el --- ERT tests for magit-dash-open -*- lexical-binding: t; no-byte-compile: t; -*-
 
 ;;; Commentary:
 ;; Run inside a live Emacs session with full config loaded:

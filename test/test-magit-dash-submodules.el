@@ -1,4 +1,4 @@
-;;; test-magit-dash-submodules.el --- ERT tests for magit-dash-submodules -*- lexical-binding: t -*-
+;;; test-magit-dash-submodules.el --- ERT tests for magit-dash-submodules -*- lexical-binding: t; no-byte-compile: t; -*-
 
 ;; Run inside a live Emacs session:
 ;;   (ert "^magit-dash-bump/")
