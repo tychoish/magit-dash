@@ -196,15 +196,30 @@ candidates.  Worktrees and submodules are enumerated for every repo found."
 
 (defun magit-dash-open--annotation (path kind)
   "Return annotation string for PATH with KIND.
-KIND is one of: `repo', `worktree', `submodule', `dir'."
+KIND is one of: `repo', `worktree', `submodule', `dir'.
+Incorporates cached stats, CI status, and PR counts from `magit-dash-gh--cache'
+when available."
   (if (eq kind 'dir)
       "directory"
     (let* ((info (condition-case nil (magit-dash-open--git-info path) (error nil)))
-           (branch (or (map-elt info :branch) "?"))
+           (cached-stats (when (fboundp 'magit-dash-gh--cache-get)
+                           (magit-dash-gh--cache-get path :stats)))
+           (cached-ci (when (fboundp 'magit-dash-gh--cache-get)
+                        (magit-dash-gh--cache-get path :ci-status)))
+           (cached-prs (when (fboundp 'magit-dash-gh--cache-get)
+                         (magit-dash-gh--cache-get path :pr-counts)))
+           (branch (or (map-elt info :branch)
+                       (plist-get cached-stats :branch)
+                       "?"))
            (upstream-display (map-elt info :upstream-display))
-           (ahead (or (map-elt info :ahead) 0))
-           (behind (or (map-elt info :behind) 0))
-           (dirty (map-elt info :dirty))
+           (ahead (or (map-elt info :ahead)
+                      (plist-get cached-stats :ahead)
+                      0))
+           (behind (or (map-elt info :behind)
+                       (plist-get cached-stats :behind)
+                       0))
+           (dirty (or (map-elt info :dirty)
+                      (plist-get cached-stats :dirty)))
            (kind-str (symbol-name kind))
            (arrow-part (if upstream-display
                            (format "%s → %s" branch upstream-display)
@@ -214,10 +229,20 @@ KIND is one of: `repo', `worktree', `submodule', `dir'."
                         ((> ahead 0) (format "+%d" ahead))
                         ((> behind 0) (format "-%d" behind))
                         (t nil)))
-           (dirty-part (when dirty "*")))
-      (string-join (seq-remove #'null (list kind-str arrow-part count-part dirty-part))
+           (dirty-part (when dirty "*"))
+           (ci-part (when cached-ci
+                      (let ((conclusion (plist-get cached-ci :conclusion))
+                            (status (plist-get cached-ci :status)))
+                        (cond
+                         ((equal conclusion "success") "CI:✓")
+                         ((equal conclusion "failure") "CI:✗")
+                         ((equal status "in_progress") "CI:…")
+                         (conclusion (format "CI:%s" conclusion))
+                         (t nil)))))
+           (pr-part (when (and (consp cached-prs) (> (car cached-prs) 0))
+                      (format "%d PR%s" (car cached-prs) (if (= (car cached-prs) 1) "" "s")))))
+      (string-join (seq-remove #'null (list kind-str arrow-part count-part dirty-part ci-part pr-part))
                    "  "))))
-
 ;;; Entry point
 
 ;;;###autoload
@@ -278,6 +303,12 @@ the above context rules."
                 (unless (map-contains-key path-map dir)
                   (setf (map-elt path-map dir) 'repo))))
             open-buffers)
+    ;; Ensure registered repositories from magit-dash-repo-list are included
+    (when (bound-and-true-p magit-dash-repo-list)
+      (dolist (r magit-dash-repo-list)
+        (let ((dir (directory-file-name (expand-file-name (magit-dash-repo-path r)))))
+          (unless (map-contains-key path-map dir)
+            (setf (map-elt path-map dir) (if (magit-dash-repo-worktree r) 'worktree 'repo))))))
     (when (map-empty-p path-map)
       (user-error "No directories found"))
     (when-let* ((full-path (annotated-completing-read

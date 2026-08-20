@@ -140,6 +140,14 @@
     (magit-dash-register :name "r" :path "/tmp/r" :sort-hint 10)
     (should (= 10 (magit-dash-repo-sort-hint (car magit-dash-repo-list))))))
 
+(ert-deftest magit-dash/register-clone-url ()
+  ":clone-url and :remote-url are stored in magit-dash-repo-clone-url."
+  (let ((magit-dash-repo-list nil))
+    (magit-dash-register :name "r1" :path "/tmp/r1" :clone-url "https://github.com/user/r1.git")
+    (should (equal "https://github.com/user/r1.git" (magit-dash-repo-clone-url (car magit-dash-repo-list))))
+    (magit-dash-register :name "r2" :path "/tmp/r2" :remote-url "git@github.com:user/r2.git")
+    (should (equal "git@github.com:user/r2.git" (magit-dash-repo-remote-url (car magit-dash-repo-list))))))
+
 ;;;; magit-dash--sorted-repos
 
 (ert-deftest magit-dash/sorted-repos-by-hint ()
@@ -616,6 +624,101 @@ target directly to the repo struct."
   (let ((repo (magit-dash-repo--make :name "test" :path "/tmp/test")))
     (should-error (magit-dash--run-command-for repo) :type 'user-error)))
 
+(ert-deftest magit-dash/normalize-command-op-formats ()
+  "normalize-command-op extracts target and background flag correctly."
+  ;; Plain string
+  (should (equal (magit-dash--normalize-command-op "make test") '("make test" . nil)))
+  ;; Plain symbol/function
+  (should (equal (magit-dash--normalize-command-op 'my-func) '(my-func . nil)))
+  ;; List with keyword
+  (should (equal (magit-dash--normalize-command-op '("make test" :background t)) '("make test" . t)))
+  (should (equal (magit-dash--normalize-command-op '(my-func :background t)) '(my-func . t)))
+  ;; Plist
+  (should (equal (magit-dash--normalize-command-op '(:command "make test" :background t)) '("make test" . t)))
+  (should (equal (magit-dash--normalize-command-op '(:command "make test" :background nil)) '("make test" . nil))))
+
+(ert-deftest magit-dash/run-command-for-foreground-starts-compilation ()
+  "run-command-for in foreground calls compilation-start with command-named buffer."
+  (let ((repo (magit-dash-repo--make :name "test" :path "/tmp/test"
+                                     :commands '(("build" . "make build"))))
+        (started nil))
+    (cl-letf (((symbol-function 'annotated-completing-read)
+               (lambda (_choices &rest _args) '("build" . "make build")))
+              ((symbol-function 'magit-dash-gh--with-repo-dir)
+               (lambda (_path body-fn) (funcall body-fn)))
+              ((symbol-function 'compilation-start)
+               (lambda (cmd &optional _mode name-fn)
+                 (setq started (list cmd (funcall name-fn nil)))
+                 (get-buffer-create (funcall name-fn nil)))))
+      (magit-dash--run-command-for repo nil)
+      (should (equal started '("make build" "*test-dash-cmd-build*"))))))
+
+(ert-deftest magit-dash/run-command-for-background-suppresses-window ()
+  "run-command-for in background suppresses window display using display-buffer-no-window."
+  (let ((repo (magit-dash-repo--make :name "test" :path "/tmp/test"
+                                     :commands '(("build" . "make build"))))
+        (started nil)
+        (has-no-window-rule nil))
+    (cl-letf (((symbol-function 'annotated-completing-read)
+               (lambda (_choices &rest _args) '("build" . "make build")))
+              ((symbol-function 'magit-dash-gh--with-repo-dir)
+               (lambda (_path body-fn) (funcall body-fn)))
+              ((symbol-function 'compilation-start)
+               (lambda (cmd &optional _mode name-fn)
+                 (setq started cmd)
+                 (let ((bname (funcall name-fn nil)))
+                   (setq has-no-window-rule
+                         (seq-some (lambda (rule)
+                                     (and (stringp (car rule))
+                                          (string-match-p (car rule) bname)
+                                          (eq (cadr rule) #'display-buffer-no-window)))
+                                   display-buffer-alist))
+                   (get-buffer-create bname)))))
+      (magit-dash--run-command-for repo t)
+      (should (equal started "make build"))
+      (should has-no-window-rule))))
+
+(ert-deftest magit-dash/run-command-for-per-command-background ()
+  "run-command-for respects :background t on registered command entry."
+  (let ((repo (magit-dash-repo--make :name "test" :path "/tmp/test"
+                                     :commands '(("bg-test" . ("make bg-test" :background t))))))
+    (cl-letf (((symbol-function 'annotated-completing-read)
+               (lambda (_choices &rest _args) '("bg-test" . ("make bg-test" :background t))))
+              ((symbol-function 'magit-dash-gh--with-repo-dir)
+               (lambda (_path body-fn) (funcall body-fn)))
+              ((symbol-function 'compilation-start)
+               (lambda (cmd &optional _mode name-fn)
+                 (should (equal cmd "make bg-test"))
+                 (let ((bname (funcall name-fn nil)))
+                   (should (equal bname "*test-dash-cmd-bg-test*"))
+                   (should (seq-some (lambda (rule)
+                                       (and (stringp (car rule))
+                                            (string-match-p (car rule) bname)
+                                            (eq (cadr rule) #'display-buffer-no-window)))
+                                     display-buffer-alist))
+                   (get-buffer-create bname)))))
+      (magit-dash--run-command-for repo nil))))
+(ert-deftest magit-dash/run-command-delegates-prefix-arg ()
+  "magit-dash-run-command passes prefix argument as background flag."
+  (let ((repo (magit-dash-repo--make :name "test" :path "/tmp/test"))
+        (called-bg nil))
+    (cl-letf (((symbol-function 'magit-dash--repo-at-point) (lambda () repo))
+              ((symbol-function 'magit-dash--run-command-for)
+               (lambda (_repo &optional bg) (setq called-bg bg))))
+      (let ((current-prefix-arg '(4)))
+        (call-interactively #'magit-dash-run-command))
+      (should (equal called-bg '(4))))))
+
+(ert-deftest magit-dash/run-command-background-invokes-bg ()
+  "magit-dash-run-command-background explicitly passes t for background."
+  (let ((repo (magit-dash-repo--make :name "test" :path "/tmp/test"))
+        (called-bg nil))
+    (cl-letf (((symbol-function 'magit-dash--repo-at-point) (lambda () repo))
+              ((symbol-function 'magit-dash--run-command-for)
+               (lambda (_repo &optional bg) (setq called-bg bg))))
+      (magit-dash-run-command-background)
+      (should (eq called-bg t)))))
+
 ;;;; magit-dash-filter-by-tag
 
 (defmacro magit-dash-test--with-refresh-stubs (&rest body)
@@ -737,16 +840,22 @@ without real git repos or a live dashboard buffer."
 ;;;; magit-dash-gh-pr-dashboard--build-args
 
 (ert-deftest magit-dash/pr-build-args-default ()
-  "Default filters produce a gh search prs command."
-  (let ((filters (list :state "open" :author "@me" :repo nil :org nil)))
+  "Default filters aggregate all open PRs without author filtering."
+  (let ((filters (list :state "open" :author nil :repo nil :org nil)))
     (let ((args (magit-dash-gh-pr-dashboard--build-args filters)))
       (should (equal "search" (nth 0 args)))
       (should (equal "prs" (nth 1 args)))
       (should (member "--state" args))
       (should (member "open" args))
+      (should-not (member "--author" args)))))
+
+(ert-deftest magit-dash/pr-build-args-with-author ()
+  "Explicit author filter adds --author to the search command."
+  (let ((filters (list :state "open" :author "@me" :repo nil :org nil)))
+    (let ((args (magit-dash-gh-pr-dashboard--build-args filters)))
+      (should (equal "search" (nth 0 args)))
       (should (member "--author" args))
       (should (member "@me" args)))))
-
 (ert-deftest magit-dash/pr-build-args-with-repo ()
   "When :repo is set, uses gh pr list -R REPO."
   (let ((filters (list :state "open" :author nil :repo "owner/myrepo" :org nil)))
@@ -997,10 +1106,10 @@ Overrides are placed first so `plist-get' finds them before the defaults."
 (ert-deftest magit-dash/render-loading-state ()
   "render with nil stats inserts a loading message."
   (let ((repo (magit-dash-repo--make :name "myrep" :path "/tmp/myrep")))
-    (with-temp-buffer
-      (magit-dash-overview--render repo nil nil)
-      (should (string-match-p "[Ll]oading" (buffer-string))))))
-
+    (cl-letf (((symbol-function 'magit-dash--repo-missing-p) (lambda (_) nil)))
+      (with-temp-buffer
+        (magit-dash-overview--render repo nil nil)
+        (should (string-match-p "[Ll]oading" (buffer-string)))))))
 (ert-deftest magit-dash/render-kv-fields ()
   "render with stats inserts Repository, Path, Remote, Branch as KV pairs."
   (let ((repo (magit-dash-repo--make :name "myrep" :path "/tmp/myrep"))
@@ -1583,6 +1692,15 @@ Overrides are placed first so `plist-get' finds them before the defaults."
 (ert-deftest magit-dash/run-target-symbol-resolves-via-commands ()
   (let ((repo (magit-dash-repo--make :name "r" :path "/tmp/r"
                                      :commands '((docs . "make docs"))))
+        (ran nil))
+    (cl-letf (((symbol-function 'magit-dash--run-shell-string-async)
+               (lambda (cmd _path cb) (setq ran cmd) (funcall cb 'ok))))
+      (magit-dash--run-target repo 'docs #'ignore))
+    (should (equal "make docs" ran))))
+
+(ert-deftest magit-dash/run-target-symbol-resolves-via-commands-with-background ()
+  (let ((repo (magit-dash-repo--make :name "r" :path "/tmp/r"
+                                     :commands '((docs . ("make docs" :background t)))))
         (ran nil))
     (cl-letf (((symbol-function 'magit-dash--run-shell-string-async)
                (lambda (cmd _path cb) (setq ran cmd) (funcall cb 'ok))))
@@ -2230,19 +2348,49 @@ in magit-dash-repo-list, preventing duplicate rows."
             ((symbol-function 'magit-toplevel) (lambda () "/tmp/toplevel")))
     (should (equal "/tmp/toplevel" (magit-dash--resolve-repo-path)))))
 
+(ert-deftest magit-dash/repo-annotation-formats-path-and-cache ()
+  "magit-dash--repo-annotation formats path and enriches with cached stats, CI, and PRs."
+  (let ((magit-dash-gh--cache (make-hash-table :test #'equal))
+        (r (magit-dash-repo--make :name "alpha" :path "/tmp/alpha")))
+    ;; 1. Plain path when no extra cache data
+    (should (equal (magit-dash--repo-annotation r) "/tmp/alpha"))
+    ;; 2. With cached stats (ahead/behind/dirty)
+    (magit-dash-gh--cache-set "/tmp/alpha" :stats
+                              (list :branch "main" :ahead 2 :behind 1 :dirty t))
+    (should (equal (magit-dash--repo-annotation r) "/tmp/alpha  (main +2/-1*)"))
+    ;; 3. With cached CI status
+    (magit-dash-gh--cache-set "/tmp/alpha" :ci-status
+                              (list :conclusion "success" :status "completed"))
+    (should (equal (magit-dash--repo-annotation r) "/tmp/alpha  (main +2/-1* · CI:✓)"))
+    ;; 4. With cached PR counts
+    (magit-dash-gh--cache-set "/tmp/alpha" :pr-counts (cons 3 1))
+    (should (equal (magit-dash--repo-annotation r) "/tmp/alpha  (main +2/-1* · CI:✓ · 3 PRs)"))))
+
 (ert-deftest magit-dash/resolve-repo-path-prompts-when-nothing-obvious ()
-  "resolve-repo-path prompts among registered repos when point and toplevel both fail."
+  "resolve-repo-path prompts among registered repos via annotated-completing-read."
   (let ((magit-dash-repo-list
          (list (magit-dash-repo--make :name "alpha" :path "/tmp/alpha")
                (magit-dash-repo--make :name "beta" :path "/tmp/beta"))))
     (cl-letf (((symbol-function 'magit-dash--repo-at-point-p) (lambda () nil))
               ((symbol-function 'magit-toplevel) (lambda () nil))
-              ((symbol-function 'completing-read)
-               (lambda (_prompt _coll &optional _pred require-match &rest _)
+              ((symbol-function 'annotated-completing-read)
+               (lambda (table &key prompt require-match &rest _)
                  (should require-match)
-                 "beta")))
+                 (should (equal prompt "Repository: "))
+                 (cdr (map-elt table "beta")))))
       (should (equal "/tmp/beta" (magit-dash--resolve-repo-path))))))
 
+(ert-deftest magit-dash/open-registered-repo-opens-status-buffer ()
+  "open-registered-repo prompts for a repo and calls magit-status-setup-buffer."
+  (let ((magit-dash-repo-list
+         (list (magit-dash-repo--make :name "alpha" :path "/tmp/alpha")))
+        (opened nil))
+    (cl-letf (((symbol-function 'magit-dash--prompt-for-repo-path)
+               (lambda (&optional _prompt) "/tmp/alpha"))
+              ((symbol-function 'magit-status-setup-buffer)
+               (lambda (path) (setq opened path))))
+      (magit-dash-open-registered-repo)
+      (should (equal opened "/tmp/alpha")))))
 (ert-deftest magit-dash/resolve-repo-path-user-error-when-no-registered-repos ()
   "prompt-for-repo-path signals `user-error' when there is nothing to choose from."
   (let ((magit-dash-repo-list nil))
@@ -2850,3 +2998,67 @@ The bug was that add-text-properties returns t, not the modified string."
   "magit-dash-overview-mode-map has magit-dash-overview-info-map as parent."
   (should (eq (keymap-parent magit-dash-overview-mode-map)
               magit-dash-overview-info-map)))
+
+;;;; Missing repos and git clone operations
+
+(ert-deftest magit-dash/repo-missing-p-detects-missing-dir ()
+  "repo-missing-p returns t for non-existent directory."
+  (let ((repo (magit-dash-repo--make :name "nonexistent" :path "/tmp/definitely-not-here-12345")))
+    (should (magit-dash--repo-missing-p repo))))
+
+(ert-deftest magit-dash/repo-missing-p-detects-missing-submodule ()
+  "repo-missing-p returns t for missing submodule."
+  (let ((repo (magit-dash-repo--make :name "p<s>" :path "/tmp/some-path" :submodule 'missing)))
+    (should (magit-dash--repo-missing-p repo))))
+
+(ert-deftest magit-dash/format-worktree-shows-missing ()
+  "format-worktree returns MISSING for un-cloned repos."
+  (let ((repo (magit-dash-repo--make :name "missing-repo" :path "/tmp/definitely-not-here-12345")))
+    (should (equal (substring-no-properties (magit-dash--format-worktree repo)) "MISSING"))))
+
+(ert-deftest magit-dash/clone-repo-errors-when-destination-exists ()
+  "clone-repo signals user-error when repository already exists at path."
+  (let ((repo (magit-dash-repo--make :name "exists" :path default-directory)))
+    (should-error (magit-dash-clone-repo repo) :type 'user-error)))
+
+(ert-deftest magit-dash/clone-repo-spawns-git-clone ()
+  "clone-repo runs git clone with the specified URL and path."
+  (let* ((repo (magit-dash-repo--make :name "newrepo" :path "/tmp/new-repo-test-12345"
+                                      :clone-url "git@github.com:user/newrepo.git"))
+         (spawned-args nil)
+         (magit-dash-gh--cache (make-hash-table :test #'equal)))
+    (cl-letf (((symbol-function 'magit-dash--resolve-git-dir) (lambda (_) nil))
+              ((symbol-function 'make-directory) #'ignore)
+              ((symbol-function 'make-process)
+               (lambda (&rest plist)
+                 (setq spawned-args (plist-get plist :command))
+                 'dummy-proc)))
+      (magit-dash-clone-repo repo "git@github.com:user/newrepo.git")
+      (should (member "clone" spawned-args))
+      (should (member "git@github.com:user/newrepo.git" spawned-args))
+      (should (member (expand-file-name "/tmp/new-repo-test-12345") spawned-args)))))
+
+(ert-deftest magit-dash/clone-all-missing-clones-all ()
+  "clone-all-missing calls clone-repo on every missing repository."
+  (let* ((r1 (magit-dash-repo--make :name "m1" :path "/tmp/missing-1"))
+         (r2 (magit-dash-repo--make :name "m2" :path "/tmp/missing-2"))
+         (magit-dash-repo-list (list r1 r2))
+         (cloned nil))
+    (cl-letf (((symbol-function 'magit-dash--repo-missing-p) (lambda (_) t))
+              ((symbol-function 'magit-dash-clone-repo)
+               (lambda (repo &optional _url) (push (magit-dash-repo-name repo) cloned))))
+      (magit-dash-clone-all-missing)
+      (should (member "m1" cloned))
+      (should (member "m2" cloned)))))
+
+(ert-deftest magit-dash/overview-render-shows-missing-status ()
+  "overview--render inserts Missing status and clone instructions for missing repos."
+  (let ((repo (magit-dash-repo--make :name "miss" :path "/tmp/missing-repo"
+                                     :clone-url "https://github.com/u/miss.git")))
+    (cl-letf (((symbol-function 'magit-dash--repo-missing-p) (lambda (_) t)))
+      (with-temp-buffer
+        (magit-dash-overview--render repo nil nil)
+        (let ((content (buffer-string)))
+          (should (string-match-p "Missing (not cloned)" content))
+          (should (string-match-p "https://github.com/u/miss.git" content))
+          (should (string-match-p "clone this repository" content)))))))

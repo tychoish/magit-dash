@@ -476,20 +476,19 @@ even when other real candidates exist."
 
 (ert-deftest magit-dash-gh/add-file-empty ()
   "Adding to empty :files list produces a single-entry list."
-  (let* ((ctx '(:files nil))
+  (let* ((ctx (list :files nil))
          (ctx2 (magit-dash-gh--add-file ctx "pr-info.json" "metadata")))
     (should (equal '((:path "pr-info.json" :type "metadata"))
                    (plist-get ctx2 :files)))))
 
 (ert-deftest magit-dash-gh/add-file-accumulates ()
   "Each add-file appends; order is preserved."
-  (let* ((ctx '(:files nil))
+  (let* ((ctx (list :files nil))
          (ctx2 (magit-dash-gh--add-file ctx "a.json" "x"))
          (ctx3 (magit-dash-gh--add-file ctx2 "b.json" "y")))
     (should (= 2 (length (plist-get ctx3 :files))))
     (should (equal "a.json" (plist-get (nth 0 (plist-get ctx3 :files)) :path)))
     (should (equal "b.json" (plist-get (nth 1 (plist-get ctx3 :files)) :path)))))
-
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; magit-dash-gh--branch-slug
 

@@ -190,5 +190,41 @@
     (should (seq-every-p #'file-name-absolute-p
                          (magit-dash-open--submodule-paths "/repo")))))
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;; magit-dash-open--annotation with dash cache
+
+(ert-deftest magit-dash-open/annotation-directory-kind ()
+  "Directory kind returns \"directory\"."
+  (should (equal (magit-dash-open--annotation "/tmp/dir" 'dir) "directory")))
+
+(ert-deftest magit-dash-open/annotation-incorporates-dash-cache ()
+  "magit-dash-open--annotation enriches annotation with cached CI and PR info."
+  (let ((magit-dash-gh--cache (make-hash-table :test #'equal)))
+    (cl-letf (((symbol-function 'magit-dash-open--git-info)
+               (lambda (_) (list :branch "feature" :ahead 1 :behind 0 :dirty t))))
+      (magit-dash-gh--cache-set "/tmp/myrepo" :ci-status (list :conclusion "success" :status "completed"))
+      (magit-dash-gh--cache-set "/tmp/myrepo" :pr-counts (cons 2 0))
+      (let ((ann (magit-dash-open--annotation "/tmp/myrepo" 'repo)))
+        (should (string-match-p "repo" ann))
+        (should (string-match-p "feature" ann))
+        (should (string-match-p "\\+1" ann))
+        (should (string-match-p "\\*" ann))
+        (should (string-match-p "CI:✓" ann))
+        (should (string-match-p "2 PRs" ann))))))
+
+(ert-deftest magit-dash-open/open-repo-merges-registered-repos ()
+  "magit-dash-open-repo includes registered repos from magit-dash-repo-list."
+  (let ((magit-dash-repo-list (list (magit-dash-repo--make :name "reg-repo" :path "/tmp/registered-repo")))
+        (offered-paths nil))
+    (cl-letf (((symbol-function 'magit-dash-open--collect-deep) (lambda (&rest _) nil))
+              ((symbol-function 'magit-dash-open--git-p) (lambda (_) nil))
+              ((symbol-function 'magit-dash-open--open-status-buffers) (lambda () nil))
+              ((symbol-function 'annotated-completing-read)
+               (lambda (table &rest _)
+                 (setq offered-paths (map-keys table))
+                 (cdr (map-elt table (abbreviate-file-name "/tmp/registered-repo")))))
+              ((symbol-function 'magit-status-setup-buffer) (lambda (_path) t)))
+      (magit-dash-open-repo)
+      (should (member (abbreviate-file-name "/tmp/registered-repo") offered-paths)))))
 (provide 'test-magit-dash-open)
 ;;; test-magit-dash-open.el ends here

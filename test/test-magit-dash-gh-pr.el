@@ -276,5 +276,69 @@
              (lambda (_) nil)))
     (should-error (magit-dash-gh-pr-dashboard-fetch-ci) :type 'user-error)))
 
+;;; magit-gh-pr-dash and worktree operations
+
+(ert-deftest magit-dash-gh-pr/dash-creates-buffer ()
+  "magit-gh-pr-dash creates *magit-gh-pr-dash* buffer."
+  (cl-letf (((symbol-function 'magit-dash-gh--check-gh) #'ignore)
+            ((symbol-function 'magit-dash-gh-pr-dashboard-refresh) #'ignore))
+    (unwind-protect
+        (let ((buf (get-buffer-create magit-dash-gh-pr-buffer-name)))
+          (magit-gh-pr-dash)
+          (should (equal (buffer-name (get-buffer magit-dash-gh-pr-buffer-name)) "*magit-gh-pr-dash*"))
+          (with-current-buffer buf
+            (should (eq major-mode 'magit-dash-gh-pr-dashboard-mode))))
+      (when-let* ((buf (get-buffer magit-dash-gh-pr-buffer-name)))
+        (kill-buffer buf)))))
+
+(ert-deftest magit-dash-gh-pr/default-filters-aggregate-all-open ()
+  "magit-dash-gh-pr-dashboard-mode sets default filters with :author nil to aggregate all open PRs."
+  (with-temp-buffer
+    (magit-dash-gh-pr-dashboard-mode)
+    (let ((filters magit-dash-gh-pr-dashboard--filters))
+      (should (equal "open" (plist-get filters :state)))
+      (should-not (plist-get filters :author)))))
+
+(ert-deftest magit-dash-gh-pr/open-worktree-opens-existing ()
+  "open-worktree switches directly to existing worktree."
+  (let ((setup-path nil))
+    (cl-letf (((symbol-function 'magit-dash-gh-pr-dashboard--entry-at-point)
+               (lambda () '(:number 42 :repo "owner/myrepo" :pr nil)))
+              ((symbol-function 'magit-dash-gh-pr-dashboard--find-local-path)
+               (lambda (_) "/tmp/myrepo"))
+              ((symbol-function 'file-directory-p)
+               (lambda (dir) (string-suffix-p "myrepo-pr-42" dir)))
+              ((symbol-function 'magit-status-setup-buffer)
+               (lambda (path) (setq setup-path path))))
+      (magit-dash-gh-pr-dashboard-open-worktree)
+      (should (equal (expand-file-name "/tmp/myrepo-pr-42") setup-path)))))
+
+(ert-deftest magit-dash-gh-pr/open-worktree-fetches-and-creates ()
+  "open-worktree runs git fetch and git worktree add when worktree does not yet exist."
+  (let ((git-calls nil)
+        (setup-path nil))
+    (cl-letf (((symbol-function 'magit-dash-gh-pr-dashboard--entry-at-point)
+               (lambda () '(:number 42 :repo "owner/myrepo" :pr nil)))
+              ((symbol-function 'magit-dash-gh-pr-dashboard--find-local-path)
+               (lambda (_) "/tmp/myrepo"))
+              ((symbol-function 'file-directory-p) (lambda (_) nil))
+              ((symbol-function 'magit-call-git)
+               (lambda (&rest args) (push args git-calls) 0))
+              ((symbol-function 'magit-status-setup-buffer)
+               (lambda (path) (setq setup-path path))))
+      (magit-dash-gh-pr-dashboard-open-worktree)
+      (should (equal (expand-file-name "/tmp/myrepo-pr-42") setup-path))
+      ;; Verify git fetch and git worktree add calls
+      (should (seq-some (lambda (call)
+                          (and (equal (nth 0 call) "fetch")
+                               (equal (nth 1 call) "origin")
+                               (equal (nth 2 call) "pull/42/head:pr-42")))
+                        git-calls))
+      (should (seq-some (lambda (call)
+                          (and (equal (nth 0 call) "worktree")
+                               (equal (nth 1 call) "add")
+                               (equal (nth 2 call) (expand-file-name "/tmp/myrepo-pr-42"))
+                               (equal (nth 3 call) "pr-42")))
+                        git-calls)))))
 (provide 'test-magit-dash-gh-pr)
 ;;; test-magit-dash-gh-pr.el ends here

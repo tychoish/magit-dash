@@ -33,11 +33,12 @@
 
 (declare-function magit-toplevel "magit-git")
 (declare-function magit-get-current-branch "magit-git")
+(declare-function magit-call-git "magit-process")
+(declare-function magit-status-setup-buffer "magit-status")
 (declare-function magit-dash--format-age "magit-dash")
 (declare-function magit-dash-repo-p "magit-dash")
 (declare-function magit-dash-repo-path "magit-dash")
 (declare-function magit-dash-gh-actions-fetch-for-pr "magit-dash-gh-actions")
-
 ;;; Configuration
 
 (defvar magit-dash-gh-pr-thread-limit 100
@@ -271,6 +272,8 @@ with a minimum of 12."
 (defvar magit-dash-gh-pr-dashboard-mode-map
   (let ((m (make-sparse-keymap)))
     (define-key m (kbd "RET") #'magit-dash-gh-pr-dashboard-open-browser)
+    (define-key m (kbd "w")   #'magit-dash-gh-pr-dashboard-open-worktree)
+    (define-key m (kbd "W")   #'magit-dash-gh-pr-dashboard-open-worktree)
     (define-key m (kbd "g")   #'magit-dash-gh-pr-dashboard-refresh)
     (define-key m (kbd "r")   #'magit-dash-gh-pr-dashboard-refresh)
     (define-key m (kbd "f")   #'magit-dash-gh-pr-dashboard-set-filter)
@@ -281,14 +284,13 @@ with a minimum of 12."
     (define-key m (kbd "q")   #'quit-window)
     m)
   "Keymap for `magit-dash-gh-pr-dashboard-mode'.")
-
 (define-derived-mode magit-dash-gh-pr-dashboard-mode tabulated-list-mode "PRs"
   "Major mode for the pull request dashboard."
   (setq tabulated-list-format (magit-dash-gh-pr-dashboard--build-format))
   (setq tabulated-list-sort-key nil)
   (tabulated-list-init-header)
   (setq-local magit-dash-gh-pr-dashboard--filters
-              (list :state "open" :author "@me" :repo nil :org nil)))
+              (list :state "open" :author nil :repo nil :org nil)))
 
 (defun magit-dash-gh-pr-dashboard--format-ci (rollup-state)
   "Format CI ROLLUP-STATE string for display."
@@ -448,23 +450,33 @@ Returns nil when OUTPUT is not a JSON array."
     (magit-dash-gh-pr-dashboard-refresh)))
 
 (defun magit-dash-gh-pr-dashboard-clear-filters ()
-  "Reset PR dashboard filters to defaults (open PRs, current user)."
+  "Reset all dashboard filters to their defaults (open PRs) and refresh."
   (interactive)
-  (setq magit-dash-gh-pr-dashboard--filters
-        (list :state "open" :author "@me" :repo nil :org nil))
+  (setq-local magit-dash-gh-pr-dashboard--filters
+              (list :state "open" :author nil :repo nil :org nil))
   (magit-dash-gh-pr-dashboard-refresh))
 
+(defconst magit-dash-gh-pr-buffer-name "*magit-gh-pr-dash*"
+  "Buffer name for the pull request dashboard.")
+
 ;;;###autoload
-(defun magit-dash-gh-pr-dashboard-open ()
-  "Open the pull request dashboard buffer."
+(defun magit-gh-pr-dash ()
+  "Open the GitHub pull request dashboard buffer.
+Aggregates all open PRs by default across repositories."
   (interactive)
   (magit-dash-gh--check-gh)
-  (let ((buf (get-buffer-create "*magit-gh-prs*")))
+  (let ((buf (get-buffer-create magit-dash-gh-pr-buffer-name)))
     (with-current-buffer buf
       (magit-dash-gh-pr-dashboard-mode)
       (magit-dash-gh-pr-dashboard-refresh))
     (pop-to-buffer buf)))
 
+;;;###autoload
+(defalias 'magit-dash-gh-pr-dashboard-open #'magit-gh-pr-dash)
+;;;###autoload
+(defalias 'magit-gh-prs #'magit-gh-pr-dash)
+;;;###autoload
+(defalias 'magit-dash-gh-pr-dash #'magit-gh-pr-dash)
 (defun magit-dash-gh-pr-dashboard--find-local-path (repo-slug)
   "Return a local checkout path for REPO-SLUG (owner/name), or nil.
 Searches `magit-dash-repo-list' when bound, matching the repo name
@@ -481,6 +493,41 @@ component of REPO-SLUG against the final directory component of each entry."
                     (magit-dash-repo-path r)))
                 magit-dash-repo-list))))
 
+(defun magit-dash-gh-pr-dashboard-open-worktree ()
+  "Create and open a git worktree for the pull request at point.
+If a worktree for this PR already exists, switches to its magit status buffer.
+Otherwise, fetches the PR branch from GitHub, adds the worktree, and opens
+its magit status buffer."
+  (interactive)
+  (let* ((entry (magit-dash-gh-pr-dashboard--entry-at-point))
+         (pr-num (plist-get entry :number))
+         (repo (plist-get entry :repo))
+         (local-path (or (magit-dash-gh-pr-dashboard--find-local-path repo)
+                         (let ((prompt-path (read-directory-name (format "Local repository path for %s: " repo))))
+                           (if (and prompt-path (file-directory-p prompt-path))
+                               (expand-file-name prompt-path)
+                             (user-error "No registered local checkout for %s" repo)))))
+         (repo-dir (expand-file-name local-path))
+         (repo-base (file-name-nondirectory (directory-file-name repo-dir)))
+         (wt-dir (expand-file-name (format "%s-pr-%d" repo-base pr-num)
+                                   (file-name-directory (directory-file-name repo-dir))))
+         (branch-name (format "pr-%d" pr-num)))
+    (if (file-directory-p wt-dir)
+        (progn
+          (message "magit-gh: opening existing worktree at %s" wt-dir)
+          (magit-status-setup-buffer wt-dir))
+      (message "magit-gh: fetching PR #%d in %s..." pr-num repo-base)
+      (let ((default-directory repo-dir))
+        (magit-call-git "fetch" "origin" (format "pull/%d/head:%s" pr-num branch-name))
+        (let ((exit-code (magit-call-git "worktree" "add" wt-dir branch-name)))
+          (if (= exit-code 0)
+              (progn
+                (when (fboundp 'magit-dash-worktree-symlink-worktree)
+                  (magit-dash-worktree-symlink-worktree wt-dir repo-dir))
+                (message "magit-gh: opened worktree for PR #%d at %s" pr-num wt-dir)
+                (magit-status-setup-buffer wt-dir))
+            (user-error "Failed to create worktree at %s (exit %d)" wt-dir exit-code)))))))
+
 (defun magit-dash-gh-pr-dashboard-fetch-ci ()
   "Fetch GitHub Actions CI logs for the pull request at point."
   (interactive)
@@ -494,16 +541,16 @@ component of REPO-SLUG against the final directory component of each entry."
 (transient-define-prefix magit-dash-gh-pr-dashboard-menu ()
   "Actions for the PR dashboard."
   [["Pull Request"
-    ("RET" "Open in browser" magit-dash-gh-pr-dashboard-open-browser)]
+    ("RET" "Open in browser"       magit-dash-gh-pr-dashboard-open-browser)
+    ("w"   "Open worktree for PR"  magit-dash-gh-pr-dashboard-open-worktree)]
    ["CI"
-    ("ci" "Fetch CI logs" magit-dash-gh-pr-dashboard-fetch-ci)]
+    ("ci"  "Fetch CI logs"         magit-dash-gh-pr-dashboard-fetch-ci)]
    ["Filter"
-    ("fs" "Set filter…" magit-dash-gh-pr-dashboard-set-filter)
-    ("fc" "Clear all filters" magit-dash-gh-pr-dashboard-clear-filters)]
+    ("fs"  "Set filter…"           magit-dash-gh-pr-dashboard-set-filter)
+    ("fc"  "Clear all filters"     magit-dash-gh-pr-dashboard-clear-filters)]
    ["Dashboard"
-    ("g" "Refresh" magit-dash-gh-pr-dashboard-refresh)
-    ("q" "Quit" quit-window)]])
-
+    ("g"   "Refresh"               magit-dash-gh-pr-dashboard-refresh)
+    ("q"   "Quit"                  quit-window)]])
 (provide 'magit-dash-gh-pr)
 
 ;;; magit-gh-pr.el ends here
