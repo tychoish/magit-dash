@@ -39,7 +39,9 @@
 (require 'sprite)
 
 (require 'magit-dash-gh-ci)
+(require 'magit-dash-gh-pr)
 (require 'magit-dash-gh)
+(require 'magit-dash-open)
 (require 'magit-dash-submodules)
 (require 'magit-dash-worktree)
 
