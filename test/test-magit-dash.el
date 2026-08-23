@@ -148,6 +148,24 @@
     (magit-dash-register :name "r2" :path "/tmp/r2" :remote-url "git@github.com:user/r2.git")
     (should (equal "git@github.com:user/r2.git" (magit-dash-repo-remote-url (car magit-dash-repo-list))))))
 
+(ert-deftest magit-dash/register-repo-upstream ()
+  ":repo stores the path/url of the upstream repository."
+  (let ((magit-dash-repo-list nil))
+    (magit-dash-register :name "r1" :path "/tmp/r1" :repo "/srv/git/r1.git")
+    (should (equal "/srv/git/r1.git" (magit-dash-repo-repo (car magit-dash-repo-list))))
+    (should (equal "/srv/git/r1.git" (magit-dash-repo-upstream-repo (car magit-dash-repo-list))))
+    (should (equal "/srv/git/r1.git" (magit-dash-repo-upstream (car magit-dash-repo-list))))))
+
+(ert-deftest magit-dash/register-expands-local-repo-path ()
+  ":repo expands local file paths but preserves URLs."
+  (let ((magit-dash-repo-list nil))
+    (magit-dash-register :name "r1" :path "/tmp/r1" :repo "~/upstream/r1")
+    (should (string-prefix-p "/" (magit-dash-repo-repo (car magit-dash-repo-list))))
+    (magit-dash-register :name "r2" :path "/tmp/r2" :repo "git@github.com:user/r2.git")
+    (should (equal "git@github.com:user/r2.git" (magit-dash-repo-repo (car magit-dash-repo-list))))
+    (magit-dash-register :name "r3" :path "/tmp/r3" :repo "https://github.com/user/r3.git")
+    (should (equal "https://github.com/user/r3.git" (magit-dash-repo-repo (car magit-dash-repo-list))))))
+
 ;;;; magit-dash--sorted-repos
 
 (ert-deftest magit-dash/sorted-repos-by-hint ()
@@ -2032,11 +2050,9 @@ they are not consulted even when their own auto-* flags are set."
 ;;;; Column configuration
 
 (ert-deftest magit-dash/column-enabled-defaults ()
-  "All columns are enabled by default."
-  (let ((magit-dash-columns
-         '((name . t) (branch . t) (fetched . t) (status . t) (worktree . t))))
-    (should (seq-every-p #'magit-dash--column-enabled-p
-                         magit-dash--all-columns))))
+  "CI is enabled by default; upstream is disabled by default in magit-dash-columns."
+  (should (eq t (alist-get 'ci magit-dash-columns)))
+  (should (eq nil (alist-get 'upstream magit-dash-columns))))
 
 (ert-deftest magit-dash/column-disabled ()
   "A disabled column is excluded from active-columns."
@@ -3062,3 +3078,150 @@ The bug was that add-text-properties returns t, not the modified string."
           (should (string-match-p "Missing (not cloned)" content))
           (should (string-match-p "https://github.com/u/miss.git" content))
           (should (string-match-p "clone this repository" content)))))))
+
+
+(ert-deftest magit-dash/update-default-directory-existing-repo ()
+  "update-default-directory sets default-directory to repo path when repo exists."
+  (let ((repo (magit-dash-repo--make :name "exists" :path default-directory)))
+    (cl-letf (((symbol-function 'tabulated-list-get-id) (lambda () repo))
+              ((symbol-function 'magit-dash--repo-missing-p) (lambda (_) nil)))
+      (with-temp-buffer
+        (magit-dash--update-default-directory)
+        (should (equal default-directory (file-name-as-directory (expand-file-name default-directory))))))))
+
+(ert-deftest magit-dash/update-default-directory-missing-repo ()
+  "update-default-directory sets default-directory to parent directory when repo is missing."
+  (let* ((missing-path "/tmp/nonexistent-parent-dir-12345/missing-repo-dir")
+         (repo (magit-dash-repo--make :name "missing" :path missing-path)))
+    (cl-letf (((symbol-function 'tabulated-list-get-id) (lambda () repo))
+              ((symbol-function 'magit-dash--repo-missing-p) (lambda (_) t)))
+      (with-temp-buffer
+        (magit-dash--update-default-directory)
+        (should (equal default-directory "/tmp/nonexistent-parent-dir-12345/"))))))
+
+(ert-deftest magit-dash/update-default-directory-fallback ()
+  "update-default-directory falls back to ~/ when no repo at point."
+  (cl-letf (((symbol-function 'tabulated-list-get-id) (lambda () nil)))
+    (with-temp-buffer
+      (magit-dash--update-default-directory)
+      (should (equal default-directory (file-name-as-directory (expand-file-name "~/")))))))
+
+(ert-deftest magit-dash/bootstrap-repo-errors-when-no-upstream ()
+  "bootstrap-repo signals user-error when repo has no upstream :repo."
+  (let ((repo (magit-dash-repo--make :name "no-up" :path "/tmp/no-up-test")))
+    (cl-letf (((symbol-function 'magit-dash--repo-at-point) (lambda () repo))
+              ((symbol-function 'magit-dash--repo-at-point-p) (lambda () t)))
+      (should-error (magit-dash-bootstrap-repo repo) :type 'user-error))))
+
+(ert-deftest magit-dash/bootstrap-repo-errors-when-repo-exists ()
+  "bootstrap-repo signals user-error when destination repository already exists."
+  (let ((repo (magit-dash-repo--make :name "exists" :path default-directory :repo "/srv/git/exists.git")))
+    (should-error (magit-dash-bootstrap-repo repo) :type 'user-error)))
+
+(ert-deftest magit-dash/bootstrap-repo-delegates-to-clone-repo ()
+  "bootstrap-repo calls clone-repo with upstream repo and destination."
+  (let* ((repo (magit-dash-repo--make :name "boot" :path "/tmp/boot-target" :repo "/srv/git/boot.git"))
+         (cloned-repo nil)
+         (cloned-url nil))
+    (cl-letf (((symbol-function 'magit-dash--resolve-git-dir) (lambda (_) nil))
+              ((symbol-function 'magit-dash-clone-repo)
+               (lambda (r url &optional _on-complete)
+                 (setq cloned-repo r)
+                 (setq cloned-url url))))
+      (magit-dash-bootstrap-repo repo)
+      (should (eq cloned-repo repo))
+      (should (equal cloned-url "/srv/git/boot.git")))))
+
+(ert-deftest magit-dash/bootstrap-marked-errors-when-none-missing ()
+  "bootstrap-marked signals user-error when no missing repos with upstream :repo exist."
+  (let* ((r1 (magit-dash-repo--make :name "exists" :path "/tmp/r1" :repo "/srv/git/r1.git"))
+         (r2 (magit-dash-repo--make :name "no-upstream" :path "/tmp/r2"))
+         (magit-dash-repo-list (list r1 r2)))
+    (cl-letf (((symbol-function 'magit-dash--repo-missing-p)
+               (lambda (r) (equal (magit-dash-repo-name r) "no-upstream"))))
+      (should-error (magit-dash-bootstrap-marked) :type 'user-error))))
+
+(ert-deftest magit-dash/bootstrap-marked-clones-missing-repos ()
+  "bootstrap-marked batch clones all missing repositories that have :repo set."
+  (let* ((r1 (magit-dash-repo--make :name "m1" :path "/tmp/m1" :repo "/srv/git/m1.git"))
+         (r2 (magit-dash-repo--make :name "m2" :path "/tmp/m2" :repo "/srv/git/m2.git"))
+         (r3 (magit-dash-repo--make :name "m3" :path "/tmp/m3")) ;; no :repo
+         (r4 (magit-dash-repo--make :name "e4" :path "/tmp/e4" :repo "/srv/git/e4.git")) ;; not missing
+         (magit-dash-repo-list (list r1 r2 r3 r4))
+         (batch-repos nil))
+    (cl-letf (((symbol-function 'magit-dash--repo-missing-p)
+               (lambda (r) (member (magit-dash-repo-name r) '("m1" "m2" "m3"))))
+              ((symbol-function 'magit-dash--batch-run)
+               (lambda (repos _fn _label _cb)
+                 (setq batch-repos (mapcar #'magit-dash-repo-name repos)))))
+      (magit-dash-bootstrap-marked)
+      (should (equal (sort batch-repos #'string<) '("m1" "m2"))))))
+
+(ert-deftest magit-dash/overview-render-hides-upstream-by-default ()
+  "overview--render hides Upstream Repo field by default, displays it when magit-dash-overview-show-upstream is t."
+  (let ((repo (magit-dash-repo--make :name "boot" :path "/tmp/boot"
+                                     :repo "/srv/git/boot.git")))
+    (cl-letf (((symbol-function 'magit-dash--repo-missing-p) (lambda (_) t)))
+      (with-temp-buffer
+        (let ((magit-dash-overview-show-upstream nil))
+          (magit-dash-overview--render repo nil nil)
+          (should-not (string-match-p "Upstream Repo" (buffer-string)))))
+      (with-temp-buffer
+        (let ((magit-dash-overview-show-upstream t))
+          (magit-dash-overview--render repo nil nil)
+          (let ((content (buffer-string)))
+            (should (string-match-p "Upstream Repo" content))
+            (should (string-match-p "/srv/git/boot.git" content))))))))
+
+(ert-deftest magit-dash/overview-render-shows-ci-field ()
+  "overview--render shows CI field when :include-ci is non-nil."
+  (let ((repo (magit-dash-repo--make :name "ci-repo" :path "/tmp/ci-repo" :include-ci t))
+        (magit-dash-gh--cache (make-hash-table :test #'equal)))
+    (puthash "/tmp/ci-repo" (list :ci-status '(:status "completed" :conclusion "success"))
+             magit-dash-gh--cache)
+    (cl-letf (((symbol-function 'magit-dash--repo-missing-p) (lambda (_) nil)))
+      (with-temp-buffer
+        (magit-dash-overview--render repo '(:branch "main" :behind 0 :dirty nil) nil)
+        (let ((content (buffer-string)))
+          (should (string-match-p "CI:" content))
+          (should (string-match-p "passing" content)))))))
+
+
+(ert-deftest magit-dash/has-missing-bootstrap-repos-p-behavior ()
+  "has-missing-bootstrap-repos-p requires batch to be enabled and matching missing repos."
+  (let* ((r1 (magit-dash-repo--make :name "m1" :path "/tmp/m1" :repo "/srv/git/m1.git"))
+         (r2 (magit-dash-repo--make :name "m2" :path "/tmp/m2"))
+         (magit-dash-repo-list (list r1 r2)))
+    (cl-letf (((symbol-function 'magit-dash--repo-missing-p)
+               (lambda (r) (equal (magit-dash-repo-name r) "m1"))))
+      ;; No marks and batch-all nil -> nil
+      (let ((magit-dash--marked-paths nil)
+            (magit-dash--batch-all nil))
+        (should-not (magit-dash--has-missing-bootstrap-repos-p)))
+      ;; batch-all t with missing repo having :repo -> t
+      (let ((magit-dash--marked-paths nil)
+            (magit-dash--batch-all t))
+        (should (magit-dash--has-missing-bootstrap-repos-p)))
+      ;; Marked matching repo -> t
+      (let ((magit-dash--marked-paths '("/tmp/m1"))
+            (magit-dash--batch-all nil))
+        (should (magit-dash--has-missing-bootstrap-repos-p)))
+      ;; Marked non-matching repo -> nil
+      (let ((magit-dash--marked-paths '("/tmp/m2"))
+            (magit-dash--batch-all nil))
+        (should-not (magit-dash--has-missing-bootstrap-repos-p))))))
+
+(ert-deftest magit-dash/bootstrap-marked-targets-marked-only ()
+  "bootstrap-marked targets only marked missing repositories when batch-all is nil."
+  (let* ((r1 (magit-dash-repo--make :name "m1" :path "/tmp/m1" :repo "/srv/git/m1.git"))
+         (r2 (magit-dash-repo--make :name "m2" :path "/tmp/m2" :repo "/srv/git/m2.git"))
+         (magit-dash-repo-list (list r1 r2))
+         (magit-dash--marked-paths '("/tmp/m1"))
+         (magit-dash--batch-all nil)
+         (batch-repos nil))
+    (cl-letf (((symbol-function 'magit-dash--repo-missing-p) (lambda (_) t))
+              ((symbol-function 'magit-dash--batch-run)
+               (lambda (repos _fn _label _cb)
+                 (setq batch-repos (mapcar #'magit-dash-repo-name repos)))))
+      (magit-dash-bootstrap-marked)
+      (should (equal batch-repos '("m1"))))))

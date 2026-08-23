@@ -78,6 +78,7 @@
   "Registry entry for a local git repository."
   name
   path
+  (repo nil)
   (include-prs nil)
   (include-ci nil)
   (auto-fetch nil)
@@ -95,11 +96,19 @@
   (clone-url nil)
   (worktree-symlinks nil))
 
+(defalias 'magit-dash-repo-upstream-repo #'magit-dash-repo-repo)
+(defalias 'magit-dash-repo-upstream #'magit-dash-repo-repo)
 (defalias 'magit-dash-repo-remote-url #'magit-dash-repo-clone-url)
 (defalias 'magit-dash-repo-symlinks #'magit-dash-repo-worktree-symlinks)
+
 (defvar magit-dash-repo-list '()
   "List of `magit-dash-repo' structs registered for dashboard display.
 Use `magit-dash-register' to add entries.")
+
+(defcustom magit-dash-overview-show-upstream nil
+  "When non-nil, display the Upstream Repo field in the repository overview buffer."
+  :type 'boolean
+  :group 'magit-dash)
 
 (defcustom magit-dash-run-command-in-background nil
   "When non-nil, `magit-dash-run-command' executes commands in the background by default."
@@ -167,11 +176,19 @@ appending `:pre'/`:post' lists (BASE's entries first)."
    (seq-partition addition 2)
    base))
 
-(cl-defun magit-dash-register (&key name path include-prs include-ci auto-fetch auto-pull auto-commit auto-push auto-sync-command hooks tags commands sort-hint worktree sync-branches timer clone-url remote-url worktree-symlinks symlinks)
+(defun magit-dash--expand-repo-path (path-or-url)
+  "Expand PATH-OR-URL if it is a local path, otherwise return as-is."
+  (if (and (stringp path-or-url)
+           (not (string-match-p "\\`\\(?:[a-zA-Z][-a-zA-Z0-9+.]*://\\|git@\\)" path-or-url)))
+      (expand-file-name path-or-url)
+    path-or-url))
+
+(cl-defun magit-dash-register (&key name path repo include-prs include-ci auto-fetch auto-pull auto-commit auto-push auto-sync-command hooks tags commands sort-hint worktree sync-branches timer clone-url remote-url worktree-symlinks symlinks)
   "Register or replace a repository with NAME at absolute PATH.
 Replaces any existing entry with the same name or path.
 
 Keyword arguments:
+  :repo           path (or URL) of upstream repository for bootstrapping.
   :include-prs    include in PR dashboard fetches.
   :include-ci     include in CI status column fetches (GitHub Actions).
   :auto-fetch     non-nil — run git fetch --all during auto-sync.
@@ -215,7 +232,7 @@ Keyword arguments:
                   Repos without a sort-hint appear after all sorted repos.
   :worktree       non-nil when this entry represents a git worktree.
   :timer          plist forwarded to `magit-dash-register-sync-timer' (requires
-                  magit-dash-timer).  Example: \\='(:kind idle :idle-delay 300).
+                  magit-dash-timer).  Example: \='(:kind idle :idle-delay 300).
   :clone-url      URL to clone repository from when missing on disk.
   :remote-url     alias for :clone-url.
   :worktree-symlinks  list of relative paths to symlink from main repo to worktrees.
@@ -233,6 +250,7 @@ Keyword arguments:
   (magit-dash--validate-hooks hooks t)
 
   (let ((abs-path (expand-file-name path))
+        (upstream (when repo (magit-dash--expand-repo-path repo)))
         (url (or clone-url remote-url))
         (links (or worktree-symlinks symlinks)))
     (setq magit-dash-repo-list
@@ -243,6 +261,7 @@ Keyword arguments:
             (append (list (magit-dash-repo--make
                            :name name
                            :path abs-path
+                           :repo upstream
                            :include-prs include-prs
                            :include-ci include-ci
                            :auto-fetch auto-fetch
@@ -1285,12 +1304,12 @@ than cached, so they stop appearing in the overview."
 ;;;; Column configuration
 
 (defvar magit-dash-columns
-  '((name . t) (branch . t) (fetched . t) (updated . nil) (ci . nil) (status . t) (worktree . t) (sync . t) (cached . nil))
+  '((name . t) (branch . t) (fetched . t) (updated . nil) (ci . t) (status . t) (worktree . t) (sync . t) (cached . nil) (upstream . nil))
   "Alist of (COLUMN-SYMBOL . ENABLED) for the repository dashboard.
 Persisted across sessions via `savehist-additional-variables'.")
 
 (defconst magit-dash--all-columns
-  '(name branch fetched updated ci status worktree sync cached)
+  '(name branch fetched updated ci status worktree sync cached upstream)
   "All available dashboard columns in display order.")
 
 (defconst magit-dash--column-defs
@@ -1300,13 +1319,16 @@ Persisted across sessions via `savehist-additional-variables'.")
     (worktree . ("Type"     8 nil))
     (sync     . ("Sync"     8 nil))
     (cached   . ("Cached"   7 nil))
-    (ci       . ("CI"       3 nil)))
+    (ci       . ("CI"       3 nil))
+    (upstream . ("Upstream" 16 nil)))
   "Alist of COLUMN-SYMBOL to (LABEL WIDTH SORTABLE) for non-name columns.
 Name and Branch widths are computed dynamically in `magit-dash--build-format'.")
 
 (defun magit-dash--column-enabled-p (col)
   "Return non-nil when column COL is enabled in `magit-dash-columns'."
-  (alist-get col magit-dash-columns t))
+  (if-let* ((entry (assq col magit-dash-columns)))
+      (cdr entry)
+    nil))
 
 (defun magit-dash--active-columns ()
   "Return column symbols that are currently enabled, in display order."
@@ -1527,6 +1549,7 @@ When both together exceed the available window space they split it proportionall
     (define-key m (kbd "w")   #'magit-dash-worktree-add)
     (define-key m (kbd "x")   #'magit-dash-run-command)
     (define-key m (kbd "X")   #'magit-dash-run-command-background)
+    (define-key m (kbd "B")   #'magit-dash-bootstrap-repo)
     (define-key m (kbd "C")   #'magit-dash-clone-repo)
     (define-key m (kbd "y")   #'magit-dash-prune-branches)
     (define-key m (kbd "Z")   #'magit-dash-agent-shell-new)
@@ -1572,12 +1595,16 @@ Rebuilt on each refresh. Used to detect explicitly-registered repos that are als
 submodules and to derive their parent<mod> display name.")
 
 (defun magit-dash--update-default-directory ()
-  "Sync `default-directory' with the repo at point, falling back to `~/'."
+  "Sync `default-directory' with the repo at point, falling back to `~/'.
+If the repository at point or its underlying directory does not exist,
+set `default-directory' to the parent directory where the repository should be."
   (setq-local default-directory
-	      (file-name-as-directory
-               (if-let* ((repo (tabulated-list-get-id)))
-                   (magit-dash-repo-path repo)
-                 (expand-file-name "~/")))))
+              (if-let* ((repo (tabulated-list-get-id)))
+                  (let ((path (expand-file-name (magit-dash-repo-path repo))))
+                    (if (magit-dash--repo-missing-p repo)
+                        (file-name-as-directory (file-name-directory (directory-file-name path)))
+                      (file-name-as-directory path)))
+                (file-name-as-directory (expand-file-name "~/")))))
 
 (define-derived-mode magit-dash-mode tabulated-list-mode "Repos"
   "Major mode for the registered repository dashboard."
@@ -1642,6 +1669,8 @@ until `magit-dash--populate-stats-async' updates them."
                        (if (magit-dash-gh--cache-get (magit-dash-repo-path repo) :stats)
                            (propertize "✓" 'face 'success)
                          (propertize "·" 'face 'shadow)))
+                      ('upstream
+                       (or (magit-dash-repo-repo repo) ""))
                       ('ci
                        (if (not (magit-dash-repo-include-ci repo))
                            ""
@@ -1933,6 +1962,7 @@ The picker displays repository names annotated with their paths and cached dashb
 (defun magit-dash--default-clone-url (repo)
   "Return the best default clone URL for REPO."
   (or (magit-dash-repo-clone-url repo)
+      (magit-dash-repo-repo repo)
       (plist-get (magit-dash-gh--cache-get (magit-dash-repo-path repo) :stats) :remote-origin)
       (let ((name (magit-dash-repo-name repo)))
         (if (string-match-p "/" name)
@@ -2002,6 +2032,92 @@ Runs asynchronously and refreshes the dashboard on completion."
     (message "magit-dash: cloning %d missing repository(ies)..." (length missing))
     (dolist (repo missing)
       (magit-dash-clone-repo repo nil))))
+
+(defun magit-dash--prompt-for-repo (&optional prompt repos)
+  "Prompt for one of REPOS (default `magit-dash-repo-list') and return its struct."
+  (let ((candidate-repos (or repos magit-dash-repo-list)))
+    (unless candidate-repos
+      (user-error "magit-dash: no registered repositories to choose from"))
+    (let ((table (map-into
+                  (seq-map (lambda (r)
+                             (cons (magit-dash-repo-name r)
+                                   (cons (magit-dash--repo-annotation r) r)))
+                           candidate-repos)
+                  '(hash-table :test equal))))
+      (annotated-completing-read
+       table
+       :prompt (or prompt "Repository: ")
+       :require-match t
+       :category 'magit-dash-repo))))
+
+(defun magit-dash--repo-has-upstream-p ()
+  "Return non-nil if the repo at point has an upstream :repo configured."
+  (when-let* ((repo (ignore-errors (magit-dash--repo-at-point))))
+    (and (magit-dash-repo-repo repo) t)))
+
+(defun magit-dash--has-missing-bootstrap-repos-p ()
+  "Return non-nil if batch bootstrap is permitted and targets at least one missing repo with :repo."
+  (and (magit-dash--batch-enabled-p)
+       (seq-some (lambda (r)
+                   (and (magit-dash-repo-repo r)
+                        (magit-dash--repo-missing-p r)))
+                 (magit-dash--effective-repos))))
+
+;;;###autoload
+(defun magit-dash-bootstrap-repo (&optional repo on-complete)
+  "Clone REPO from its configured upstream `:repo' path into its destination path.
+REPO defaults to the repository at point or is selected interactively.
+Runs asynchronously and refreshes the dashboard on completion."
+  (interactive
+   (list (if (magit-dash--repo-at-point-p)
+             (magit-dash--repo-at-point)
+           (magit-dash--prompt-for-repo "Bootstrap repository: "))))
+  (let ((r (or repo
+               (if (magit-dash--repo-at-point-p)
+                   (magit-dash--repo-at-point)
+                 (magit-dash--prompt-for-repo "Bootstrap repository: ")))))
+    (unless r
+      (user-error "No repository specified"))
+    (let ((upstream (magit-dash-repo-repo r))
+          (path (expand-file-name (magit-dash-repo-path r))))
+      (unless (and upstream (not (string-empty-p upstream)))
+        (user-error "Repository %s has no upstream :repo configured" (magit-dash-repo-name r)))
+      (when (magit-dash--resolve-git-dir path)
+        (user-error "Repository already exists at %s" path))
+      (magit-dash-clone-repo r upstream on-complete))))
+
+(defalias 'magit-dash-bootstrap #'magit-dash-bootstrap-repo)
+(defalias 'magit-dash-clone-upstream-repo #'magit-dash-bootstrap-repo)
+(defalias 'magit-dash-clone-upstream #'magit-dash-bootstrap-repo)
+
+;;;###autoload
+(defun magit-dash-bootstrap-marked ()
+  "Bootstrap marked missing repositories with an upstream `:repo' configured.
+When `magit-dash--batch-all' is enabled, targets all visible missing repositories with `:repo'.
+Runs asynchronously and refreshes the dashboard on completion."
+  (interactive)
+  (let* ((effective (magit-dash--effective-repos))
+         (repos (seq-filter (lambda (r)
+                              (and (magit-dash-repo-repo r)
+                                   (magit-dash--repo-missing-p r)))
+                            effective)))
+    (unless repos
+      (user-error (if magit-dash--batch-all
+                      "No missing repositories with upstream :repo configured to bootstrap"
+                    "No marked missing repositories with upstream :repo configured to bootstrap")))
+    (message "magit-dash: bootstrapping %d missing repository(ies)..." (length repos))
+    (magit-dash--batch-run
+     repos
+     (lambda (r cb)
+       (magit-dash-clone-repo r (magit-dash-repo-repo r) cb))
+     "magit-dash bootstrap"
+     (lambda (_) (magit-dash--maybe-refresh)))))
+
+(defalias 'magit-dash-bootstrap-all #'magit-dash-bootstrap-marked)
+(defalias 'magit-dash-bootstrap-batch #'magit-dash-bootstrap-marked)
+(defalias 'magit-dash-bootstrap-all-missing #'magit-dash-bootstrap-marked)
+(defalias 'magit-dash-clone-all-upstream #'magit-dash-bootstrap-marked)
+
 (defun magit-dash--resolve-repo-path ()
   "Return an absolute path to a git repository for the current command context.
 Tries, in order:
@@ -2785,6 +2901,8 @@ when still loading.  PR-COUNTS is a cons (TOTAL . MINE), or nil when loading."
       (magit-dash-overview--insert-kv "Path" path 'warning)
       (when-let* ((url (magit-dash--default-clone-url repo)))
         (magit-dash-overview--insert-kv "Clone URL" url))
+      (when (and magit-dash-overview-show-upstream (magit-dash-repo-repo repo))
+        (magit-dash-overview--insert-kv "Upstream Repo" (magit-dash-repo-repo repo)))
       (magit-dash-overview--insert-kv "Status" "Missing (not cloned)" 'warning)
       (insert (propertize "\nPress 'K' or run 'magit-dash-overview-clone-repo' to clone this repository.\n"
                           'face 'font-lock-doc-face)))
@@ -2802,6 +2920,8 @@ when still loading.  PR-COUNTS is a cons (TOTAL . MINE), or nil when loading."
          "Repository" (magit-dash-repo-name repo) nil (cons 'magit-status path))
         (magit-dash-overview--insert-kv
          "Path" path nil (cons 'dired path))
+        (when (and magit-dash-overview-show-upstream (magit-dash-repo-repo repo))
+          (magit-dash-overview--insert-kv "Upstream Repo" (magit-dash-repo-repo repo)))
         (when remote-origin
           (magit-dash-overview--insert-kv "Remote" remote-origin))
         (magit-dash-overview--insert-kv
@@ -2812,6 +2932,25 @@ when still loading.  PR-COUNTS is a cons (TOTAL . MINE), or nil when loading."
              (format "%d commits" behind)
            "up to date")
          (when (> behind 0) 'warning))
+        (when (or (magit-dash-repo-include-ci repo)
+                  (magit-dash-gh--cache-get path :ci-status))
+          (let ((ci (magit-dash-gh--cache-get path :ci-status)))
+            (if ci
+                (let ((conclusion (plist-get ci :conclusion))
+                      (status (plist-get ci :status)))
+                  (magit-dash-overview--insert-kv
+                   "CI"
+                   (cond
+                    ((equal conclusion "success") "passing (✓)")
+                    ((equal conclusion "failure") "failing (✗)")
+                    ((equal status "in_progress") "running (…)")
+                    (conclusion conclusion)
+                    (t "unknown"))
+                   (cond
+                    ((equal conclusion "success") 'magit-dash-ci-success-face)
+                    ((equal conclusion "failure") 'magit-dash-ci-failure-face)
+                    (t nil))))
+              (magit-dash-overview--insert-kv "CI" "loading..." 'shadow))))
         (if dirty
             (let* ((classified (magit-dash-overview--classify-files uncommitted-files)))
               (insert "\n")
@@ -2892,7 +3031,7 @@ On a Recent Commits line: show the commit in magit."
     (goto-char (point-min))))
 
 (defun magit-dash-overview--start-async-load (repo buf)
-  "Start async stats then PR-count fetch for REPO; update BUF as each arrives."
+  "Start async stats, PR-count, and CI status fetch for REPO; update BUF as each arrives."
   (magit-dash--collect-stats-async
    repo
    (lambda (stats)
@@ -2900,13 +3039,22 @@ On a Recent Commits line: show the commit in magit."
        (with-current-buffer buf
          (setq-local magit-dash-overview--stats stats)
          (magit-dash-overview--rerender)
-         (magit-dash-overview--pr-counts-async
-          (magit-dash-repo-path repo)
-          (lambda (counts)
-            (when (buffer-live-p buf)
-              (with-current-buffer buf
-                (setq-local magit-dash-overview--pr-counts counts)
-                (magit-dash-overview--rerender))))))))))
+         (when (magit-dash-repo-include-prs repo)
+           (magit-dash-overview--pr-counts-async
+            (magit-dash-repo-path repo)
+            (lambda (counts)
+              (when (buffer-live-p buf)
+                (with-current-buffer buf
+                  (setq-local magit-dash-overview--pr-counts counts)
+                  (magit-dash-overview--rerender))))))
+         (when (and (magit-dash-repo-include-ci repo)
+                    (fboundp 'magit-dash-gh-ci-fetch))
+           (magit-dash-gh-ci-fetch
+            repo
+            (lambda (_)
+              (when (buffer-live-p buf)
+                (with-current-buffer buf
+                  (magit-dash-overview--rerender)))))))))))
 
 (defun magit-dash-overview-refresh ()
   "Re-render the overview buffer with fresh stats fetched asynchronously."
@@ -3041,15 +3189,15 @@ On a Recent Commits line: show the commit in magit."
 (defun magit-dash--effective-repos ()
   "Return marked repos if any are marked, else all repos currently in the table.
 Falls back to `magit-dash-repo-list' when not in a dashboard buffer."
-  (if (derived-mode-p 'magit-dash-mode)
-      (let ((all (seq-map #'car tabulated-list-entries)))
-        (if magit-dash--marked-paths
-            (seq-filter (lambda (r)
-                          (member (magit-dash-repo-path r)
-                                  magit-dash--marked-paths))
-                        all)
-          all))
-    magit-dash-repo-list))
+  (let ((all (if (derived-mode-p 'magit-dash-mode)
+                 (seq-map #'car tabulated-list-entries)
+               magit-dash-repo-list)))
+    (if magit-dash--marked-paths
+        (seq-filter (lambda (r)
+                      (member (magit-dash-repo-path r)
+                              magit-dash--marked-paths))
+                    all)
+      all)))
 
 (defun magit-dash--has-marks-p ()
   "Return non-nil when at least one repository is marked."
@@ -3206,7 +3354,10 @@ When disabled, only explicitly marked repos are targeted."
     ("aa"  "Autosync all"    magit-dash-auto-sync
      :inapt-if-not magit-dash--batch-enabled-p)
     ("su"  "Update submodules" magit-dash-submodule-update-all
-     :inapt-if-not magit-dash--batch-enabled-p)]
+     :inapt-if-not magit-dash--batch-enabled-p)
+    ("bm"  (lambda () (if magit-dash--batch-all "Bootstrap all" "Bootstrap marked"))
+     magit-dash-bootstrap-marked
+     :inapt-if-not magit-dash--has-missing-bootstrap-repos-p)]
    ["Manage"
     ("ac"  "Auto-commit"     magit-dash-commit
      :inapt-if-not magit-dash--has-auto-commit-p)
@@ -3216,6 +3367,8 @@ When disabled, only explicitly marked repos are targeted."
      :inapt-if-not magit-dash--repo-at-point-p)
     ("cm"  "Clone missing"   magit-dash-clone-all-missing
      :inapt-if-not magit-dash--has-missing-repos-p)
+    ("cb"  "Bootstrap repo"  magit-dash-bootstrap-repo
+     :inapt-if-not magit-dash--repo-has-upstream-p)
     ("j"   "Build"           magit-dash-builder
      :inapt-if-not magit-dash--has-auto-commit-p)
     ("x"   "Run command"     magit-dash-run-command
