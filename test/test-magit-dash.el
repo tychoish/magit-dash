@@ -3225,3 +3225,94 @@ The bug was that add-text-properties returns t, not the modified string."
                  (setq batch-repos (mapcar #'magit-dash-repo-name repos)))))
       (magit-dash-bootstrap-marked)
       (should (equal batch-repos '("m1"))))))
+
+
+(ert-deftest magit-dash/validate-remote-sync-rejects-unknown-slot ()
+  "validate-remote-sync signals user-error when unknown slots are present."
+  (should-error (magit-dash--validate-remote-sync '(:hosts ("h1") :unknown-slot t))
+                :type 'user-error)
+  (should-error (magit-dash--validate-remote-sync "not-a-plist")
+                :type 'user-error)
+  ;; Valid slots do not signal error
+  (magit-dash--validate-remote-sync '(:hosts ("h1" "h2") :branch "main" :path "/foo/bar")))
+
+(ert-deftest magit-dash/remote-sync-target-generates-pipeline ()
+  "magit-dash-remote-sync-target constructs the expected ssh and git sync pipeline."
+  ;; With defaults:
+  (let ((cmd (magit-dash-remote-sync-target :host "spinoza")))
+    (should (string-prefix-p "ssh spinoza 'cd . && git add -A && git fetch origin && git rebase origin/$(git rev-parse --abbrev-ref HEAD)" cmd))
+    (should (string-match-p "sync\.REMOTE(spinoza)" cmd))
+    (should (string-match-p "git ls-files -d | xargs -r git rm --ignore-unmatch --quiet --" cmd))
+    (should (string-suffix-p "git fetch origin && git rebase origin/$(git rev-parse --abbrev-ref HEAD)" cmd)))
+  ;; With explicit branch, path, and symbol host:
+  (let ((cmd (magit-dash-remote-sync-target :host 'deleuze :path "/home/tychoish/src/blog" :branch "master")))
+    (should (string-prefix-p "ssh deleuze 'cd /home/tychoish/src/blog && git add -A && git fetch origin && git rebase origin/master" cmd))
+    (should (string-match-p "sync\.REMOTE(deleuze)" cmd))
+    (should (string-suffix-p "git fetch origin && git rebase origin/master" cmd))))
+
+(ert-deftest magit-dash/register-with-remote-sync-generates-commands ()
+  "magit-dash-register splices sync-HOST commands and stores :remote-sync."
+  (let ((magit-dash-repo-list nil))
+    (magit-dash-register
+     :name "test-rs"
+     :path "/tmp/test-rs"
+     :remote-sync '(:hosts ("deleuze" "spinoza") :branch "main")
+     :commands '((custom-cmd . "echo hello")))
+    (let ((repo (car magit-dash-repo-list)))
+      (should repo)
+      (should (equal (magit-dash-repo-remote-sync repo)
+                     '(:hosts ("deleuze" "spinoza") :branch "main")))
+      ;; Check commands contains custom-cmd, sync-deleuze, and sync-spinoza
+      (let ((cmds (magit-dash-repo-commands repo)))
+        (should (assq 'custom-cmd cmds))
+        (should (assq 'sync-deleuze cmds))
+        (should (assq 'sync-spinoza cmds))
+        (let ((del-cmd (cdr (assq 'sync-deleuze cmds))))
+          (should (string-match-p "ssh deleuze" del-cmd))
+          (should (string-match-p "origin/main" del-cmd)))
+        (let ((spin-cmd (cdr (assq 'sync-spinoza cmds))))
+          (should (string-match-p "ssh spinoza" spin-cmd))
+          (should (string-match-p "origin/main" spin-cmd)))))))
+
+(ert-deftest magit-dash/register-rejects-invalid-remote-sync ()
+  "magit-dash-register signals user-error when invalid :remote-sync is passed."
+  (let ((magit-dash-repo-list nil))
+    (should-error
+     (magit-dash-register
+      :name "invalid-rs"
+      :path "/tmp/invalid-rs"
+      :remote-sync '(:bad-slot t))
+     :type 'user-error)))
+
+
+(ert-deftest magit-dash/validate-remote-sync-merge-method ()
+  "validate-remote-sync verifies :merge-method is 'merge or 'rebase."
+  (should-error (magit-dash--validate-remote-sync '(:hosts ("h1") :merge-method squash))
+                :type 'user-error)
+  (magit-dash--validate-remote-sync '(:hosts ("h1") :merge-method merge))
+  (magit-dash--validate-remote-sync '(:hosts ("h1") :merge-method rebase)))
+
+(ert-deftest magit-dash/remote-sync-target-with-merge-method ()
+  "magit-dash-remote-sync-target uses git merge when merge-method is 'merge."
+  (let ((cmd (magit-dash-remote-sync-target :host "spinoza" :branch "main" :merge-method 'merge)))
+    (should (string-prefix-p "ssh spinoza 'cd . && git add -A && git fetch origin && git merge origin/main" cmd))
+    (should (string-match-p "git add -A && git fetch origin && git merge origin/main" cmd))
+    (should (string-suffix-p "git fetch origin && git merge origin/main" cmd))))
+
+(ert-deftest magit-dash/clone-repo-missing-dir-runs-in-parent ()
+  "magit-dash-clone-repo executes make-process with default-directory set to parent dir."
+  (let* ((tmp-parent (make-temp-file "magit-dash-test-parent-" t))
+         (repo-path (expand-file-name "nonexistent-repo" tmp-parent))
+         (repo (magit-dash-repo--make :name "test-clone" :path repo-path))
+         (captured-dir nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'magit-dash--resolve-git-dir) (lambda (_) nil))
+                  ((symbol-function 'magit-git-executable) (lambda () "git"))
+                  ((symbol-function 'make-process)
+                   (lambda (&rest plist)
+                     (setq captured-dir default-directory)
+                     (generate-new-buffer " *mock-proc*"))))
+          (magit-dash-clone-repo repo "git@github.com:foo/bar.git")
+          (should (equal (file-name-as-directory tmp-parent)
+                         (file-name-as-directory (or captured-dir "")))))
+      (delete-directory tmp-parent t))))

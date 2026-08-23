@@ -24,6 +24,9 @@ Repositories are registered with =magit-dash-register= (typically in your
   - [[#use-package-with-load-path][use-package with load-path]]
   - [[#manual][Manual]]
 - [[#auto-sync-hooks-and-operations][Auto-sync hooks and operations]]
+- [[#example-configurations][Example Configurations]]
+  - [[#declarative-remote-host-sync][Declarative Remote Host Sync]]
+  - [[#full-auto-sync-with-bootstrapping-and-ci][Full Auto-Sync with Bootstrapping and CI]]
 - [[#api-reference][API Reference]]
   - [[#magit-dash-gh-actions-fetch-for-pr][magit-dash-gh-actions-fetch-for-pr]]
   - [[#magit-dash-gh-actions-fetch][magit-dash-gh-actions-fetch]]
@@ -124,6 +127,69 @@ validated:
 #+BEGIN_SRC emacs-lisp
 (magit-dash-set-global-hooks '(:sync (:post (notify-dashboard))))
 #+END_SRC
+* Example Configurations
+
+** Declarative Remote Host Sync
+
+For repositories synced across multiple workstations or remote hosts over SSH, =:remote-sync= declares mirror hosts, target branch, optional remote path, and merge strategy.
+
+Options for =:remote-sync=:
+- =:hosts= — list of remote hostnames/SSH targets (strings or symbols).
+- =:branch= — target branch to rebase or merge against (defaults to current branch HEAD).
+- =:path= — remote destination path (defaults to same absolute path as local).
+- =:merge-method= — sync integration strategy: ='rebase= (default) or ='merge=.
+
+=magit-dash= automatically generates per-host =sync-HOST= commands (e.g. =sync-deleuze=, =sync-spinoza=) in the repository command picker:
+
+#+BEGIN_SRC emacs-lisp
+(magit-dash-register
+ :name "blog"
+ :path "~/src/blog"
+ :repo "git@github.com:tychoish/blog.git"
+ :remote-sync '(:hosts ("deleuze" "spinoza")
+                :branch "master"
+                :merge-method merge)
+ :commands '((push  . "make push")
+             (build . "make build"))
+ :sort-hint 20)
+#+END_SRC
+
+Each generated =sync-HOST= command executes a robust multi-stage sync pipeline:
+1. *Remote SSH*: Stage, fetch, and rebase (or merge when =:merge-method= is ='merge=) on the target branch on the remote host, then commit and push.
+2. *Local*: Stage, fetch, rebase/merge, clean deleted files, commit, and push from the local repository.
+3. *Remote SSH*: Repeat remote stage/rebase/commit/push to incorporate local changes.
+4. *Local*: Final fetch and rebase/merge.
+
+To run remote sync automatically during repo sync, you can wire a generated target to =:hooks=:
+
+#+BEGIN_SRC emacs-lisp
+(magit-dash-register
+ :name "mail"
+ :path "~/mail"
+ :repo "git@github.com:tychoish/mail.git"
+ :remote-sync '(:hosts ("deleuze" "spinoza")
+                :branch "master")
+ :hooks '(:sync (:pre (magit-dash-save-project-buffers)
+                 :operation sync-deleuze)))
+#+END_SRC
+
+** Full Auto-Sync with Bootstrapping and CI
+
+#+BEGIN_SRC emacs-lisp
+(magit-dash-register
+ :name "myproject"
+ :path "~/src/myproject"
+ :repo "git@github.com:tychoish/myproject.git"
+ :auto-fetch t
+ :auto-pull t
+ :auto-commit t
+ :auto-push t
+ :sync-branches '("main" "master")
+ :include-prs t
+ :include-ci t
+ :sort-hint 10)
+#+END_SRC
+
 * API Reference
 
 #+BEGIN_COMMENT

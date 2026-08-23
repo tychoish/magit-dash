@@ -94,7 +94,8 @@
   (branch nil)
   (sync-branches nil)
   (clone-url nil)
-  (worktree-symlinks nil))
+  (worktree-symlinks nil)
+  (remote-sync nil))
 
 (defalias 'magit-dash-repo-upstream-repo #'magit-dash-repo-repo)
 (defalias 'magit-dash-repo-upstream #'magit-dash-repo-repo)
@@ -124,6 +125,25 @@ Use `magit-dash-register' to add entries.")
 
 (defconst magit-dash--hook-slots '(:pre :post :operation)
   "Fixed vocabulary of slots within a single operation's hooks plist.")
+
+(defconst magit-dash--remote-sync-slots '(:hosts :branch :path :merge-method)
+  "Fixed vocabulary of slots within a repo's `:remote-sync' plist.")
+
+(defun magit-dash--validate-remote-sync (remote-sync)
+  "Signal `user-error' when REMOTE-SYNC uses keys outside `magit-dash--remote-sync-slots'
+or has an invalid `:merge-method'."
+  (when remote-sync
+    (unless (listp remote-sync)
+      (user-error "magit-dash: :remote-sync must be a plist"))
+    (seq-do
+     (lambda (pair)
+       (let ((slot (car pair)))
+         (unless (memq slot magit-dash--remote-sync-slots)
+           (user-error "magit-dash: unknown remote-sync slot %s" slot))))
+     (seq-partition remote-sync 2))
+    (when-let ((method (plist-get remote-sync :merge-method)))
+      (unless (memq (if (symbolp method) method (intern method)) '(merge rebase))
+        (user-error "magit-dash: :merge-method must be 'merge or 'rebase, got %S" method)))))
 
 (defvar magit-dash-global-hooks nil
   "Plist of `:pre'/`:post' hooks applied to every repo's operations.
@@ -183,7 +203,7 @@ appending `:pre'/`:post' lists (BASE's entries first)."
       (expand-file-name path-or-url)
     path-or-url))
 
-(cl-defun magit-dash-register (&key name path repo include-prs include-ci auto-fetch auto-pull auto-commit auto-push auto-sync-command hooks tags commands sort-hint worktree sync-branches timer clone-url remote-url worktree-symlinks symlinks)
+(cl-defun magit-dash-register (&key name path repo include-prs include-ci auto-fetch auto-pull auto-commit auto-push auto-sync-command hooks tags commands sort-hint worktree sync-branches timer clone-url remote-url worktree-symlinks symlinks remote-sync)
   "Register or replace a repository with NAME at absolute PATH.
 Replaces any existing entry with the same name or path.
 
@@ -236,7 +256,8 @@ Keyword arguments:
   :clone-url      URL to clone repository from when missing on disk.
   :remote-url     alias for :clone-url.
   :worktree-symlinks  list of relative paths to symlink from main repo to worktrees.
-  :symlinks       alias for :worktree-symlinks."
+  :symlinks       alias for :worktree-symlinks.
+  :remote-sync    plist (:hosts, :branch, :path, :merge-method) declaring remote sync mirrors."
   (unless (and name path)
     (user-error "must specify name (%s) and path (%s)" name path))
 
@@ -248,11 +269,33 @@ Keyword arguments:
      :warning)
     (setq hooks (magit-dash--merge-hooks hooks (list :sync (list :operation auto-sync-command)))))
   (magit-dash--validate-hooks hooks t)
+  (when remote-sync
+    (magit-dash--validate-remote-sync remote-sync))
 
-  (let ((abs-path (expand-file-name path))
-        (upstream (when repo (magit-dash--expand-repo-path repo)))
-        (url (or clone-url remote-url))
-        (links (or worktree-symlinks symlinks)))
+  (let* ((abs-path (expand-file-name path))
+         (upstream (when repo (magit-dash--expand-repo-path repo)))
+         (url (or clone-url remote-url))
+         (links (or worktree-symlinks symlinks))
+         (remote-sync-commands
+          (when remote-sync
+            (let ((hosts (plist-get remote-sync :hosts))
+                  (rs-path (or (plist-get remote-sync :path) abs-path))
+                  (rs-branch (or (plist-get remote-sync :branch)
+                                 (if (consp sync-branches)
+                                     (car sync-branches)
+                                   sync-branches)))
+                  (rs-merge-method (plist-get remote-sync :merge-method)))
+              (seq-map
+               (lambda (h)
+                 (let ((h-str (if (symbolp h) (symbol-name h) h)))
+                   (cons (intern (format "sync-%s" h-str))
+                         (magit-dash-remote-sync-target
+                          :host h-str
+                          :path rs-path
+                          :branch rs-branch
+                          :merge-method rs-merge-method))))
+               hosts))))
+         (effective-commands (append commands remote-sync-commands)))
     (setq magit-dash-repo-list
           (thread-last magit-dash-repo-list
             (seq-remove (lambda (r)
@@ -270,12 +313,13 @@ Keyword arguments:
                            :auto-push auto-push
                            :hooks hooks
                            :tags tags
-                           :commands commands
+                           :commands effective-commands
                            :sort-hint sort-hint
                            :worktree worktree
                            :sync-branches sync-branches
                            :clone-url url
-                           :worktree-symlinks links))))))
+                           :worktree-symlinks links
+                           :remote-sync remote-sync))))))
   (when (and timer (fboundp 'magit-dash-register-sync-timer))
     (apply #'magit-dash-register-sync-timer :name name :repos (list name) timer)))
 
@@ -831,6 +875,29 @@ Calls ON-COMPLETE with `ok' on exit 0, or `error' and output on failure."
            (if (= code 0)
                (funcall on-complete 'ok)
              (funcall on-complete 'error (format "exit %d: %s" code output)))))))))
+
+(cl-defun magit-dash-remote-sync-target (&key host path branch merge-method)
+  "Return a shell command string implementing the remote sync pipeline for HOST.
+Stages, fetches/rebases (or merges when MERGE-METHOD is `merge') against BRANCH
+(defaulting to current HEAD), commits, and pushes locally and remotely over SSH
+into PATH (defaulting to \".\")."
+  (let* ((host-str (if (symbolp host) (symbol-name host) (or host "")))
+         (target-path (if (and path (not (string-empty-p path))) path "."))
+         (branch-name (when branch (if (symbolp branch) (symbol-name branch) branch)))
+         (method-sym (if (stringp merge-method) (intern merge-method) (or merge-method 'rebase)))
+         (op (if (eq method-sym 'merge) "merge" "rebase"))
+         (ref (if (and branch-name (not (string-empty-p branch-name)))
+                  (if (string-prefix-p "origin/" branch-name)
+                      branch-name
+                    (format "origin/%s" branch-name))
+                "origin/$(git rev-parse --abbrev-ref HEAD)"))
+         (remote-cmd (format "git add -A && git fetch origin && git %s %s && git commit -a -m \"auto-update: (sync.REMOTE(%s))\"; git push"
+                             op ref host-str))
+         (ssh-cmd (format "ssh %s 'cd %s && %s'" host-str target-path remote-cmd))
+         (local-stage-sync-push (format "git add -A && git fetch origin && git %s %s && git ls-files -d | xargs -r git rm --ignore-unmatch --quiet -- && git add -A && (git commit -a -m \"update: (sync.REMOTE(%s))\" || true) && git push"
+                                       op ref host-str))
+         (local-finish (format "git fetch origin && git %s %s" op ref)))
+    (format "%s && %s && %s && %s" ssh-cmd local-stage-sync-push ssh-cmd local-finish)))
 
 (defun magit-dash--run-target (repo target on-complete)
   "Run TARGET for REPO, calling ON-COMPLETE with `ok', `skipped', or `error'.
@@ -1852,7 +1919,7 @@ re-collected asynchronously."
   (declare (indent 1))
   (let ((path (make-symbol "path")))
     `(let* ((,path (file-name-as-directory (magit-dash-repo-path ,repo)))
-             (default-directory ,path))
+            (default-directory ,path))
        ,@body)))
 
 (defun magit-dash--repo-at-point ()
@@ -1989,7 +2056,11 @@ Runs asynchronously and refreshes the dashboard on completion."
       (unless (file-directory-p parent-dir)
         (make-directory parent-dir t)))
     (message "magit-dash: cloning %s from %s..." name clone-url)
-    (let* ((proc-buf (generate-new-buffer (format " *magit-dash-clone:%s*" name)))
+    (let* ((parent-dir (file-name-directory (directory-file-name path)))
+           (default-directory (if (and parent-dir (file-directory-p parent-dir))
+                                  parent-dir
+                                default-directory))
+           (proc-buf (generate-new-buffer (format " *magit-dash-clone:%s*" name)))
            (args (list "clone" clone-url path))
            (proc (make-process
                   :name (format "magit-dash-clone-%s" name)
@@ -3355,7 +3426,7 @@ When disabled, only explicitly marked repos are targeted."
      :inapt-if-not magit-dash--batch-enabled-p)
     ("su"  "Update submodules" magit-dash-submodule-update-all
      :inapt-if-not magit-dash--batch-enabled-p)
-    ("bm"  (lambda () (if magit-dash--batch-all "Bootstrap all" "Bootstrap marked"))
+    ("B"  (lambda () (if magit-dash--batch-all "Bootstrap all" "Bootstrap marked"))
      magit-dash-bootstrap-marked
      :inapt-if-not magit-dash--has-missing-bootstrap-repos-p)]
    ["Manage"
