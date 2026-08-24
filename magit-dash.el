@@ -44,6 +44,7 @@
 (require 'magit-dash-open)
 (require 'magit-dash-submodules)
 (require 'magit-dash-worktree)
+(require 'magit-dash-status)
 
 (declare-function magit-status-setup-buffer "magit-status")
 (declare-function projectile-save-project-buffers "projectile")

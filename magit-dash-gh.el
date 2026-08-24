@@ -30,7 +30,10 @@
 (declare-function magit-branch-delete "magit-branch")
 (declare-function magit-dash-gh-actions-fetch "magit-dash-gh-actions")
 (declare-function magit-dash-gh-pr-fetch "magit-dash-gh-pr")
-
+(declare-function magit-dash-open "magit-dash")
+(declare-function magit-dash-open-repo "magit-dash-open")
+(declare-function magit-gh-pr-dash "magit-dash-gh-pr")
+(declare-function magit-dash-status-refresh-all "magit-dash-status")
 ;;; Core helpers shared by all magit-dash-gh-* modules
 
 (defvar magit-dash-gh--cache (make-hash-table :test #'equal)
@@ -537,13 +540,19 @@ to the other configured account."
 
 ;;;###autoload
 (transient-define-prefix magit-dash-gh-menu ()
-  "GitHub workflow commands: branch pruning, CI logs, and PR comments."
-  [["GitHub"
-    ("p" "Prune merged/closed PR branches" magit-dash-gh-prune-merged-branches)
-    ("l" "Fetch CI logs"                   magit-dash-gh-actions-fetch)
-    ("c" "Fetch PR comments"               magit-dash-gh-pr-fetch)
-    ("u" "Switch gh auth account"          magit-dash-gh-auth-switch)]])
-
+  "GitHub and Magit Dash operations."
+  ["Dashboards"
+   ("d" "Repository dashboard"         magit-dash-open)
+   ("p" "PR dashboard"                 magit-gh-pr-dash)
+   ("o" "Open / switch repository"     magit-dash-open-repo)]
+  ["Actions"
+   ("P" "Prune merged branches"        magit-dash-gh-prune-merged-branches)
+   ("l" "Fetch CI logs"                magit-dash-gh-actions-fetch)
+   ("c" "Fetch PR comments"            magit-dash-gh-pr-fetch)
+   ("u" "Switch users"                 magit-dash-gh-auth-switch)
+   ("r" "Refresh status data"          magit-dash-status-refresh-all)]
+  ["Quit"
+   ("q" "Quit"                         transient-quit-one)])
 (provide 'magit-dash-gh)
 
 ;;; magit-dash-gh.el ends here
