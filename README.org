@@ -38,7 +38,6 @@ Repositories are registered with =magit-dash-register= (typically in your
   - [[#magit-dash-gh-prune-prefetch][magit-dash-gh-prune-prefetch]]
   - [[#magit-dash-gh-auth-switch][magit-dash-gh-auth-switch]]
   - [[#magit-dash-open-repo][magit-dash-open-repo]]
-  - [[#magit-dash-view][magit-dash-view]]
   - [[#magit-dash-sync-repo][magit-dash-sync-repo]]
   - [[#magit-dash-open-other-window][magit-dash-open-other-window]]
   - [[#magit-dash-open][magit-dash-open]]
@@ -276,10 +275,6 @@ Context-aware collection: - In a magit-status buffer: scans from the parent of t
 Live magit-status buffers are always included and marked "[open]"; selecting one switches to it directly without reopening it.
 
 With a prefix argument, prompt for ROOT and scan it normally regardless of the above context rules.
-
-** magit-dash-view :command:
-
-Open the overview buffer for the repository at point.
 
 ** magit-dash-sync-repo :command:
 

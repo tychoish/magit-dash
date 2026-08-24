@@ -35,7 +35,6 @@
 (declare-function magit-dash--repo-at-point "magit-dash")
 (declare-function magit-dash--resolve-repo-path "magit-dash")
 (declare-function magit-dash-refresh "magit-dash")
-(declare-function magit-dash-overview--current-repo "magit-dash")
 (declare-function magit-dash-gh--with-repo-dir "magit-dash")
 (defvar magit-dash-repo-list)
 
@@ -250,39 +249,6 @@ Signals `user-error' when the current row is not a worktree."
     (magit-dash-gh--with-repo-dir (magit-dash-repo-path repo)
       (call-interactively #'magit-worktree-delete))
     (magit-dash-refresh)))
-
-;;;###autoload
-(defun magit-dash-overview-worktree-add ()
-  "Add a new worktree for this overview's repository via magit.
-Signals `user-error' when already viewing a worktree."
-  (interactive)
-  (let ((repo (magit-dash-overview--current-repo)))
-    (when (magit-dash-repo-worktree repo)
-      (user-error "Cannot add a worktree from a worktree overview"))
-    (magit-dash-gh--with-repo-dir (magit-dash-repo-path repo)
-      (call-interactively #'magit-worktree-checkout))
-    (when (fboundp 'magit-dash-overview-refresh)
-      (magit-dash-overview-refresh))))
-
-;;;###autoload
-(defun magit-dash-overview-worktree-delete ()
-  "Delete this worktree via magit.
-Signals `user-error' when the current overview is not a worktree."
-  (interactive)
-  (let ((repo (magit-dash-overview--current-repo)))
-    (unless (magit-dash-repo-worktree repo)
-      (user-error "Not a worktree; use 'k' only on worktree overviews"))
-    (magit-dash-gh--with-repo-dir (magit-dash-repo-path repo)
-      (call-interactively #'magit-worktree-delete))
-    (when (fboundp 'magit-dash-overview-refresh)
-      (magit-dash-overview-refresh))))
-
-;;;###autoload
-(defun magit-dash-overview-worktree-sync-symlinks ()
-  "Sync symlinks for the worktree shown in the current overview buffer."
-  (interactive)
-  (let ((repo (magit-dash-overview--current-repo)))
-    (magit-dash-worktree-sync-symlinks (magit-dash-repo-path repo))))
 
 (provide 'magit-dash-worktree)
 ;;; magit-dash-worktree.el ends here

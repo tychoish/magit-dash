@@ -107,10 +107,6 @@
   "List of `magit-dash-repo' structs registered for dashboard display.
 Use `magit-dash-register' to add entries.")
 
-(defcustom magit-dash-overview-show-upstream nil
-  "When non-nil, display the Upstream Repo field in the repository overview buffer."
-  :type 'boolean
-  :group 'magit-dash)
 
 (defcustom magit-dash-run-command-in-background nil
   "When non-nil, `magit-dash-run-command' executes commands in the background by default."
@@ -594,38 +590,6 @@ accumulating their outputs before assembling the stats plist."
                  (funcall run (cdr remaining)))))))
     (funcall run commands)))
 
-(defun magit-dash-overview--pr-counts-async (path callback)
-  "Fetch open PR counts for repo at PATH asynchronously.
-Checks the in-memory cache first; calls CALLBACK with (TOTAL . MINE)."
-  (cond ((magit-dash-gh--cache-get path :include-prs)
-	 (if-let* ((cached (magit-dash-gh--cache-get path :pr-counts)))
-	     (funcall callback cached)
-	   (magit-dash-gh--run-process
-	    '("api" "user" "--jq" ".login")
-	    path
-	    (lambda (viewer-output)
-	      (let ((viewer (string-trim viewer-output)))
-		(magit-dash-gh--run-process
-		 (list "pr" "list" "--json" "number,author"
-                       "--state" "open" "--limit" "200")
-		 path
-		 (lambda (pr-output)
-		   (let* ((trimmed (string-trim pr-output))
-			  (counts
-			   (if (string-prefix-p "[" trimmed)
-                               (let ((prs (json-parse-string trimmed
-							     :array-type 'list
-							     :object-type 'alist)))
-				 (cons (length prs)
-                                       (seq-count
-					(lambda (pr)
-					  (equal viewer
-						 (map-elt (map-elt pr 'author) 'login)))
-					prs)))
-			     (cons 0 0))))
-		     (magit-dash-gh--cache-set path :pr-counts counts)
-		     (funcall callback counts)))))))))
-	(t 'disabled)))
 
 
 (defun magit-dash--get-stats (repo)
@@ -1356,18 +1320,6 @@ Missing/uninitialized submodules are marked with :submodule \\='missing."
 	  :submodules (when lines
 			(magit-dash--parse-submodules path lines))))))))
 
-(defun magit-dash-overview--worktrees-for (path)
-  "Return worktree structs for the main repo at PATH, discovering lazily if needed.
-Auto-discovered worktrees that no longer exist on disk are pruned rather
-than cached, so they stop appearing in the overview."
-  (let ((cached (magit-dash-gh--cache-get path :worktrees)))
-    (cond
-     ((eq cached 'none) nil)
-     (cached cached)
-     (t
-      (let ((found (magit-dash--prune-and-list-worktrees path)))
-        (magit-dash-gh--cache-set path :worktrees (or found 'none))
-        found)))))
 
 ;;;; Column configuration
 
@@ -1581,7 +1533,7 @@ When both together exceed the available window space they split it proportionall
 
 (defvar magit-dash-mode-map
   (let ((m (make-sparse-keymap)))
-    (define-key m (kbd "RET") #'magit-dash-view)
+    (define-key m (kbd "RET") #'magit-dash-magit-status)
     (define-key m (kbd "SPC") #'magit-dash-toggle-mark)
     (define-key m (kbd "a")   #'magit-dash-auto-sync)
     (define-key m (kbd "A")   #'magit-dash-commit-all)
@@ -2022,10 +1974,6 @@ The picker displays repository names annotated with their paths and cached dashb
   "Return non-nil if any registered repository in the dashboard is missing."
   (seq-some #'magit-dash--repo-missing-p (magit-dash--effective-repos)))
 
-(defun magit-dash-overview--is-missing-p ()
-  "Return non-nil if the repository displayed in the overview buffer is missing."
-  (when-let* ((repo (ignore-errors (magit-dash-overview--current-repo))))
-    (magit-dash--repo-missing-p repo)))
 
 (defun magit-dash--default-clone-url (repo)
   "Return the best default clone URL for REPO."
@@ -2084,15 +2032,6 @@ Runs asynchronously and refreshes the dashboard on completion."
                                    name code out)
                           (when on-complete (funcall on-complete 'error out)))))))))
       proc)))
-
-;;;###autoload
-(defun magit-dash-overview-clone-repo ()
-  "Clone the repository displayed in this overview if missing."
-  (interactive)
-  (let ((repo (magit-dash-overview--current-repo)))
-    (magit-dash-clone-repo repo nil
-                           (lambda (_status)
-                             (magit-dash-overview-refresh)))))
 
 ;;;###autoload
 (defun magit-dash-clone-all-missing ()
@@ -2203,12 +2142,6 @@ Tries, in order:
            (magit-dash-repo-path (magit-dash--repo-at-point)))
       (magit-toplevel)
       (magit-dash--prompt-for-repo-path)))
-
-;;;###autoload
-(defun magit-dash-view ()
-  "Open the overview buffer for the repository at point."
-  (interactive)
-  (magit-dash-overview--open (magit-dash--repo-at-point)))
 
 (defun magit-dash-magit-dispatch ()
   "Open `magit-dispatch' in the context of the repository at point."
@@ -2663,499 +2596,6 @@ Signals `user-error' when `magit-dash-repo-list' is empty."
   (with-magit-dash
    (message "magit-dash-repo-dashobard: your (miss)adventure awaits!")))
 
-;;;; Repo overview buffer
-
-(defvar-local magit-dash-overview--repo nil
-  "The `magit-dash-repo' struct displayed in this overview buffer.")
-
-(defvar-local magit-dash-overview--stats nil
-  "Cached stats plist for this overview buffer, or nil when loading.")
-
-(defvar-local magit-dash-overview--pr-counts nil
-  "Cached PR counts cons (TOTAL . MINE) for this overview buffer, or nil when loading.")
-
-(defvar magit-dash-overview-info-map (make-sparse-keymap)
-  "Keymap for magit-dash overview info buffers.  Inherits `help-mode-map' once loaded.")
-
-(with-eval-after-load 'help-mode
-  (set-keymap-parent magit-dash-overview-info-map help-mode-map))
-
-(defvar magit-dash-overview-mode-map
-  (let ((m (make-sparse-keymap)))
-    (set-keymap-parent m magit-dash-overview-info-map)
-    (define-key m (kbd "RET") #'magit-dash-overview-follow)
-    (define-key m (kbd "!")   #'magit-dash-overview-magit-dispatch)
-    (define-key m (kbd "s")   #'magit-dash-overview-magit-status)
-    (define-key m (kbd "d")   #'magit-dash-overview-magit-diff)
-    (define-key m (kbd "l")   #'magit-dash-overview-magit-log)
-    (define-key m (kbd "L")   #'magit-dash-overview-magit-log-full)
-    (define-key m (kbd "c")   #'magit-dash-overview-magit-commit)
-    (define-key m (kbd "C")   #'magit-dash-overview-commit)
-    (define-key m (kbd "f")   #'magit-dash-overview-fetch)
-    (define-key m (kbd "u")   #'magit-dash-overview-pull)
-    (define-key m (kbd "n")   #'magit-dash-overview-sync)
-    (define-key m (kbd "x")   #'magit-dash-overview-run-command)
-    (define-key m (kbd "X")   #'magit-dash-overview-run-command-background)
-    (define-key m (kbd "K")   #'magit-dash-overview-clone-repo)
-    (define-key m (kbd "g")   #'magit-dash-overview-refresh)
-    (define-key m (kbd "b")   #'magit-dash-overview-visit-buffer)
-    (define-key m (kbd "e")   #'magit-dash-overview-find-file)
-    (define-key m (kbd "B")   #'magit-dash-overview-switch-branch)
-    (define-key m (kbd "y")   #'magit-dash-overview-prune-branches)
-    (define-key m (kbd "P")   #'magit-dash-overview-push)
-    (define-key m (kbd "G")   #'magit-dash-overview-stage-all)
-    (define-key m (kbd "w")   #'magit-dash-overview-worktree-add)
-    (define-key m (kbd "k")   #'magit-dash-overview-worktree-delete)
-    (define-key m (kbd "j")   #'magit-dash-overview-builder)
-    (define-key m (kbd "z")   #'magit-dash-overview-agent-shell)
-    (define-key m (kbd "Z")   #'magit-dash-overview-agent-shell-new)
-    (define-key m (kbd "Q")   #'magit-dash-overview-agent-shell-queue)
-    (define-key m (kbd "m")   #'magit-dash-overview-menu)
-    (define-key m (kbd "?")   #'magit-dash-overview-menu)
-    (define-key m (kbd "/")   #'magit-dash-overview-raise-dired)
-    (define-key m (kbd "q")   #'quit-window)
-    m)
-  "Keymap for repo overview buffers.")
-
-(set-keymap-parent magit-dash-overview-mode-map magit-dash-overview-info-map)
-
-(defun magit-dash-overview-raise-dired ()
-  "Raises dired for the current directory."
-  (interactive)
-  (dired-other-window default-directory))
-
-(defun magit-dash-overview--current-repo ()
-  "Return the repo for the current overview buffer or signal `user-error'."
-  (or magit-dash-overview--repo
-      (user-error "No repository associated with this buffer")))
-
-(defun magit-dash-overview-magit-dispatch ()
-  "Open `magit-dispatch' in the context of this overview's repository."
-  (interactive)
-  (magit-dash-gh--with-repo-dir (magit-dash-repo-path (magit-dash-overview--current-repo))
-    (call-interactively #'magit-dispatch)))
-
-(defun magit-dash-overview-magit-status ()
-  "Open magit status for this overview's repository."
-  (interactive)
-  (magit-dash-gh--with-repo-dir (magit-dash-repo-path (magit-dash-overview--current-repo))
-    (magit-status-setup-buffer default-directory)))
-
-(defun magit-dash-overview-magit-diff ()
-  "Open magit diff (dwim) for this overview's repository."
-  (interactive)
-  (magit-dash-gh--with-repo-dir (magit-dash-repo-path (magit-dash-overview--current-repo))
-    (call-interactively #'magit-diff)))
-
-(defun magit-dash-overview-magit-log ()
-  "Open magit log for the current branch in this overview's repository."
-  (interactive)
-  (magit-dash-gh--with-repo-dir (magit-dash-repo-path (magit-dash-overview--current-repo))
-    (call-interactively #'magit-log-current)))
-
-(defun magit-dash-overview-magit-log-full ()
-  "Open the full magit log menu for this overview's repository."
-  (interactive)
-  (magit-dash-gh--with-repo-dir (magit-dash-repo-path (magit-dash-overview--current-repo))
-    (call-interactively #'magit-log)))
-
-(defun magit-dash-overview-magit-commit ()
-  "Open magit commit for this overview's repository."
-  (interactive)
-  (magit-dash-gh--with-repo-dir (magit-dash-repo-path (magit-dash-overview--current-repo))
-    (call-interactively #'magit-commit-create)))
-
-(defun magit-dash-overview-fetch ()
-  "Run git fetch for this overview's repository via magit."
-  (interactive)
-  (magit-dash-gh--with-repo-dir (magit-dash-repo-path (magit-dash-overview--current-repo))
-    (call-interactively #'magit-fetch)))
-
-(defun magit-dash-overview-pull ()
-  "Pull from upstream for this overview's repository via magit."
-  (interactive)
-  (magit-dash-gh--with-repo-dir (magit-dash-repo-path (magit-dash-overview--current-repo))
-    (call-interactively #'magit-pull-from-upstream)))
-
-(defun magit-dash-overview-commit ()
-  "Auto-commit changes in this overview's repository.
-Signals `user-error' when :auto-commit is not configured for this repo."
-  (interactive)
-  (let ((repo (magit-dash-overview--current-repo)))
-    (unless (magit-dash-repo-auto-commit repo)
-      (user-error "Auto-commit is not configured for %s" (magit-dash-repo-name repo)))
-    (if (magit-dash--auto-commit repo)
-        (progn
-          (message "magit-dash: committed changes in %s" (magit-dash-repo-name repo))
-          (magit-dash-overview-refresh))
-      (message "magit-dash: nothing to commit or commit failed in %s"
-               (magit-dash-repo-name repo)))))
-
-(defun magit-dash-overview-sync ()
-  "Run the configured auto operations for this overview's repository asynchronously.
-Signals `user-error' when no auto operations are configured for this repo."
-  (interactive)
-  (let ((repo (magit-dash-overview--current-repo)))
-    (unless (magit-dash--has-sync-configured-p repo)
-      (user-error "No auto operations configured for %s" (magit-dash-repo-name repo)))
-    (with-magit-from-dashboard repo
-      (magit-dash--auto-sync-async
-       repo
-       (lambda (_status &optional _error-text)
-         (magit-dash-overview-refresh))))))
-
-(defun magit-dash-overview-stage-all ()
-  "Stage all changes in the current overview's repository."
-  (interactive)
-  (let ((repo (magit-dash-overview--current-repo)))
-    (if (magit-dash--stage-all repo)
-        (progn
-          (message "magit-dash: staged all changes in %s" (magit-dash-repo-name repo))
-          (magit-dash-overview-refresh))
-      (message "magit-dash: stage all failed in %s" (magit-dash-repo-name repo)))))
-
-(defun magit-dash-overview-push ()
-  "Push current branch to its push remote for this overview's repository."
-  (interactive)
-  (magit-dash-gh--with-repo-dir (magit-dash-repo-path (magit-dash-overview--current-repo))
-    (call-interactively #'magit-push-current-to-pushremote)))
-
-(defun magit-dash-overview-run-command (&optional background)
-  "Open an `annotated-completing-read' picker for this overview's repository and invoke the selected command.
-When BACKGROUND is non-nil (or with prefix argument \\[universal-argument]),
-run the command in the background without displaying its buffer."
-  (interactive "P")
-  (magit-dash--run-command-for (magit-dash-overview--current-repo) background))
-
-(defun magit-dash-overview-run-command-background ()
-  "Open an `annotated-completing-read' picker for this overview's repo and run the command in the background."
-  (interactive)
-  (magit-dash--run-command-for (magit-dash-overview--current-repo) t))
-
-(defun magit-dash-overview-visit-buffer ()
-  "Switch to a buffer visiting a file in this overview's repository."
-  (interactive)
-  (let* ((repo (magit-dash-overview--current-repo))
-         (path (magit-dash-repo-path repo))
-         (bufs (seq-filter (lambda (b)
-                             (string-prefix-p path (or (buffer-file-name b) "")))
-                           (buffer-list))))
-    (unless bufs
-      (user-error "No open buffers visiting files in %s" (magit-dash-repo-name repo)))
-    (switch-to-buffer
-     (completing-read "Visit buffer: " (seq-map #'buffer-name bufs) nil t))))
-
-(defun magit-dash-overview-find-file ()
-  "Open a file in this overview's repository."
-  (interactive)
-  (find-file
-   (read-file-name "Find file: "
-                   (file-name-as-directory
-                    (magit-dash-repo-path (magit-dash-overview--current-repo))))))
-
-(defun magit-dash-overview-switch-branch ()
-  "Switch branch in this overview's repository via magit."
-  (interactive)
-  (magit-dash-gh--with-repo-dir (magit-dash-repo-path (magit-dash-overview--current-repo))
-    (call-interactively #'magit-checkout)))
-
-(defun magit-dash-overview-prune-branches ()
-  "Prune merged branches in this overview's repository."
-  (interactive)
-  (magit-dash-gh--with-repo-dir (magit-dash-repo-path (magit-dash-overview--current-repo))
-    (magit-dash-gh-prune-merged-branches)))
-
-(defun magit-dash-overview--is-worktree-p ()
-  "Return non-nil when the current overview buffer shows a worktree."
-  (when-let* ((repo (ignore-errors (magit-dash-overview--current-repo))))
-    (magit-dash-repo-worktree repo)))
-
-(defun magit-dash-overview-worktree-add ()
-  "Add a new worktree for this overview's repository via magit.
-Signals `user-error' when already viewing a worktree."
-  (interactive)
-  (let ((repo (magit-dash-overview--current-repo)))
-    (when (magit-dash-repo-worktree repo)
-      (user-error "Cannot add a worktree from a worktree overview"))
-    (magit-dash-gh--with-repo-dir (magit-dash-repo-path repo)
-      (call-interactively #'magit-worktree-checkout))
-    (magit-dash-overview-refresh)))
-
-(defun magit-dash-overview-worktree-delete ()
-  "Delete this worktree via magit.
-Signals `user-error' when the current overview is not a worktree."
-  (interactive)
-  (let ((repo (magit-dash-overview--current-repo)))
-    (unless (magit-dash-repo-worktree repo)
-      (user-error "Not a worktree; use 'k' only on worktree overviews"))
-    (magit-dash-gh--with-repo-dir (magit-dash-repo-path repo)
-      (call-interactively #'magit-worktree-delete))
-    (quit-window)))
-
-(defun magit-dash-overview-builder ()
-  "Run `builder-compile-project' in this overview's repository."
-  (interactive)
-  (magit-dash-gh--with-repo-dir (magit-dash-repo-path (magit-dash-overview--current-repo))
-    (call-interactively #'builder-compile-project)))
-
-(defun magit-dash-overview-agent-shell ()
-  "Switch to an agent-shell session for this overview's repository."
-  (interactive)
-  (magit-dash-gh--with-repo-dir (magit-dash-repo-path (magit-dash-overview--current-repo))
-    (call-interactively #'agent-shell-menu-switch-project-session)))
-
-(defun magit-dash-overview-agent-shell-new ()
-  "Start a new agent-shell session in this overview's repository."
-  (interactive)
-  (magit-dash-gh--with-repo-dir (magit-dash-repo-path (magit-dash-overview--current-repo))
-    (call-interactively #'agent-shell-new-shell)))
-
-(defun magit-dash-overview-agent-shell-queue ()
-  "Open the agent-shell queue buffer."
-  (interactive)
-  (call-interactively #'agent-shell-queue-buffer-open))
-
-
-(defun magit-dash-overview--classify-files (lines)
-  "Classify git status porcelain LINES into a categorised alist.
-Each LINE has the form \"XY filename\" where XY is the two-character status.
-Returns alist with keys `staged', `unstaged', `deleted', `untracked'.
-Staged/unstaged deletions appear only under `deleted', not the other buckets."
-  (let ((staged nil) (unstaged nil) (deleted nil) (untracked nil))
-    (seq-do
-     (lambda (raw)
-       (when (>= (length raw) 3)
-         (let* ((x (aref raw 0))
-                (y (aref raw 1))
-                (file (string-trim (substring raw 3))))
-           (cond
-            ((and (eq x ?\?) (eq y ?\?)) (push file untracked))
-            (t
-             (when (or (eq x ?D) (eq y ?D)) (push file deleted))
-             (when (and (not (eq x ? )) (not (eq x ?D)) (not (eq x ?\?)))
-               (push file staged))
-             (when (and (not (eq y ? )) (not (eq y ?D)) (not (eq y ?\?)))
-               (push file unstaged)))))))
-     lines)
-    (list (cons 'staged    (nreverse staged))
-          (cons 'unstaged  (nreverse unstaged))
-          (cons 'deleted   (nreverse deleted))
-          (cons 'untracked (nreverse untracked)))))
-
-(defun magit-dash-overview--insert-file-section (label files)
-  "Insert section LABEL followed by each file in FILES, indented.
-Inserts nothing when FILES is empty."
-  (when files
-    (insert (format "  %s:\n" label))
-    (seq-do (lambda (f) (insert (format "    %s\n" f))) files)))
-
-(defun magit-dash-overview--insert-kv (key value &optional value-face action)
-  "Insert bold KEY (padded to 16 chars) followed by VALUE and a newline.
-When ACTION is non-nil, tag the entire line with `magit-dash-overview-action'
-so `magit-dash-overview-follow' can dispatch on it."
-  (let ((start (point)))
-    (insert (propertize (format "%-16s" (concat key ":")) 'face 'bold))
-    (if value-face
-        (insert (propertize (or value "") 'face value-face))
-      (insert (or value "")))
-    (insert "\n")
-    (when action
-      (put-text-property start (point) 'magit-dash-overview-action action))))
-
-(defun magit-dash-overview--render (repo stats pr-counts)
-  "Insert overview content for REPO into the current buffer.
-STATS is a plist from `magit-dash--collect-stats-async', or nil
-when still loading.  PR-COUNTS is a cons (TOTAL . MINE), or nil when loading."
-  (let ((path (magit-dash-repo-path repo)))
-    (cond
-     ((and (null stats) (magit-dash--repo-missing-p repo))
-      (magit-dash-overview--insert-kv "Repository" (magit-dash-repo-name repo))
-      (magit-dash-overview--insert-kv "Path" path 'warning)
-      (when-let* ((url (magit-dash--default-clone-url repo)))
-        (magit-dash-overview--insert-kv "Clone URL" url))
-      (when (and magit-dash-overview-show-upstream (magit-dash-repo-repo repo))
-        (magit-dash-overview--insert-kv "Upstream Repo" (magit-dash-repo-repo repo)))
-      (magit-dash-overview--insert-kv "Status" "Missing (not cloned)" 'warning)
-      (insert (propertize "\nPress 'K' or run 'magit-dash-overview-clone-repo' to clone this repository.\n"
-                          'face 'font-lock-doc-face)))
-     ((null stats)
-      (insert (propertize "Loading repository data...\n" 'face 'shadow)))
-     (t
-      (let* ((branch (or (plist-get stats :branch) "?"))
-             (behind (or (plist-get stats :behind) 0))
-             (dirty (plist-get stats :dirty))
-             (remote-origin (or (plist-get stats :remote-origin)
-                                (magit-dash-repo-clone-url repo)))
-             (uncommitted-files (plist-get stats :uncommitted-files))
-             (recent-log (plist-get stats :recent-log)))
-        (magit-dash-overview--insert-kv
-         "Repository" (magit-dash-repo-name repo) nil (cons 'magit-status path))
-        (magit-dash-overview--insert-kv
-         "Path" path nil (cons 'dired path))
-        (when (and magit-dash-overview-show-upstream (magit-dash-repo-repo repo))
-          (magit-dash-overview--insert-kv "Upstream Repo" (magit-dash-repo-repo repo)))
-        (when remote-origin
-          (magit-dash-overview--insert-kv "Remote" remote-origin))
-        (magit-dash-overview--insert-kv
-         "Branch" branch 'magit-dash-repo-branch-face)
-        (magit-dash-overview--insert-kv
-         "Behind"
-         (if (> behind 0)
-             (format "%d commits" behind)
-           "up to date")
-         (when (> behind 0) 'warning))
-        (when (or (magit-dash-repo-include-ci repo)
-                  (magit-dash-gh--cache-get path :ci-status))
-          (let ((ci (magit-dash-gh--cache-get path :ci-status)))
-            (if ci
-                (let ((conclusion (plist-get ci :conclusion))
-                      (status (plist-get ci :status)))
-                  (magit-dash-overview--insert-kv
-                   "CI"
-                   (cond
-                    ((equal conclusion "success") "passing (✓)")
-                    ((equal conclusion "failure") "failing (✗)")
-                    ((equal status "in_progress") "running (…)")
-                    (conclusion conclusion)
-                    (t "unknown"))
-                   (cond
-                    ((equal conclusion "success") 'magit-dash-ci-success-face)
-                    ((equal conclusion "failure") 'magit-dash-ci-failure-face)
-                    (t nil))))
-              (magit-dash-overview--insert-kv "CI" "loading..." 'shadow))))
-        (if dirty
-            (let* ((classified (magit-dash-overview--classify-files uncommitted-files)))
-              (insert "\n")
-              (insert (propertize "Uncommitted Files:\n" 'face 'bold))
-              (magit-dash-overview--insert-file-section "Staged"    (alist-get 'staged    classified))
-              (magit-dash-overview--insert-file-section "Unstaged"  (alist-get 'unstaged  classified))
-              (magit-dash-overview--insert-file-section "Deleted"   (alist-get 'deleted   classified))
-              (magit-dash-overview--insert-file-section "Untracked" (alist-get 'untracked classified))
-              (unless (seq-some #'cdr classified)
-                (insert (propertize "  (none)\n" 'face 'shadow))))
-          (magit-dash-overview--insert-kv "Changes" "clean"))
-        (cond
-         ((eq pr-counts 'disabled) t)
-         ((null pr-counts)
-          (insert (propertize "\nPull Requests:\n" 'face 'bold))
-          (insert (propertize "  loading...\n" 'face 'shadow)))
-         ((= (car pr-counts) 0)
-          (insert (propertize "\nPull Requests:\n" 'face 'bold))
-          (insert (propertize "  None\n" 'face 'shadow)))
-         (t
-          (insert (propertize "\nPull Requests:\n" 'face 'bold))
-          (insert (format "  Open:   %d\n" (car pr-counts)))
-          (when (> (cdr pr-counts) 0)
-            (insert (format "  Yours:  %d\n" (cdr pr-counts))))))
-        (when (and recent-log (not (string-empty-p recent-log)))
-          (insert "\n")
-          (insert (propertize "Recent Commits:\n" 'face 'bold))
-          (seq-do
-           (lambda (line)
-             (let ((start (point))
-                   (hash (car (split-string line))))
-               (insert (format "  %s\n" line))
-               (when (and hash (not (string-empty-p hash)))
-                 (put-text-property start (point)
-                                    'magit-dash-overview-action
-                                    (cons 'magit-show-commit hash)))))
-           (split-string recent-log "\n")))
-        (unless (magit-dash-repo-worktree repo)
-          (when-let* ((worktrees (magit-dash-overview--worktrees-for path)))
-            (insert "\n")
-            (insert (propertize "Worktrees:\n" 'face 'bold))
-            (seq-do
-             (lambda (wt)
-               (let ((start (point)))
-                 (insert (format "  %-24s  %s\n"
-                                 (magit-dash-repo-name wt)
-                                 (magit-dash-repo-path wt)))
-                 (put-text-property start (point)
-                                    'magit-dash-overview-action
-                                    (cons 'magit-status (magit-dash-repo-path wt)))))
-             worktrees))))))))
-(defun magit-dash-overview-follow ()
-  "Perform the context-sensitive action for the line at point.
-On the Repository line: open magit status for this repository.
-On the Path line: open dired for this repository's directory.
-On a Recent Commits line: show the commit in magit."
-  (interactive)
-  (when-let* ((action (get-text-property (point) 'magit-dash-overview-action))
-              (type (car action))
-              (data (cdr action)))
-    (pcase type
-      ('magit-status (magit-status-setup-buffer data))
-      ('dired (dired data))
-      ('magit-show-commit
-       (magit-dash-gh--with-repo-dir (magit-dash-repo-path (magit-dash-overview--current-repo))
-         (magit-show-commit data))))))
-
-(defun magit-dash-overview--rerender ()
-  "Clear and re-render the current overview buffer using buffer-local state."
-  (let ((inhibit-read-only t))
-    (erase-buffer)
-    (magit-dash-overview--render
-     magit-dash-overview--repo
-     magit-dash-overview--stats
-     (or (when (magit-dash-repo-include-prs magit-dash-overview--repo)
-	   magit-dash-overview--pr-counts)
-	 'disabled))
-    (goto-char (point-min))))
-
-(defun magit-dash-overview--start-async-load (repo buf)
-  "Start async stats, PR-count, and CI status fetch for REPO; update BUF as each arrives."
-  (magit-dash--collect-stats-async
-   repo
-   (lambda (stats)
-     (when (buffer-live-p buf)
-       (with-current-buffer buf
-         (setq-local magit-dash-overview--stats stats)
-         (magit-dash-overview--rerender)
-         (when (magit-dash-repo-include-prs repo)
-           (magit-dash-overview--pr-counts-async
-            (magit-dash-repo-path repo)
-            (lambda (counts)
-              (when (buffer-live-p buf)
-                (with-current-buffer buf
-                  (setq-local magit-dash-overview--pr-counts counts)
-                  (magit-dash-overview--rerender))))))
-         (when (and (magit-dash-repo-include-ci repo)
-                    (fboundp 'magit-dash-gh-ci-fetch))
-           (magit-dash-gh-ci-fetch
-            repo
-            (lambda (_)
-              (when (buffer-live-p buf)
-                (with-current-buffer buf
-                  (magit-dash-overview--rerender)))))))))))
-
-(defun magit-dash-overview-refresh ()
-  "Re-render the overview buffer with fresh stats fetched asynchronously."
-  (interactive)
-  (when-let* ((repo (magit-dash-overview--current-repo)))
-    (magit-dash-gh--cache-remove (magit-dash-repo-path repo) :stats)
-    (magit-dash-gh--cache-remove (magit-dash-repo-path repo) :pr-counts)
-    (setq-local magit-dash-overview--stats nil)
-    (setq-local magit-dash-overview--pr-counts nil)
-    (magit-dash-overview--rerender)
-    (magit-dash-overview--start-async-load repo (current-buffer))))
-
-(defun magit-dash-overview--open (repo)
-  "Pop to a read-only overview buffer for REPO, loading stats asynchronously."
-  (let* ((buf-name (format "*magit-dash: %s*" (magit-dash-repo-name repo))))
-    (with-help-window buf-name
-      (with-current-buffer standard-output
-        (setq default-directory (magit-dash-repo-path repo))
-        (setq-local magit-dash-overview--repo repo)
-        (setq-local magit-dash-overview--stats nil)
-        (setq-local magit-dash-overview--pr-counts nil)
-        (magit-dash-overview--render repo nil nil)
-        (goto-char (point-min))))
-    (let ((buf (get-buffer buf-name)))
-      (when buf
-        (with-current-buffer buf
-          (use-local-map magit-dash-overview-mode-map))
-        (magit-dash-overview--start-async-load repo buf)))))
-
 ;;;; Transient predicates
 
 (defun magit-dash--dirty-or-unknown-p ()
@@ -3180,30 +2620,6 @@ On a Recent Commits line: show the commit in magit."
   (when-let* ((repo (ignore-errors (magit-dash--repo-at-point))))
     (and (magit-dash-repo-commands repo) t)))
 
-(defun magit-dash-overview--has-changes-p ()
-  "Return non-nil when this overview's repository has uncommitted changes."
-  (and magit-dash-overview--stats
-       (plist-get magit-dash-overview--stats :dirty)))
-
-(defun magit-dash-overview--ahead-p ()
-  "Return non-nil when this overview's repository has commits ahead of upstream."
-  (and magit-dash-overview--stats
-       (> (or (plist-get magit-dash-overview--stats :ahead) 0) 0)))
-
-(defun magit-dash-overview--has-auto-commit-p ()
-  "Return non-nil when this overview's repository has :auto-commit configured."
-  (when-let* ((repo (ignore-errors (magit-dash-overview--current-repo))))
-    (and (magit-dash-repo-auto-commit repo) t)))
-
-(defun magit-dash-overview--has-auto-sync-p ()
-  "Return non-nil when this overview's repository has any auto operation configured."
-  (when-let* ((repo (ignore-errors (magit-dash-overview--current-repo))))
-    (and (magit-dash--has-sync-configured-p repo) t)))
-
-(defun magit-dash-overview--has-commands-p ()
-  "Return non-nil when this overview's repository has commands registered."
-  (when-let* ((repo (ignore-errors (magit-dash-overview--current-repo))))
-    (and (magit-dash-repo-commands repo) t)))
 
 (defun magit-dash--repo-at-point-behind-p ()
   "Return non-nil when the repo at point has commits behind its upstream."
@@ -3381,9 +2797,7 @@ When disabled, only explicitly marked repos are targeted."
   [["Repository"
     ("!"   "Magit dispatch"  magit-dash-magit-dispatch
      :inapt-if-not magit-dash--repo-at-point-p)
-    ("RET" "Open overview"   magit-dash-view
-     :inapt-if-not magit-dash--repo-at-point-p)
-    ("gs"  "Status"          magit-dash-magit-status
+    ("RET" "Status"          magit-dash-magit-status
      :inapt-if-not magit-dash--repo-at-point-p)
     ("d"   "Diff…"           magit-dash-magit-diff
      :inapt-if-not magit-dash--dirty-or-unknown-p)
@@ -3466,67 +2880,14 @@ When disabled, only explicitly marked repos are targeted."
     ("gg"  "Refresh"         magit-dash-refresh)
     ("q"   "Quit"            quit-window)]])
 
-(transient-define-prefix magit-dash-overview-menu ()
-  "Magit actions for the repository shown in this overview buffer."
-  [["Magit"
-    ("cl" "Clone repo"       magit-dash-overview-clone-repo
-     :if magit-dash-overview--is-missing-p)
-    ("!"  "Magit dispatch"   magit-dash-overview-magit-dispatch)
-    ("lc"  "Log (current)"   magit-dash-overview-magit-log)
-    ("lf"  "Log…"            magit-dash-overview-magit-log-full)
-    ("cc"  "Commit"          magit-dash-overview-magit-commit
-     :if magit-dash-overview--has-changes-p)
-    ("ga"   "Stage all"       magit-dash-overview-stage-all
-     :if magit-dash-overview--has-changes-p)
-    ("fr"   "Fetch"            magit-dash-overview-fetch)
-    ("rp"   "Pull"             magit-dash-overview-pull)
-    ("rs"   "Push (repo send)" magit-dash-overview-push
-     :inapt-if-not magit-dash-overview--ahead-p)]
-   ["Navigate"
-    ("b"   "Visit buffer"    magit-dash-overview-visit-buffer)
-    ("ff"  "Find file"       magit-dash-overview-find-file)
-    ("gb"  "Switch branch"   magit-dash-overview-switch-branch)]
-   ["Manage"
-    ("t"   "Compile project (builder)"  magit-dash-overview-builder
-     :if (lambda () (featurep 'builder)))
-    ("rx"   "Run command"                magit-dash-overview-run-command
-     :if magit-dash-overview--has-commands-p)
-    ("rX"   "Run command (background)"   magit-dash-overview-run-command-background
-     :if magit-dash-overview--has-commands-p)
-    ("mp"   "Prune branches"  magit-dash-overview-prune-branches)
-    ("mc"   "Auto-commit"     magit-dash-overview-commit
-     :if magit-dash-overview--has-auto-commit-p)
-    ("sy"   "Sync"            magit-dash-overview-sync
-     :if magit-dash-overview--has-auto-sync-p)
-    ("sb"  "Bump submodules..." magit-dash-bump-submodules-menu)]
-   ["Batch"
-    ("sa"   "Sync all"          magit-dash-sync-all)
-    ("ca"   "Commit all"        magit-dash-commit-all)
-    ("aa"   "Autosync all"      magit-dash-auto-sync)
-    ("pa"   "Push all"          magit-dash-push-all)]
-   ["Agent Shell"
-    ("as"   "Agent shell (project)"  magit-dash-overview-agent-shell
-     :if magit-dash--agent-shell-project-buffers-p)
-    ("an"   "New agent shell"        magit-dash-overview-agent-shell-new)
-    ("aq"   "Agent shell queue"      magit-dash-overview-agent-shell-queue)]
-   ["Worktree"
-    ("w"   "Add worktree"    magit-dash-overview-worktree-add
-     :if-not magit-dash-overview--is-worktree-p)
-    ("k"   "Delete worktree" magit-dash-overview-worktree-delete
-     :if magit-dash-overview--is-worktree-p)
-    ("s"   "Sync symlinks"   magit-dash-overview-worktree-sync-symlinks)]
-   ["View"
-    ("gg"   "Refresh"        magit-dash-overview-refresh)
-    ("q"   "Quit"            quit-window)]])
 
 
 (defun ad:magit-dash--quit-window (orig-fn &optional kill window)
   "Around advice for `quit-window': delete split window in dashboard buffers.
-Only applies in `magit-dash-mode', `magit-dash-overview-mode',
-and `magit-dash-gh-pr-dashboard-mode'.  Falls through otherwise."
+Only applies in `magit-dash-mode' and `magit-dash-gh-pr-dashboard-mode'.
+Falls through otherwise."
   (if (or kill (one-window-p)
           (not (derived-mode-p 'magit-dash-mode
-                               'magit-dash-overview-mode
                                'magit-dash-gh-pr-dashboard-mode)))
       (funcall orig-fn kill window)
     (delete-window (or window (selected-window)))))
