@@ -736,8 +736,25 @@ target directly to the repo struct."
                (lambda (_repo &optional bg) (setq called-bg bg))))
       (magit-dash-run-command-background)
       (should (eq called-bg t)))))
+(ert-deftest magit-dash/run-command-includes-rebuild-when-ci-enabled ()
+  "run-command-for offers 'rebuild' command when repo has :include-ci t."
+  (let ((repo (magit-dash-repo--make :name "test" :path "/tmp/test" :include-ci t))
+        (offered nil))
+    (cl-letf (((symbol-function 'annotated-completing-read)
+               (lambda (choices &rest _args)
+                 (setq offered (mapcar #'car choices))
+                 '("rebuild" . magit-dash-gh-workflow-run)))
+              ((symbol-function 'magit-dash-gh--with-repo-dir)
+               (lambda (_path body-fn) (funcall body-fn)))
+              ((symbol-function 'magit-dash-gh-workflow-run) #'ignore))
+      (magit-dash--run-command-for repo nil)
+      (should (member "rebuild" offered)))))
 
-;;;; magit-dash-filter-by-tag
+(ert-deftest magit-dash/has-commands-p-true-when-ci-enabled ()
+  "has-commands-p returns t for a repo with :include-ci t even without :commands."
+  (let ((repo (magit-dash-repo--make :name "ci-repo" :path "/tmp/ci-repo" :include-ci t)))
+    (cl-letf (((symbol-function 'magit-dash--repo-at-point) (lambda () repo)))
+      (should (magit-dash--has-commands-p)))))
 
 (defmacro magit-dash-test--with-refresh-stubs (&rest body)
   "Run BODY with `magit-dash-refresh' infrastructure stubbed out.

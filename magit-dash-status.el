@@ -52,7 +52,7 @@
 (declare-function magit-dash-gh-prune-merged-branches "magit-dash-gh")
 (declare-function magit-dash-gh-auth-switch "magit-dash-gh")
 (declare-function magit-dash-gh-pr-fetch "magit-dash-gh-pr")
-;;; Configuration
+(declare-function magit-dash-gh-workflow-run "magit-dash-gh-actions")
 
 (defgroup magit-dash-status nil
   "GitHub status and PR integration in `magit-status' buffers."
@@ -609,10 +609,10 @@ Calls CALLBACK with list of PR plists."
    ("lf" "Fetch & view failed logs"     magit-dash-status-ci-failed-logs)
    ("la" "Fetch & view full logs"       magit-dash-status-ci-full-logs)
    ("f" "Fix CI with agent-shell"      magit-dash-status-ci-fix)
+   ("w" "Trigger workflow run"         magit-dash-gh-workflow-run)
    ("a" "Workflow runs list"           magit-dash-status-ci-runs-list)
    ("r" "Refresh CI status"            magit-dash-status-ci-refresh)
    ("q" "Quit"                         transient-quit-one)])
-
 ;;; Transient Actions for PR
 
 (defun magit-dash-status--current-pr ()
@@ -769,9 +769,10 @@ Calls CALLBACK with list of PR plists."
    ("p" "PR dashboard"                 magit-gh-pr-dash)
    ("o" "Open / switch repository"     magit-dash-open-repo)]
   ["Actions"
-   ("-p" "Prune merged branches"        magit-dash-gh-prune-merged-branches)
+   ("!" "Prune merged branches"        magit-dash-gh-prune-merged-branches)
    ("l" "Fetch CI logs"                magit-dash-gh-actions-fetch)
    ("c" "Fetch PR comments"            magit-dash-gh-pr-fetch)
+   ("w" "Trigger workflow run"         magit-dash-gh-workflow-run)
    ("u" "Switch users"                 magit-dash-gh-auth-switch)
    ("r" "Refresh status data"          magit-dash-status-refresh-all)]
   ["Quit"

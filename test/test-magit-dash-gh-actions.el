@@ -220,5 +220,49 @@ selected candidate's triple-form target directly to the run alist."
                    (funcall on-success "[]"))))
         (should-error (magit-dash-gh-actions--step-list-pr ctx) :type 'user-error)))))
 
+;;; Workflow run tests
+
+(ert-deftest magit-dash-gh-actions/workflow-run-with-explicit-workflow ()
+  "workflow-run with explicit workflow name runs `gh workflow run`."
+  (let ((gh-args nil)
+        (repo-dir "/tmp/testrepo"))
+    (cl-letf (((symbol-function 'magit-dash-gh--check-gh) #'ignore)
+              ((symbol-function 'magit-dash-gh--run-process)
+               (lambda (args _dir on-success &optional _on-error)
+                 (setq gh-args args)
+                 (funcall on-success ""))))
+      (magit-dash-gh-workflow-run "build.yml" repo-dir "main")
+      (should (equal '("workflow" "run" "build.yml" "--ref" "main") gh-args)))))
+
+(ert-deftest magit-dash-gh-actions/workflow-run-with-inputs ()
+  "workflow-run forwards inputs as -f key=value flags."
+  (let ((gh-args nil)
+        (repo-dir "/tmp/testrepo"))
+    (cl-letf (((symbol-function 'magit-dash-gh--check-gh) #'ignore)
+              ((symbol-function 'magit-dash-gh--run-process)
+               (lambda (args _dir on-success &optional _on-error)
+                 (setq gh-args args)
+                 (funcall on-success ""))))
+      (magit-dash-gh-workflow-run "deploy.yml" repo-dir "main" '(("env" . "prod") ("dry-run" . "false")))
+      (should (member "-f" gh-args))
+      (should (member "env=prod" gh-args))
+      (should (member "dry-run=false" gh-args)))))
+
+(ert-deftest magit-dash-gh-actions/workflow-run-auto-selects-single-active-workflow ()
+  "workflow-run without workflow arg fetches list and auto-runs single active workflow."
+  (let ((gh-calls nil)
+        (repo-dir "/tmp/testrepo")
+        (workflows `[((id . 1) (name . "CI") (path . ".github/workflows/ci.yml") (state . "active"))]))
+    (cl-letf (((symbol-function 'magit-dash-gh--check-gh) #'ignore)
+              ((symbol-function 'magit-dash-gh--run-process)
+               (lambda (args _dir on-success &optional _on-error)
+                 (push args gh-calls)
+                 (if (equal (cadr args) "list")
+                     (funcall on-success (json-serialize workflows))
+                   (funcall on-success "")))))
+      (magit-dash-gh-workflow-run nil repo-dir "main")
+      (should (= 2 (length gh-calls)))
+      (should (equal '("workflow" "run" ".github/workflows/ci.yml" "--ref" "main") (car gh-calls))))))
+
 (provide 'test-magit-dash-gh-actions)
 ;;; test-magit-dash-gh-actions.el ends here

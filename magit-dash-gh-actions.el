@@ -23,16 +23,21 @@
 ;; the run state and collected artifacts.
 
 ;;; Code:
-
 (require 'cl-lib)
 (require 'map)
+(require 'subr-x)
+(require 'annotated-completing-read)
 
 (require 'magit-dash-gh)
 
 (declare-function magit-toplevel "magit-git")
 (declare-function magit-get-current-branch "magit-git")
-
-;;; Configuration
+(declare-function magit-dash-repo-p "magit-dash")
+(declare-function magit-dash-repo-path "magit-dash")
+(declare-function magit-dash-repo-name "magit-dash")
+(declare-function magit-dash--repo-at-point "magit-dash")
+(declare-function magit-dash--repo-at-point-p "magit-dash")
+(declare-function magit-dash-status-ci-refresh "magit-dash-status")
 
 (defvar magit-dash-gh-actions-run-limit 10
   "Maximum number of CI runs shown when interactively selecting a run.")
@@ -276,6 +281,102 @@ Creates an artifact directory under plans/ containing:
     (if run-id
         (magit-dash-gh-actions--step-run-info (plist-put ctx :run-id run-id))
       (magit-dash-gh-actions--step-list ctx))))
+
+;;; Workflow Dispatch API
+
+(defun magit-dash-gh-actions--select-workflow (workflows)
+  "Prompt user to select a workflow from WORKFLOWS alist."
+  (let* ((candidates
+          (seq-map (lambda (wf)
+                     (let* ((name (or (map-elt wf 'name) ""))
+                            (path (or (map-elt wf 'path) ""))
+                            (state (or (map-elt wf 'state) ""))
+                            (ann (format "%s [%s]" path state)))
+                       (cons name (cons ann wf))))
+                   workflows))
+         (picked (annotated-completing-read
+                  candidates
+                  :prompt "Select workflow: "
+                  :require-match t)))
+    (if (consp picked) (cdr picked) picked)))
+
+(defun magit-dash-gh-actions--run-workflow-process (repo-path workflow ref inputs on-complete)
+  "Execute `gh workflow run' for WORKFLOW on REF in REPO-PATH."
+  (let* ((wf-str (if (symbolp workflow) (symbol-name workflow) (format "%s" workflow)))
+         (args (list "workflow" "run" wf-str "--ref" ref)))
+    (dolist (input inputs)
+      (setq args (append args (list "-f" (format "%s=%s" (car input) (cdr input))))))
+    (message "magit-gh: triggering workflow '%s' on %s..." wf-str ref)
+    (magit-dash-gh--run-process
+     args
+     repo-path
+     (lambda (_output)
+       (message "magit-gh: triggered workflow '%s' on branch '%s'" wf-str ref)
+       (when (fboundp 'magit-dash-status-ci-refresh)
+         (run-with-timer 2 nil (lambda ()
+                                 (when (fboundp 'magit-dash-status-ci-refresh)
+                                   (magit-dash-status-ci-refresh)))))
+       (when on-complete (funcall on-complete 'ok)))
+     (lambda (err code)
+       (message "magit-gh: failed to trigger workflow '%s' (exit %d): %s"
+                wf-str code (string-trim err))
+       (when on-complete (funcall on-complete 'error err))))))
+
+;;;###autoload
+(defun magit-dash-gh-workflow-run (&optional workflow repo-or-path ref inputs on-complete)
+  "Trigger a GitHub Actions WORKFLOW run for REPO-OR-PATH on branch REF.
+When WORKFLOW is nil, fetches available active workflows and prompts
+if more than one exists (or selects the only one).
+REPO-OR-PATH defaults to the repository at point or `default-directory'.
+REF defaults to the current branch (or 'main').
+INPUTS is an optional alist of (KEY . VALUE) strings passed as -f KEY=VALUE.
+ON-COMPLETE is called with 'ok or 'error on finish."
+  (interactive)
+  (magit-dash-gh--check-gh)
+  (let* ((repo-path (cond
+                     ((stringp repo-or-path) (expand-file-name repo-or-path))
+                     ((and (fboundp 'magit-dash-repo-p) (magit-dash-repo-p repo-or-path))
+                      (magit-dash-repo-path repo-or-path))
+                     ((and (fboundp 'magit-dash--repo-at-point-p) (magit-dash--repo-at-point-p))
+                      (magit-dash-repo-path (magit-dash--repo-at-point)))
+                     (t (or (magit-toplevel) default-directory))))
+         (target-ref (or ref
+                         (let ((default-directory repo-path))
+                           (magit-get-current-branch))
+                         "main")))
+    (if workflow
+        (magit-dash-gh-actions--run-workflow-process repo-path workflow target-ref inputs on-complete)
+      ;; Fetch workflows asynchronously then prompt
+      (message "magit-gh: fetching workflows for %s..." (file-name-nondirectory (directory-file-name repo-path)))
+      (magit-dash-gh--run-process
+       (list "workflow" "list" "--json" "id,name,path,state")
+       repo-path
+       (lambda (output)
+         (let* ((all-workflows (condition-case nil
+                                   (json-parse-string output :array-type 'list :object-type 'alist)
+                                 (error nil)))
+                (active (seq-filter (lambda (w) (equal (map-elt w 'state) "active")) all-workflows)))
+           (unless active
+             (setq active all-workflows))
+           (cond
+            ((null active)
+             (message "magit-gh: no workflows found for %s" (file-name-nondirectory (directory-file-name repo-path)))
+             (when on-complete (funcall on-complete 'error "no workflows found")))
+            ((= (length active) 1)
+             (let ((wf-target (or (map-elt (car active) 'path) (map-elt (car active) 'name))))
+               (magit-dash-gh-actions--run-workflow-process repo-path wf-target target-ref inputs on-complete)))
+            (t
+             (let* ((selected (magit-dash-gh-actions--select-workflow active))
+                    (wf-target (or (map-elt selected 'path) (map-elt selected 'name))))
+               (magit-dash-gh-actions--run-workflow-process repo-path wf-target target-ref inputs on-complete))))))
+       (lambda (err code)
+         (message "magit-gh: failed to list workflows (exit %d): %s" code (string-trim err))
+         (when on-complete (funcall on-complete 'error err)))))))
+
+;;;###autoload
+(defalias 'magit-gh-workflow-run #'magit-dash-gh-workflow-run)
+;;;###autoload
+(defalias 'magit-dash-workflow-run #'magit-dash-gh-workflow-run)
 
 (provide 'magit-dash-gh-actions)
 

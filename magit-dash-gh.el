@@ -29,6 +29,7 @@
 (declare-function magit-get-current-branch "magit-git")
 (declare-function magit-branch-delete "magit-branch")
 (declare-function magit-dash-gh-actions-fetch "magit-dash-gh-actions")
+(declare-function magit-dash-gh-workflow-run "magit-dash-gh-actions")
 (declare-function magit-dash-gh-pr-fetch "magit-dash-gh-pr")
 (declare-function magit-dash-open "magit-dash")
 (declare-function magit-dash-open-repo "magit-dash-open")
@@ -549,6 +550,7 @@ to the other configured account."
    ("P" "Prune merged branches"        magit-dash-gh-prune-merged-branches)
    ("l" "Fetch CI logs"                magit-dash-gh-actions-fetch)
    ("c" "Fetch PR comments"            magit-dash-gh-pr-fetch)
+   ("w" "Trigger workflow run"         magit-dash-gh-workflow-run)
    ("u" "Switch users"                 magit-dash-gh-auth-switch)
    ("r" "Refresh status data"          magit-dash-status-refresh-all)]
   ["Quit"

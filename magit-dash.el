@@ -62,14 +62,11 @@
 (declare-function magit-worktree-delete "magit-worktree")
 (declare-function agent-shell-switch-buffer "agent-shell")
 (declare-function agent-shell-menu-switch-project-session "agent-shell-menu")
-(declare-function agent-shell-new-shell "agent-shell")
-(declare-function agent-shell-queue-buffer-open "agent-shell-queue")
-(declare-function agent-shell-menu-project-buffers "agent-shell-menu")
-
+(declare-function magit-dash-gh-ci-open "magit-dash-gh-ci")
+(declare-function magit-dash-gh-ci-fetch "magit-dash-gh-ci")
+(declare-function magit-dash-gh-workflow-run "magit-dash-gh-actions")
 (declare-function builder-compile-project "builder")
 (declare-function magit-gh-pr-dash "magit-dash-gh-pr")
-(declare-function magit-dash-gh-pr-dashboard-open "magit-dash-gh-pr")
-(declare-function magit-dash-gh-pr-dashboard-mode "magit-dash-gh-pr")
 
 (defconst magit-dash-buffer-name "*magit-dash-repos*")
 
@@ -365,22 +362,32 @@ Returns t when the commit succeeds, nil otherwise."
 the selected command with `default-directory' set to REPO's repository root.
 When BACKGROUND is non-nil or `magit-dash-run-command-in-background' is non-nil,
 runs the command in the background without popping up or stealing focus."
-  (when-let* ((commands (or (magit-dash-repo-commands repo)
-			    (user-error "No commands registered for %s" (magit-dash-repo-name repo))))
-	      (picked (annotated-completing-read
-                   (seq-map (lambda (cmd)
-			      (let* ((label (format "%s" (car cmd)))
-				     (norm (magit-dash--normalize-command-op (cdr cmd)))
-				     (target (car norm))
-				     (ann (if (stringp target) target (format "%s" target))))
-				(cons label (cons ann (cons label (cdr cmd))))))
-                            commands)
-                   :prompt (format "%s command%s: "
-                                   (magit-dash-repo-name repo)
-                                   (if (or background magit-dash-run-command-in-background)
-                                       " (background)" ""))
-                   :require-match t)))
-    (let* ((cmd-name (if (consp picked)
+  (let* ((explicit-commands (magit-dash-repo-commands repo))
+         (commands (if (magit-dash-repo-include-ci repo)
+                       (if (assoc "rebuild" explicit-commands)
+                           explicit-commands
+                         (append explicit-commands
+                                 '(("rebuild" . magit-dash-gh-workflow-run))))
+                     explicit-commands)))
+    (unless commands
+      (user-error "No commands registered for %s" (magit-dash-repo-name repo)))
+    (let* ((picked (annotated-completing-read
+                    (seq-map (lambda (cmd)
+                               (let* ((label (format "%s" (car cmd)))
+                                      (norm (magit-dash--normalize-command-op (cdr cmd)))
+                                      (target (car norm))
+                                      (ann (cond
+                                            ((eq target 'magit-dash-gh-workflow-run) "workflow run")
+                                            ((stringp target) target)
+                                            (t (format "%s" target)))))
+                                 (cons label (cons ann (cons label (cdr cmd))))))
+                             commands)
+                    :prompt (format "%s command%s: "
+                                    (magit-dash-repo-name repo)
+                                    (if (or background magit-dash-run-command-in-background)
+                                        " (background)" ""))
+                    :require-match t))
+           (cmd-name (if (consp picked)
                          (car picked)
                        (or (car (seq-find (lambda (c) (equal (cdr c) picked)) commands))
                            "cmd")))
@@ -425,7 +432,6 @@ runs the command in the background without popping up or stealing focus."
                 (message "magit-dash: [%s] function '%s' finished" repo-name cmd-name))
             (funcall target)))
          (t (user-error "Command has unsupported type %s" (type-of target))))))))
-;;;; Stats collection
 
 (defun magit-dash--resolve-git-dir (path)
   "Return the git directory for the repository, worktree, or submodule at PATH.
@@ -2616,10 +2622,10 @@ Signals `user-error' when `magit-dash-repo-list' is empty."
     (and (magit-dash--has-sync-configured-p repo) t)))
 
 (defun magit-dash--has-commands-p ()
-  "Return non-nil when the repo at point has commands registered."
+  "Return non-nil when the repo at point has commands registered or CI enabled."
   (when-let* ((repo (ignore-errors (magit-dash--repo-at-point))))
-    (and (magit-dash-repo-commands repo) t)))
-
+    (or (and (magit-dash-repo-commands repo) t)
+        (and (magit-dash-repo-include-ci repo) t))))
 
 (defun magit-dash--repo-at-point-behind-p ()
   "Return non-nil when the repo at point has commits behind its upstream."
@@ -2775,6 +2781,8 @@ When disabled, only explicitly marked repos are targeted."
     ("co"  "Open last run"   magit-dash-gh-ci-open-at-point
      :inapt-if-not magit-dash--repo-has-ci-status-p)
     ("cx"  "Fix CI (agent)"  magit-dash-gh-ci-fix-at-point
+     :inapt-if-not magit-dash--repo-has-ci-p)
+    ("cw"  "Trigger workflow" magit-dash-gh-workflow-run
      :inapt-if-not magit-dash--repo-has-ci-p)]
    ["Worktree"
     ("wa"  "Add"             magit-dash-worktree-add
