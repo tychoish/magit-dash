@@ -1370,6 +1370,20 @@ without real git repos or a live dashboard buffer."
           (set-buffer-modified-p nil))
         (kill-buffer buf)))))
 
+(ert-deftest magit-dash/drop-stashes-calls-magit-stash-clear ()
+  "drop-stashes resolves repo path and calls magit-stash-clear interactively."
+  (let ((resolved nil)
+        (stash-cleared nil))
+    (cl-letf (((symbol-function 'magit-dash--resolve-repo-path)
+               (lambda () (setq resolved t) "/tmp/test-repo"))
+              ((symbol-function 'magit-stash-clear)
+               (lambda ()
+                 (interactive)
+                 (setq stash-cleared (equal default-directory "/tmp/test-repo/")))))
+      (magit-dash-drop-stashes)
+      (should resolved)
+      (should stash-cleared))))
+
 (ert-deftest magit-dash/run-target-symbol-resolves-via-commands ()
   (let ((repo (magit-dash-repo--make :name "r" :path "/tmp/r"
                                      :commands '((docs . "make docs"))))

@@ -60,6 +60,7 @@
 (declare-function magit-checkout "magit-branch")
 (declare-function magit-worktree-checkout "magit-worktree")
 (declare-function magit-worktree-delete "magit-worktree")
+(declare-function magit-stash-clear "magit-stash")
 (declare-function agent-shell-switch-buffer "agent-shell")
 (declare-function agent-shell-menu-switch-project-session "agent-shell-menu")
 (declare-function magit-dash-gh-ci-open "magit-dash-gh-ci")
@@ -2507,6 +2508,17 @@ among the registered repositories when neither applies."
   (interactive)
   (let ((default-directory (file-name-as-directory (magit-dash--resolve-repo-path))))
     (magit-dash-gh-prune-merged-branches)))
+
+;;;###autoload
+(defun magit-dash-drop-stashes ()
+  "Drop all stashes in a repository.
+Uses the repository at point when called from a `magit-dash' buffer,
+otherwise the git repository containing the current buffer (works from any
+`magit' buffer or a file/`dired' buffer inside a repo), and finally prompts
+among the registered repositories when neither applies."
+  (interactive)
+  (let ((default-directory (file-name-as-directory (magit-dash--resolve-repo-path))))
+    (call-interactively #'magit-stash-clear)))
 
 ;;;###autoload
 (defun magit-dash-save-project-buffers ()
