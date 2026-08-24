@@ -2871,7 +2871,7 @@ When disabled, only explicitly marked repos are targeted."
      :inapt-if-not magit-dash--has-commands-p)
     ("y"   "Prune branches"  magit-dash-prune-branches
      :inapt-if-not magit-dash--repo-at-point-p)
-    ("ps"  "projectile/project save buffers" magit-dash-save-project-buffers
+    ("ps"  "project save buffers" magit-dash-save-project-buffers
      :inapt-if-not magit-dash--repo-at-point-p)
     ("sb"  "Bump submodules" magit-dash-bump-submodules-menu
      :inapt-if-not magit-dash--repo-at-point-p)]
