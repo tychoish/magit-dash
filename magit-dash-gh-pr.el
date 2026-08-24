@@ -493,13 +493,13 @@ component of REPO-SLUG against the final directory component of each entry."
                     (magit-dash-repo-path r)))
                 magit-dash-repo-list))))
 
-(defun magit-dash-gh-pr-dashboard-open-worktree ()
-  "Create and open a git worktree for the pull request at point.
+(defun magit-dash-gh-pr-dashboard-open-worktree (&optional entry)
+  "Create and open a git worktree for the pull request at point (or ENTRY).
 If a worktree for this PR already exists, switches to its magit status buffer.
 Otherwise, fetches the PR branch from GitHub, adds the worktree, and opens
 its magit status buffer."
   (interactive)
-  (let* ((entry (magit-dash-gh-pr-dashboard--entry-at-point))
+  (let* ((entry (or entry (magit-dash-gh-pr-dashboard--entry-at-point)))
          (pr-num (plist-get entry :number))
          (repo (plist-get entry :repo))
          (local-path (or (magit-dash-gh-pr-dashboard--find-local-path repo)

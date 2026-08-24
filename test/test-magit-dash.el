@@ -662,8 +662,6 @@ target directly to the repo struct."
         (started nil))
     (cl-letf (((symbol-function 'annotated-completing-read)
                (lambda (_choices &rest _args) '("build" . "make build")))
-              ((symbol-function 'magit-dash-gh--with-repo-dir)
-               (lambda (_path body-fn) (funcall body-fn)))
               ((symbol-function 'compilation-start)
                (lambda (cmd &optional _mode name-fn)
                  (setq started (list cmd (funcall name-fn nil)))
@@ -679,8 +677,6 @@ target directly to the repo struct."
         (has-no-window-rule nil))
     (cl-letf (((symbol-function 'annotated-completing-read)
                (lambda (_choices &rest _args) '("build" . "make build")))
-              ((symbol-function 'magit-dash-gh--with-repo-dir)
-               (lambda (_path body-fn) (funcall body-fn)))
               ((symbol-function 'compilation-start)
                (lambda (cmd &optional _mode name-fn)
                  (setq started cmd)
@@ -702,8 +698,6 @@ target directly to the repo struct."
                                      :commands '(("bg-test" . ("make bg-test" :background t))))))
     (cl-letf (((symbol-function 'annotated-completing-read)
                (lambda (_choices &rest _args) '("bg-test" . ("make bg-test" :background t))))
-              ((symbol-function 'magit-dash-gh--with-repo-dir)
-               (lambda (_path body-fn) (funcall body-fn)))
               ((symbol-function 'compilation-start)
                (lambda (cmd &optional _mode name-fn)
                  (should (equal cmd "make bg-test"))
@@ -744,8 +738,6 @@ target directly to the repo struct."
                (lambda (choices &rest _args)
                  (setq offered (mapcar #'car choices))
                  '("rebuild" . magit-dash-gh-workflow-run)))
-              ((symbol-function 'magit-dash-gh--with-repo-dir)
-               (lambda (_path body-fn) (funcall body-fn)))
               ((symbol-function 'magit-dash-gh-workflow-run) #'ignore))
       (magit-dash--run-command-for repo nil)
       (should (member "rebuild" offered)))))
@@ -1374,6 +1366,8 @@ without real git repos or a live dashboard buffer."
             (should project-current-called)
             (should project-buffers-called)
             (should saved))
+        (with-current-buffer buf
+          (set-buffer-modified-p nil))
         (kill-buffer buf)))))
 
 (ert-deftest magit-dash/run-target-symbol-resolves-via-commands ()
@@ -1742,7 +1736,7 @@ they are not consulted even when their own auto-* flags are set."
   (let ((magit-dash-repo-list nil))
     (cl-letf (((symbol-function 'magit-dash--repo-at-point)
                (lambda () (magit-dash-repo--make :name "r" :path "/nonexistent/path")))
-              ((symbol-function 'buffer-list) (lambda () nil)))
+              ((symbol-function 'buffer-list) (lambda (&optional _) nil)))
       (should-error (magit-dash-visit-buffer) :type 'user-error))))
 
 (ert-deftest magit-dash/worktree-delete-user-error-when-not-worktree ()
@@ -2646,6 +2640,8 @@ The bug was that add-text-properties returns t, not the modified string."
     (cl-letf (((symbol-function 'tabulated-list-get-id) (lambda () repo))
               ((symbol-function 'magit-dash--repo-missing-p) (lambda (_) nil)))
       (with-temp-buffer
+        (insert (propertize " " 'tabulated-list-id repo))
+        (goto-char (point-min))
         (magit-dash--update-default-directory)
         (should (equal default-directory (file-name-as-directory (expand-file-name default-directory))))))))
 
@@ -2656,6 +2652,8 @@ The bug was that add-text-properties returns t, not the modified string."
     (cl-letf (((symbol-function 'tabulated-list-get-id) (lambda () repo))
               ((symbol-function 'magit-dash--repo-missing-p) (lambda (_) t)))
       (with-temp-buffer
+        (insert (propertize " " 'tabulated-list-id repo))
+        (goto-char (point-min))
         (magit-dash--update-default-directory)
         (should (equal default-directory "/tmp/nonexistent-parent-dir-12345/"))))))
 

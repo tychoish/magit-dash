@@ -230,5 +230,18 @@
   (when (boundp 'magit-mode-map)
     (should (eq (lookup-key magit-mode-map ".") #'magit-dash-dispatch))))
 
+(ert-deftest magit-dash-status/pr-checks-calls-fetch-for-pr ()
+  "pr-checks calls magit-dash-gh-actions-fetch-for-pr when a PR is present."
+  (let ((pr-args nil))
+    (cl-letf (((symbol-function 'fboundp)
+               (lambda (sym) (if (eq sym 'magit-gh-pr-checks) nil (cl-typep sym '(or symbol function)))))
+              ((symbol-function 'magit-dash-status--current-pr)
+               (lambda () '(:number 99)))
+              ((symbol-function 'magit-dash-status--repo-root)
+               (lambda () "/tmp/fake-repo"))
+              ((symbol-function 'magit-dash-gh-actions-fetch-for-pr)
+               (lambda (num dir) (setq pr-args (list num dir)))))
+      (magit-dash-status-pr-checks)
+      (should (equal '(99 "/tmp/fake-repo") pr-args)))))
 (provide 'test-magit-dash-status)
 ;;; test-magit-dash-status.el ends here

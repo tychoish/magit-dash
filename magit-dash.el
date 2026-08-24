@@ -104,6 +104,29 @@
   "List of `magit-dash-repo' structs registered for dashboard display.
 Use `magit-dash-register' to add entries.")
 
+(defmacro with-magit-dash (&rest body)
+  "Execute BODY in the `magit-dash' buffer.
+Refreshes the dashboard and ensures `magit-dash-mode' is active."
+  `(progn
+     (let* ((buf (get-buffer-create magit-dash-buffer-name))
+	    (default-directory (if (eq (current-buffer) buf)
+				   (expand-file-name "~/")
+				 default-directory)))
+     (with-current-buffer buf
+       (unless (derived-mode-p 'magit-dash-mode)
+	 (magit-dash-mode))
+       (magit-dash-refresh)
+       ,@body))))
+
+(defmacro magit-dash--with-repo (repo &rest body)
+  "Execute BODY with `default-directory' set to REPO path."
+  (declare (indent 1))
+  (let ((path (make-symbol "path")))
+    `(let* ((,path (file-name-as-directory (magit-dash-repo-path ,repo)))
+            (default-directory ,path))
+       ,@body)))
+
+
 
 (defcustom magit-dash-run-command-in-background nil
   "When non-nil, `magit-dash-run-command' executes commands in the background by default."
@@ -124,20 +147,21 @@ Use `magit-dash-register' to add entries.")
   "Fixed vocabulary of slots within a repo's `:remote-sync' plist.")
 
 (defun magit-dash--validate-remote-sync (remote-sync)
-  "Signal `user-error' when REMOTE-SYNC uses keys outside `magit-dash--remote-sync-slots'
-or has an invalid `:merge-method'."
+  "Validate REMOTE-SYNC plist.
+Signal `user-error' when REMOTE-SYNC contains keys outside
+`magit-dash--remote-sync-slots' or has an invalid `:merge-method'."
   (when remote-sync
     (unless (listp remote-sync)
-      (user-error "magit-dash: :remote-sync must be a plist"))
+      (user-error "Magit-dash: :remote-sync must be a plist"))
     (seq-do
      (lambda (pair)
        (let ((slot (car pair)))
          (unless (memq slot magit-dash--remote-sync-slots)
-           (user-error "magit-dash: unknown remote-sync slot %s" slot))))
+           (user-error "Magit-dash: unknown remote-sync slot %s" slot))))
      (seq-partition remote-sync 2))
     (when-let ((method (plist-get remote-sync :merge-method)))
       (unless (memq (if (symbolp method) method (intern method)) '(merge rebase))
-        (user-error "magit-dash: :merge-method must be 'merge or 'rebase, got %S" method)))))
+        (user-error "Magit-dash: :merge-method must be 'merge or 'rebase, got %S" method)))))
 
 (defvar magit-dash-global-hooks nil
   "Plist of `:pre'/`:post' hooks applied to every repo's operations.
@@ -149,7 +173,8 @@ a real use case.  Set with `magit-dash-set-global-hooks' so the shape is
 validated; do not `setq' directly.")
 
 (defun magit-dash--validate-hooks (hooks &optional allow-operation)
-  "Signal `user-error' when HOOKS uses an operation or slot outside the
+  "Validate HOOKS structure.
+Signal `user-error' when HOOKS contains an operation or slot outside the
 fixed vocabulary of `magit-dash--hook-operations'/`magit-dash--hook-slots'.
 `:operation' is only valid per-repo; pass ALLOW-OPERATION non-nil when
 validating a `:hooks' argument, nil for `magit-dash-global-hooks'."
@@ -157,14 +182,14 @@ validating a `:hooks' argument, nil for `magit-dash-global-hooks'."
    (lambda (op-pair)
      (let ((op (car op-pair)) (op-plist (cadr op-pair)))
        (unless (memq op magit-dash--hook-operations)
-         (user-error "magit-dash: unknown hook operation %s" op))
+         (user-error "Magit-dash: unknown hook operation %s" op))
        (seq-do
         (lambda (slot-pair)
           (let ((slot (car slot-pair)))
             (unless (memq slot magit-dash--hook-slots)
-              (user-error "magit-dash: unknown hook slot %s" slot))
+              (user-error "Magit-dash: unknown hook slot %s" slot))
             (when (and (eq slot :operation) (not allow-operation))
-              (user-error "magit-dash: :operation is not valid in global hooks"))))
+              (user-error "Magit-dash: :operation is not valid in global hooks"))))
         (seq-partition op-plist 2))))
    (seq-partition hooks 2)))
 
@@ -174,8 +199,9 @@ validating a `:hooks' argument, nil for `magit-dash-global-hooks'."
   (setq magit-dash-global-hooks hooks))
 
 (defun magit-dash--merge-hook-op (base addition)
-  "Merge op-plists BASE and ADDITION, preferring BASE's `:operation' and
-appending `:pre'/`:post' lists (BASE's entries first)."
+  "Merge op-plists BASE and ADDITION.
+Prefer BASE's `:operation' and append `:pre'/`:post' lists (BASE's entries
+first)."
   (list :pre (append (plist-get base :pre) (plist-get addition :pre))
         :post (append (plist-get base :post) (plist-get addition :post))
         :operation (or (plist-get base :operation) (plist-get addition :operation))))
@@ -199,6 +225,11 @@ appending `:pre'/`:post' lists (BASE's entries first)."
 
 (cl-defun magit-dash-register (&key name path repo include-prs include-ci auto-fetch auto-pull auto-commit auto-push auto-sync-command hooks tags commands sort-hint worktree sync-branches timer clone-url remote-url worktree-symlinks symlinks remote-sync)
   "Register or replace a repository with NAME at absolute PATH.
+REPO is the upstream repository path or URL for bootstrapping.
+INCLUDE-PRS, INCLUDE-CI, AUTO-FETCH, AUTO-PULL, AUTO-COMMIT, AUTO-PUSH,
+AUTO-SYNC-COMMAND, HOOKS, TAGS, COMMANDS, SORT-HINT, WORKTREE,
+SYNC-BRANCHES, TIMER, CLONE-URL, REMOTE-URL, WORKTREE-SYMLINKS, SYMLINKS,
+and REMOTE-SYNC configure the repository settings.
 Replaces any existing entry with the same name or path.
 
 Keyword arguments:
@@ -246,15 +277,16 @@ Keyword arguments:
                   Repos without a sort-hint appear after all sorted repos.
   :worktree       non-nil when this entry represents a git worktree.
   :timer          plist forwarded to `magit-dash-register-sync-timer' (requires
-                  magit-dash-timer).  Example: \='(:kind idle :idle-delay 300).
+                  magit-dash-timer).  Example: \\='(:kind idle :idle-delay 300).
   :clone-url      URL to clone repository from when missing on disk.
   :remote-url     alias for :clone-url.
-  :worktree-symlinks  list of relative paths to symlink from main repo to worktrees.
+  :worktree-symlinks  list of relative paths to symlink from main repo to
+                      worktrees.
   :symlinks       alias for :worktree-symlinks.
-  :remote-sync    plist (:hosts, :branch, :path, :merge-method) declaring remote sync mirrors."
+  :remote-sync    plist (:hosts, :branch, :path, :merge-method) declaring
+                  remote sync mirrors."
   (unless (and name path)
-    (user-error "must specify name (%s) and path (%s)" name path))
-
+    (user-error "Magit-dash: must specify name (%s) and path (%s)" name path))
   (when auto-sync-command
     (display-warning
      'magit-dash
@@ -333,13 +365,13 @@ Includes hostname, Emacs instance ID, and the current sync trigger."
           (symbol-name magit-dash-sync-trigger)))
 
 (defun magit-dash--stage-all (repo)
-  "Stage all changes in REPO. Returns t on success."
+  "Stage all files in REPO.  Return t on success."
   (magit-dash-gh--with-repo-dir (magit-dash-repo-path repo)
     (= 0 (magit-call-git "add" "-A"))))
 
 (defun magit-dash--auto-commit (repo)
-  "Stage all changes in REPO and commit using its :auto-commit message.
-Returns t when the commit succeeds, nil otherwise."
+  "Stage all modified files in REPO and commit using its :auto-commit message.
+Return t when the commit succeeds, nil otherwise."
   (let* ((auto-commit (magit-dash-repo-auto-commit repo))
          (message (if (functionp auto-commit)
                       (funcall auto-commit repo)
@@ -358,10 +390,11 @@ Returns t when the commit succeeds, nil otherwise."
    (t (cons op nil))))
 
 (defun magit-dash--run-command-for (repo &optional background)
-  "Open an `annotated-completing-read' command picker for REPO and invoke
+  "Run a registered command for REPO.
+Open an `annotated-completing-read' command picker for REPO and invoke
 the selected command with `default-directory' set to REPO's repository root.
 When BACKGROUND is non-nil or `magit-dash-run-command-in-background' is non-nil,
-runs the command in the background without popping up or stealing focus."
+run the command in the background without popping up or stealing focus."
   (let* ((explicit-commands (magit-dash-repo-commands repo))
          (commands (if (magit-dash-repo-include-ci repo)
                        (if (assoc "rebuild" explicit-commands)
@@ -627,9 +660,10 @@ For missing submodules, returns minimal placeholder stats."
                  :head-hash nil :recent-log "")))))))
 
 (defun magit-dash--get-stats-fast (repo)
-  "Return cached stats for REPO without validity checking, or a loading placeholder.
+  "Return cached stats for REPO without validity checking, or a placeholder.
 Unlike `magit-dash--get-stats', never blocks: returns whatever is in cache, or
-a placeholder plist when nothing is cached.  Caller is responsible for async collection."
+a placeholder plist when nothing is cached.  Caller is responsible for async
+collection."
   (cond
    ((eq (magit-dash-repo-submodule repo) 'missing)
     (list :branch "" :remote-origin nil :behind 0 :ahead 0
@@ -646,11 +680,11 @@ a placeholder plist when nothing is cached.  Caller is responsible for async col
 (defun magit-dash--run-git (path args on-success &optional on-error)
   "Run git ARGS in PATH asynchronously using magit's configured git executable.
 ON-SUCCESS is called with right-trimmed stdout on exit 0.
-ON-ERROR is called with stdout and exit-code on non-zero exit; defaults to a message.
-When PATH no longer exists on disk (for example a worktree removed outside
-magit-dash), ON-ERROR is called directly instead of letting `make-process'
-signal — callers only ever expect to fail through the callback, not via a
-thrown error."
+ON-ERROR is called with stdout and exit-code on non-zero exit; defaults to a
+message.  When PATH no longer exists on disk (for example a worktree removed
+outside magit-dash), ON-ERROR is called directly instead of letting
+`make-process' signal — callers only ever expect to fail through the callback,
+not via a thrown error."
   (if (not (file-directory-p path))
       (let ((msg (format "no such directory: %s" path)))
         (if on-error
@@ -721,7 +755,7 @@ Calls ON-COMPLETE with symbol `ok' on success or `error' and error text on failu
      (funcall on-complete 'error (format "exit %d: %s" code output)))))
 
 (defun magit-dash--auto-commit-async (repo on-complete)
-  "Stage all changes in REPO and commit using its :auto-commit message function.
+  "Stage and commit modified files in REPO using its auto-commit message.
 Calls ON-COMPLETE with `ok' when committed, `skipped' when workdir is clean,
 or `error' when git add or commit fails."
   (let* ((path (magit-dash-repo-path repo))
@@ -791,7 +825,7 @@ Calls ON-COMPLETE with `ok', `skipped' (branch not allowed), or `error'."
                       (magit-dash-repo-path repo))))))
 
 (defun magit-dash--run-git-chain (path steps on-success on-complete)
-  "Run git STEPS sequentially in PATH.
+  "Execute a chain of git commands in PATH.
 STEPS is a list of (ARGS . LABEL) pairs.  On success of all steps call
 ON-SUCCESS with no args.  On any failure call ON-COMPLETE with `error'
 and a message of the form \"LABEL failed, exit N: output\"."
@@ -850,7 +884,7 @@ Calls ON-COMPLETE with `ok' on exit 0, or `error' and output on failure."
 (cl-defun magit-dash-remote-sync-target (&key host path branch merge-method)
   "Return a shell command string implementing the remote sync pipeline for HOST.
 Stages, fetches/rebases (or merges when MERGE-METHOD is `merge') against BRANCH
-(defaulting to current HEAD), commits, and pushes locally and remotely over SSH
+\(defaulting to current HEAD), commits, and pushes locally and remotely over SSH
 into PATH (defaulting to \".\")."
   (let* ((host-str (if (symbolp host) (symbol-name host) (or host "")))
          (target-path (if (and path (not (string-empty-p path))) path "."))
@@ -943,8 +977,9 @@ propagated) and always reports `ok'."
          (magit-dash--run-hook-chain repo phase (cdr targets) on-complete))))))
 
 (defun magit-dash--run-hooks-for (repo op phase on-complete)
-  "Run global then repo hooks (or repo then global for `:post') for REPO's
-OP at PHASE, then call ON-COMPLETE with the aggregate status."
+  "Run hooks for REPO's OP at PHASE, then call ON-COMPLETE.
+Run global then repo hooks (or repo then global for `:post') with the
+aggregate status."
   (magit-dash--run-hook-chain repo phase (magit-dash--hooks-for repo op phase) on-complete))
 
 (defun magit-dash--default-operation (op)
@@ -1000,16 +1035,17 @@ commit (when :auto-commit), push (when :auto-push)."
       (cons "push" (lambda (cb) (magit-dash--auto-push-async repo cb)))))))
 
 (defun magit-dash--has-sync-configured-p (repo)
-  "Return non-nil when REPO has any sync operation configured — default
-pipeline steps (fetch/pull/commit/push) or a `:hooks' `:sync' `:operation'
-override."
+  "Return non-nil when REPO has any sync operation configured.
+This checks for default pipeline steps (fetch/pull/commit/push) or a
+`:hooks' `:sync' `:operation' override."
   (or (magit-dash--auto-sync-steps repo)
       (magit-dash--repo-operation repo :sync)))
 
 (defun magit-dash--auto-sync-op-symbols (repo)
-  "Return an ordered list of operation keywords configured for REPO's
-default `:sync' pipeline: `:fetch'/`:pull' (pull implies fetch), `:commit',
-`:push' — each only when its own auto-* flag is set."
+  "Return an ordered list of operation keywords configured for REPO.
+These are the operations for the default `:sync' pipeline: `:fetch'/`:pull'
+\(pull implies fetch), `:commit', `:push' — each only when its own auto-*
+flag is set."
   (seq-filter
    #'identity
    (list
@@ -1019,10 +1055,10 @@ default `:sync' pipeline: `:fetch'/`:pull' (pull implies fetch), `:commit',
     (when (magit-dash-repo-auto-push repo) :push))))
 
 (defun magit-dash--run-op-chain (repo ops on-complete)
-  "Run OPS (a list of operation keywords) for REPO in order via
-`magit-dash--run-operation', logging each.  Aborts on `error'; continues
-on `ok' or `skipped'.  Calls ON-COMPLETE with `ok' after all ops, or
-`error' on first failure."
+  "Run OPS sequentially for REPO in order via `magit-dash--run-operation'.
+OPS is a list of operation keywords.  Log each operation.  Abort on `error';
+continue on `ok' or `skipped'.  Call ON-COMPLETE with `ok' after all ops,
+or `error' on first failure."
   (if (null ops)
       (funcall on-complete 'ok)
     (magit-dash--run-operation
@@ -1034,20 +1070,22 @@ on `ok' or `skipped'.  Calls ON-COMPLETE with `ok' after all ops, or
          (_ (magit-dash--run-op-chain repo (cdr ops) on-complete)))))))
 
 (defun magit-dash--auto-sync-pipeline-async (repo on-complete)
-  "Default `:operation' implementation for `:sync': run fetch/pull/commit/push
-per REPO's auto-* flags, in order, each resolved and wrapped through its own
-`:hooks' entry.  Calls ON-COMPLETE with `ok', `skipped', or `error'."
+  "Run default `:sync' pipeline for REPO.
+This runs fetch/pull/commit/push per REPO's auto-* flags, in order, each
+resolved and wrapped through its own `:hooks' entry.  Call ON-COMPLETE with
+`ok', `skipped', or `error'."
   (let ((ops (magit-dash--auto-sync-op-symbols repo)))
     (if (null ops)
         (funcall on-complete 'skipped "no auto operations configured")
       (magit-dash--run-op-chain repo ops on-complete))))
 
 (defun magit-dash--auto-sync-async (repo on-complete)
-  "Run REPO's configured `:sync' operation — its `:hooks' `:sync' `:operation'
-override (which replaces the default pipeline entirely, including its own
-fetch/pull/commit/push settings) or, absent that, the default pipeline of
-fetch/pull/commit/push per REPO's auto-* flags — wrapped by `:sync''s own
-`:pre'/`:post' hooks.  Calls ON-COMPLETE with `ok', `skipped', or `error'."
+  "Run REPO's configured `:sync' operation asynchronously.
+This executes its `:hooks' `:sync' `:operation' override (which replaces
+the default pipeline entirely, including its own fetch/pull/commit/push
+settings) or, absent that, the default pipeline of fetch/pull/commit/push
+per REPO's auto-* flags — wrapped by `:sync''s own `:pre'/`:post' hooks.
+Call ON-COMPLETE with `ok', `skipped', or `error'."
   (magit-dash--run-operation repo :sync on-complete))
 
 (defun magit-dash--log-operation (repo-name operation status &optional error-text)
@@ -1094,7 +1132,7 @@ ON-ALL-DONE with an alist of (NAME . STATUS)."
                     (when on-all-done
                       (funcall on-all-done results)))))))
          (condition-case err
-             (with-magit-from-dashboard repo
+             (magit-dash--with-repo repo
                (funcall op-fn repo callback))
            (error (funcall callback 'error (error-message-string err))))))
      repos)))
@@ -1113,7 +1151,7 @@ ON-ALL-DONE with an alist of (NAME . STATUS)."
   (interactive)
   (let* ((total (length magit-dash-repo-list))
          (discovered-wt (seq-count #'magit-dash-repo-worktree magit-dash-repo-list))
-         (discovered-subm (seq-count (lambda (r) 
+         (discovered-subm (seq-count (lambda (r)
                                        (and (magit-dash-repo-submodule r)
                                             (not (eq (magit-dash-repo-submodule r) 'missing))))
                                      magit-dash-repo-list))
@@ -1280,9 +1318,11 @@ than cached, so they stop appearing in the dashboard."
 
 (defun magit-dash--parse-submodules (main-path lines)
   "Parse LINES from `git submodule status' for repo at MAIN-PATH.
-Returns a list of `magit-dash-repo' structs, one per submodule (initialized or not).
-Name is always \"parent<inner>\" where inner is the registered repo name when the path
-matches a `magit-dash-repo-list' entry, otherwise the submodule directory basename.
+Returns a list of `magit-dash-repo' structs, one per submodule
+\(initialized or not).
+Name is always \"parent<inner>\" where inner is the registered repo name
+when the path matches a `magit-dash-repo-list' entry, otherwise the
+submodule directory basename.
 Missing/uninitialized submodules are marked with :submodule \\='missing."
   (let* ((main-repo (seq-find (lambda (r) (equal (magit-dash-repo-path r) main-path))
                               magit-dash-repo-list))
@@ -1389,8 +1429,11 @@ Name and Branch widths are computed dynamically in `magit-dash--build-format'.")
         (not magit-dash-show-discovered-worktrees))
   (magit-dash-refresh))
 
-(defvar savehist-additional-variables nil)
-(add-to-list 'savehist-additional-variables 'magit-dash-columns)
+;;;###autoload
+(defun magit-dash-setup-savehist ()
+  "Add `magit-dash-columns' to `savehist-additional-variables'."
+  (when (boundp 'savehist-additional-variables)
+    (add-to-list 'savehist-additional-variables 'magit-dash-columns)))
 
 ;;;; Formatting helpers
 
@@ -1401,7 +1444,7 @@ Everything up to and including the final \"/\" is dropped (e.g.
 operations always use the full branch name.")
 
 (defun magit-dash-toggle-branch-basename ()
-  "Toggle whether the Branch column shows only a branch's basename."
+  "Toggle whether the Branch column displays only a branch's basename."
   (interactive)
   (setq magit-dash-render-branch-name-as-basename (not magit-dash-render-branch-name-as-basename))
   (magit-dash-refresh))
@@ -1616,9 +1659,9 @@ Disabled by default; toggle with `magit-dash-toggle-batch-all'.")
   "When non-nil, auto-discovered submodules appear below their parent in the dashboard.")
 
 (defvar magit-dash--submodule-path-set nil
-  "Hash table mapping auto-discovered submodule path → \"parent<mod>\" display name.
-Rebuilt on each refresh. Used to detect explicitly-registered repos that are also
-submodules and to derive their parent<mod> display name.")
+  "Hash table mapping auto-discovered submodule path → name.
+Rebuilt on each refresh.  Used to detect explicitly-registered repos that
+are also submodules and to derive their parent<mod> display name.")
 
 (defun magit-dash--update-default-directory ()
   "Sync `default-directory' with the repo at point, falling back to `~/'.
@@ -1771,11 +1814,12 @@ Emits a status message with repo counts; updates dashboard rows as each finishes
       (t 0))))
 
 (defun magit-dash--sorted-repos (repos)
-  "Return REPOS sorted by :sort-hint then type, with discovered worktrees following each parent.
+  "Return REPOS sorted by :sort-hint then type, with discovered worktrees.
 Primary sort is :sort-hint ascending (nil hints follow all sorted ones).
-Secondary sort within equal hints is by type: repo < worktree < submodule < missing.
-Auto-discovered submodules whose path is already in `magit-dash-repo-list' are
-suppressed to avoid duplicate rows — the registered entry is shown instead."
+Secondary sort within equal hints is by type: repo < worktree < submodule
+< missing.  Auto-discovered submodules whose path is already in
+`magit-dash-repo-list' are suppressed to avoid duplicate rows — the
+registered entry is shown instead."
   (let* ((sorted (seq-sort (lambda (a b)
                              (let ((ha (magit-dash-repo-sort-hint a))
                                    (hb (magit-dash-repo-sort-hint b)))
@@ -1807,10 +1851,11 @@ suppressed to avoid duplicate rows — the registered entry is shown instead."
                 sorted)))
 
 (defun magit-dash-refresh ()
-  "Refresh the dashboard, clearing all per-repo caches and re-fetching asynchronously.
-Discovers worktrees and submodules synchronously, renders the table with the last
-known state, then clears :stats, :pr-counts, and :ci-status for every repo and
-re-fetches all three in the background, updating each row as data arrives."
+  "Refresh the dashboard, clearing all per-repo caches and re-fetching.
+Discovers worktrees and submodules synchronously, renders the table with
+the last known state, then clears :stats, :pr-counts, and :ci-status for
+every repo and re-fetches all three in the background, updating each row
+as data arrives."
   (interactive)
   (magit-dash--discover-worktrees)
   (magit-dash--discover-submodules)
@@ -1860,26 +1905,6 @@ re-collected asynchronously."
   (clrhash magit-dash-gh--cache)
   (magit-dash-refresh))
 
-(defmacro with-magit-dash (&rest body)
-  `(progn
-     (magit-dash-repo-ensure-configuration)
-     (let* ((buf (get-buffer-create magit-dash-buffer-name))
-	    (default-directory (if (eq (current-buffer) buf)
-				   (magit-dash-repo-path (magit-dash--repo-at-point))
-				 default-directory)))
-     (with-current-buffer buf
-       (unless (derived-mode-p 'magit-dash-mode)
-	 (magit-dash-mode))
-       (magit-dash-refresh)
-       ,@body))))
-
-(defmacro with-magit-from-dashboard (repo &rest body)
-  "Execute BODY with default-directory set to REPO path."
-  (declare (indent 1))
-  (let ((path (make-symbol "path")))
-    `(let* ((,path (file-name-as-directory (magit-dash-repo-path ,repo)))
-            (default-directory ,path))
-       ,@body)))
 
 (defun magit-dash--repo-at-point ()
   "Return the `magit-dash-repo' struct at point or signal `user-error'."
@@ -1937,12 +1962,13 @@ exist, or just `PATH' when no extra cache data is available."
 
 (defun magit-dash--prompt-for-repo-path (&optional prompt)
   "Prompt for one of the registered repositories and return its path.
-The candidate list uses `annotated-completing-read', annotating each repository
-with its abbreviated file path and cached dash stats (branch, ahead/behind, dirty,
-CI status, PR counts).
+PROMPT is the prompt string displayed to the user.
+The candidate list uses `annotated-completing-read', annotating each
+repository with its abbreviated file path and cached dash stats
+\(branch, ahead/behind, dirty, CI status, PR counts).
 Signals `user-error' when no repositories are registered."
   (unless magit-dash-repo-list
-    (user-error "magit-dash: no registered repositories to choose from"))
+    (user-error "Magit-dash: no registered repositories to choose from"))
   (let ((table (map-into
                 (seq-map (lambda (r)
                            (cons (magit-dash-repo-name r)
@@ -1957,8 +1983,9 @@ Signals `user-error' when no repositories are registered."
 
 ;;;###autoload
 (defun magit-dash-open-registered-repo ()
-  "Prompt to select a registered repository from `magit-dash-repo-list' and open its status buffer.
-The picker displays repository names annotated with their paths and cached dashboard stats."
+  "Prompt for a registered repository from `magit-dash-repo-list' and open it.
+The picker displays repository names annotated with their paths and
+cached dashboard stats."
   (interactive)
   (let ((path (magit-dash--prompt-for-repo-path "Open repository: ")))
     (magit-status-setup-buffer path)))
@@ -1994,6 +2021,7 @@ The picker displays repository names annotated with their paths and cached dashb
 ;;;###autoload
 (defun magit-dash-clone-repo (repo &optional url on-complete)
   "Clone REPO from URL (or prompt if unset) into REPO's destination path.
+ON-COMPLETE is an optional callback called when cloning finishes.
 Runs asynchronously and refreshes the dashboard on completion."
   (interactive
    (list (magit-dash--repo-at-point)))
@@ -2051,10 +2079,11 @@ Runs asynchronously and refreshes the dashboard on completion."
       (magit-dash-clone-repo repo nil))))
 
 (defun magit-dash--prompt-for-repo (&optional prompt repos)
-  "Prompt for one of REPOS (default `magit-dash-repo-list') and return its struct."
+  "Prompt for one of REPOS (default `magit-dash-repo-list') and return its struct.
+PROMPT is the prompt string displayed to the user."
   (let ((candidate-repos (or repos magit-dash-repo-list)))
     (unless candidate-repos
-      (user-error "magit-dash: no registered repositories to choose from"))
+      (user-error "Magit-dash: no registered repositories to choose from"))
     (let ((table (map-into
                   (seq-map (lambda (r)
                              (cons (magit-dash-repo-name r)
@@ -2084,6 +2113,7 @@ Runs asynchronously and refreshes the dashboard on completion."
 (defun magit-dash-bootstrap-repo (&optional repo on-complete)
   "Clone REPO from its configured upstream `:repo' path into its destination path.
 REPO defaults to the repository at point or is selected interactively.
+ON-COMPLETE is an optional callback invoked on completion.
 Runs asynchronously and refreshes the dashboard on completion."
   (interactive
    (list (if (magit-dash--repo-at-point-p)
@@ -2110,7 +2140,8 @@ Runs asynchronously and refreshes the dashboard on completion."
 ;;;###autoload
 (defun magit-dash-bootstrap-marked ()
   "Bootstrap marked missing repositories with an upstream `:repo' configured.
-When `magit-dash--batch-all' is enabled, targets all visible missing repositories with `:repo'.
+When `magit-dash--batch-all' is enabled, targets all visible missing
+repositories with `:repo'.
 Runs asynchronously and refreshes the dashboard on completion."
   (interactive)
   (let* ((effective (magit-dash--effective-repos))
@@ -2152,53 +2183,53 @@ Tries, in order:
 (defun magit-dash-magit-dispatch ()
   "Open `magit-dispatch' in the context of the repository at point."
   (interactive)
-  (with-magit-from-dashboard (magit-dash--repo-at-point)
+  (magit-dash--with-repo (magit-dash--repo-at-point)
     (call-interactively #'magit-dispatch)))
 
 (defun magit-dash-magit-status ()
   "Open a magit status buffer for the repository at point."
   (interactive)
-  (with-magit-from-dashboard (magit-dash--repo-at-point)
+  (magit-dash--with-repo (magit-dash--repo-at-point)
     (magit-status-setup-buffer default-directory)))
 
 (defun magit-dash-magit-diff ()
   "Open a magit diff (dwim) buffer for the repository at point."
   (interactive)
-  (with-magit-from-dashboard (magit-dash--repo-at-point)
+  (magit-dash--with-repo (magit-dash--repo-at-point)
     (call-interactively #'magit-diff)))
 
 (defun magit-dash-magit-log ()
   "Open magit log for the current branch in the repository at point."
   (interactive)
-  (with-magit-from-dashboard (magit-dash--repo-at-point)
+  (magit-dash--with-repo (magit-dash--repo-at-point)
     (call-interactively #'magit-log-current)))
 
 (defun magit-dash-magit-log-full ()
   "Open the full magit log menu for the repository at point."
   (interactive)
-  (with-magit-from-dashboard (magit-dash--repo-at-point)
+  (magit-dash--with-repo (magit-dash--repo-at-point)
     (call-interactively #'magit-log)))
 
 (defun magit-dash-magit-commit ()
   "Open a magit commit buffer for the repository at point."
   (interactive)
-  (with-magit-from-dashboard (magit-dash--repo-at-point)
+  (magit-dash--with-repo (magit-dash--repo-at-point)
     (call-interactively #'magit-commit-create)))
 
 (defun magit-dash-fetch ()
   "Run git fetch for the repository at point via magit."
   (interactive)
-  (with-magit-from-dashboard (magit-dash--repo-at-point)
+  (magit-dash--with-repo (magit-dash--repo-at-point)
     (call-interactively #'magit-fetch)))
 
 (defun magit-dash-pull ()
   "Pull from upstream for the repository at point via magit."
   (interactive)
-  (with-magit-from-dashboard (magit-dash--repo-at-point)
+  (magit-dash--with-repo (magit-dash--repo-at-point)
     (call-interactively #'magit-pull-from-upstream)))
 
 (defun magit-dash-commit ()
-  "Auto-commit changes in the repository at point.
+  "Auto-commit modified files in the repository at point.
 Signals `user-error' when :auto-commit is not configured for this repo."
   (interactive)
   (let ((repo (magit-dash--repo-at-point)))
@@ -2210,7 +2241,7 @@ Signals `user-error' when :auto-commit is not configured for this repo."
                (magit-dash-repo-name repo)))))
 
 (defun magit-dash-stage-all ()
-  "Stage all changes in the repository at point."
+  "Stage all working tree files in the repository at point."
   (interactive)
   (let ((repo (magit-dash--repo-at-point)))
     (if (magit-dash--stage-all repo)
@@ -2220,7 +2251,7 @@ Signals `user-error' when :auto-commit is not configured for this repo."
 (defun magit-dash-push ()
   "Push current branch to its push remote for the repository at point."
   (interactive)
-  (with-magit-from-dashboard (magit-dash--repo-at-point)
+  (magit-dash--with-repo (magit-dash--repo-at-point)
     (call-interactively #'magit-push-current-to-pushremote)))
 
 (defun magit-dash-sync ()
@@ -2230,7 +2261,7 @@ Signals `user-error' when no auto operations are configured for this repo."
   (let ((repo (magit-dash--repo-at-point)))
     (unless (magit-dash--has-sync-configured-p repo)
       (user-error "No auto operations configured for %s" (magit-dash-repo-name repo)))
-    (with-magit-from-dashboard repo
+    (magit-dash--with-repo repo
       (magit-dash--auto-sync-async
        repo
        (lambda (_status &optional _error-text)
@@ -2278,7 +2309,7 @@ Displays a summary message and refreshes the dashboard when all complete."
                         '(hash-table :test equal))
                        :prompt "sync repository: "
                        :require-match t)))
-      (with-magit-from-dashboard repo
+      (magit-dash--with-repo repo
         (magit-dash--auto-sync-async
          repo
          (lambda (_status &optional _error-text)
@@ -2287,7 +2318,7 @@ Displays a summary message and refreshes the dashboard when all complete."
 (defun magit-dash-auto-sync ()
   "Run auto operations for marked repos (or all if none marked) asynchronously.
 Each repo's steps (fetch, pull, commit, push) run sequentially; each step is
-logged individually. Dashboard refreshes when all repos complete."
+logged individually.  Dashboard refreshes when all repos complete."
   (interactive)
   (let ((repos (seq-filter #'magit-dash--has-sync-configured-p (magit-dash--effective-repos))))
     (unless repos
@@ -2299,19 +2330,21 @@ logged individually. Dashboard refreshes when all repos complete."
      (lambda (_) (magit-dash--maybe-refresh)))))
 
 (defun magit-dash-run-command (&optional background)
-  "Open an `annotated-completing-read' picker for the repo at point and invoke the selected command.
-When BACKGROUND is non-nil (or with prefix argument \\[universal-argument]),
-run the command in the background without displaying its buffer."
+  "Open an `annotated-completing-read' command picker for the repo at point.
+Invoke the selected command.  When BACKGROUND is non-nil (or with prefix
+argument \\[universal-argument]), run the command in the background without
+displaying its buffer."
   (interactive "P")
   (magit-dash--run-command-for (magit-dash--repo-at-point) background))
 
 (defun magit-dash-run-command-background ()
-  "Open an `annotated-completing-read' picker for the repo at point and run the command in the background."
+  "Open command picker for repo at point and run in the background."
   (interactive)
   (magit-dash--run-command-for (magit-dash--repo-at-point) t))
 
 (defun magit-dash--build-tag-table ()
-  "Build an `annotated-completing-read' alist mapping tag-name strings to
+  "Build tag completion table.
+Build an `annotated-completing-read' alist mapping tag-name strings to
 annotation strings, targeting each entry's own tag symbol.
 Each annotation lists the count of repos using the tag and up to four names.
 Permanent tags (from repo :tags fields) are sorted before ephemeral-only tags."
@@ -2352,7 +2385,7 @@ Permanent tags (from repo :tags fields) are sorted before ephemeral-only tags."
      sorted-tags)))
 
 (cl-defun magit-dash--read-tag (prompt &key include-clear require-match)
-  "Read a tag using annotated-completing-read with PROMPT.
+  "Read a tag using `annotated-completing-read' with PROMPT.
 Shows permanent tags (from repo :tags fields) before ephemeral-only tags.
 Each candidate is annotated with a repo count and up to four repo names.
 
@@ -2509,7 +2542,7 @@ prompts among the registered repositories when neither applies."
   (let ((repo (magit-dash--repo-at-point)))
     (when (magit-dash-repo-worktree repo)
       (user-error "Cannot add a worktree from a worktree entry"))
-    (with-magit-from-dashboard repo
+    (magit-dash--with-repo repo
       (call-interactively #'magit-worktree-checkout))
     (magit-dash-refresh)))
 
@@ -2520,33 +2553,32 @@ Signals `user-error' when the current row is not a worktree."
   (let ((repo (magit-dash--repo-at-point)))
     (unless (magit-dash-repo-worktree repo)
       (user-error "Not a worktree row; use 'k' only on worktree entries"))
-    (with-magit-from-dashboard repo
+    (magit-dash--with-repo repo
       (call-interactively #'magit-worktree-delete))
     (magit-dash-refresh)))
 
 (defun magit-dash-builder ()
   "Run `builder-compile-project' in the repository at point."
   (interactive)
-  (with-magit-from-dashboard (magit-dash--repo-at-point)
+  (magit-dash--with-repo (magit-dash--repo-at-point)
     (call-interactively #'builder-compile-project)))
 
 (defun magit-dash-agent-shell ()
-  "Switch to an agent-shell session for the repository at point."
+  "Switch to an `agent-shell' session for the repository at point."
   (interactive)
-  (with-magit-from-dashboard (magit-dash--repo-at-point)
+  (magit-dash--with-repo (magit-dash--repo-at-point)
     (call-interactively #'agent-shell-menu-switch-project-session)))
 
 (defun magit-dash-agent-shell-new ()
-  "Start a new agent-shell session in the repository at point."
+  "Start a new `agent-shell' session in the repository at point."
   (interactive)
-  (with-magit-from-dashboard (magit-dash--repo-at-point)
+  (magit-dash--with-repo (magit-dash--repo-at-point)
     (call-interactively #'agent-shell-new-shell)))
 
 (defun magit-dash-agent-shell-queue ()
-  "Open the agent-shell queue buffer."
+  "Open the `agent-shell' queue buffer."
   (interactive)
   (call-interactively #'agent-shell-queue-buffer-open))
-
 (defun magit-dash-gh-ci-fetch-at-point ()
   "Fetch CI status for the repository at point and refresh its dashboard row."
   (interactive)
@@ -2594,7 +2626,7 @@ Signals `user-error' when `magit-dash-repo-list' is empty."
    (pop-to-buffer-same-window buf)))
 
 (defun magit-dash-repo-ensure-configuration ()
-  "Raises `user-error' when there is not `magit-dash-repo-list' defined."
+  "Raise `user-error' when there is not `magit-dash-repo-list' defined."
   (unless magit-dash-repo-list
     (user-error "No repositories registered; use `magit-dash-register'")))
 
@@ -2671,9 +2703,8 @@ Signals `user-error' when `magit-dash-repo-list' is empty."
     (forward-line 1)))
 
 (defun magit-dash-unmark-all ()
-  "Clear all marks from the dashboard."
+  "Unmark all repositories in the dashboard."
   (interactive)
-  (setq magit-dash--marked-paths nil)
   (setq tabulated-list-entries
         (seq-map (lambda (entry)
                    (magit-dash--build-entry (car entry)))
@@ -2761,7 +2792,7 @@ When disabled, only explicitly marked repos are targeted."
 ;;;; Transient menus
 
 (defun magit-dash--agent-shell-project-buffers-p ()
-  "Return non-nil when agent-shell buffers exist for the repo at point."
+  "Return non-nil when `agent-shell' buffers exist for the repo at point."
   (when-let* ((repo (ignore-errors (magit-dash--repo-at-point)))
 	      (default-directory (file-name-as-directory (magit-dash-repo-path repo))))
     (and (boundp 'agent-shell-menu-project-buffers) (agent-shell-menu-project-buffers) t)))
@@ -2890,8 +2921,10 @@ When disabled, only explicitly marked repos are targeted."
 
 
 
-(defun ad:magit-dash--quit-window (orig-fn &optional kill window)
+(defun magit-dash--quit-window-advice (orig-fn &optional kill window)
   "Around advice for `quit-window': delete split window in dashboard buffers.
+ORIG-FN is the original `quit-window' function.  KILL and WINDOW are
+passed through to ORIG-FN.
 Only applies in `magit-dash-mode' and `magit-dash-gh-pr-dashboard-mode'.
 Falls through otherwise."
   (if (or kill (one-window-p)
@@ -2900,8 +2933,7 @@ Falls through otherwise."
       (funcall orig-fn kill window)
     (delete-window (or window (selected-window)))))
 
-(advice-add 'quit-window :around #'ad:magit-dash--quit-window)
-
+(advice-add 'quit-window :around #'magit-dash--quit-window-advice)
 (provide 'magit-dash)
 
 ;;; magit-dash.el ends here

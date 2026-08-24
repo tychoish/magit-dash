@@ -35,7 +35,16 @@
 (declare-function magit-dash-open-repo "magit-dash-open")
 (declare-function magit-gh-pr-dash "magit-dash-gh-pr")
 (declare-function magit-dash-status-refresh-all "magit-dash-status")
+
 ;;; Core helpers shared by all magit-dash-gh-* modules
+(defmacro magit-dash-gh--with-repo-dir (path &rest body)
+  "Execute BODY with `default-directory' set to PATH."
+  (declare (indent 1))
+  (let ((p (make-symbol "path")))
+    `(let* ((,p ,path)
+             (default-directory ,p))
+       ,@body)))
+
 
 (defvar magit-dash-gh--cache (make-hash-table :test #'equal)
   "Global cache for repository-specific data, keyed by repository path.
@@ -345,13 +354,6 @@ in-memory cache is already populated."
 
 ;;; Shared utilities
 
-(defmacro magit-dash-gh--with-repo-dir (path &rest body)
-  "Execute BODY with `default-directory' set to PATH."
-  (declare (indent 1))
-  (let ((p (make-symbol "path")))
-    `(let* ((,p ,path)
-             (default-directory ,p))
-       ,@body)))
 
 (defun magit-dash-gh--add-file (ctx path type)
   "Return CTX with a new {:path PATH :type TYPE} entry appended to :files."

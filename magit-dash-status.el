@@ -106,16 +106,22 @@
 (defun magit-dash-status--github-repo-p (&optional dir)
   "Return non-nil if repository at DIR is hosted on GitHub."
   (when-let* ((top (magit-dash-status--repo-root dir)))
-    (or (and (boundp 'magit-dash-repo-list)
-             (seq-some (lambda (r)
-                         (file-equal-p (magit-dash-repo-path r) top))
-                       magit-dash-repo-list))
-        (let ((default-directory top))
-          (when-let* ((urls (delq nil
-                                  (list (magit-get "remote" "origin" "url")
-                                        (magit-get "remote" "pushdefault" "url")
-                                        (magit-get "remote" "upstream" "url")))))
-            (seq-some (lambda (u) (string-match-p "github\\.com" u)) urls))))))
+    (let ((cached (magit-dash-gh--cache-get top :is-github-repo)))
+      (if (not (null cached))
+          (eq cached t)
+        (let ((is-gh
+               (or (and (boundp 'magit-dash-repo-list)
+                        (seq-some (lambda (r)
+                                    (file-equal-p (magit-dash-repo-path r) top))
+                                  magit-dash-repo-list))
+                   (let ((default-directory top))
+                     (when-let* ((urls (delq nil
+                                             (list (magit-get "remote" "origin" "url")
+                                                   (magit-get "remote" "pushdefault" "url")
+                                                   (magit-get "remote" "upstream" "url")))))
+                       (seq-some (lambda (u) (string-match-p "github\\.com" u)) urls))))))
+          (magit-dash-gh--cache-set top :is-github-repo (if is-gh t :not-github))
+          (and is-gh t))))))
 
 ;;; Data Fetching, Debounced Refresh & Async Invalidation
 
@@ -398,6 +404,10 @@ Calls CALLBACK with list of PR plists."
             rev)))
 
 ;;; Keymaps & Section Handlers
+(defvaralias 'magit-magit-dash-status-ci-section-map 'magit-dash-status-ci-section-map)
+(defvaralias 'magit-magit-dash-status-pr-section-map 'magit-dash-status-pr-section-map)
+(defvaralias 'magit-magit-dash-status-prs-section-map 'magit-dash-status-prs-section-map)
+
 (defvar-keymap magit-dash-status-ci-section-map
   :doc "Keymap for CI header section in `magit-status'."
   "<remap> <magit-visit-thing>" #'magit-dash-status-ci-menu
@@ -415,10 +425,6 @@ Calls CALLBACK with list of PR plists."
   "<remap> <magit-visit-thing>" #'magit-gh-pr-dash
   "RET"                         #'magit-gh-pr-dash
   "C-m"                         #'magit-gh-pr-dash)
-
-(defvaralias 'magit-magit-dash-status-ci-section-map 'magit-dash-status-ci-section-map)
-(defvaralias 'magit-magit-dash-status-pr-section-map 'magit-dash-status-pr-section-map)
-(defvaralias 'magit-magit-dash-status-prs-section-map 'magit-dash-status-prs-section-map)
 
 (defclass magit-dash-status-ci-section (magit-section)
   ((keymap :initform 'magit-dash-status-ci-section-map)))
@@ -664,7 +670,7 @@ Calls CALLBACK with list of PR plists."
     (if (and num (fboundp 'magit-gh-pr-diff))
         (magit-gh-pr-diff)
       (if num
-          (magit-diff (format "origin/main...pull/%d/head" num))
+          (magit-diff-range (format "origin/main...pull/%d/head" num))
         (user-error "No pull request at point")))))
 
 (defun magit-dash-status-pr-worktree ()
@@ -674,8 +680,8 @@ Calls CALLBACK with list of PR plists."
          (num (and (listp pr) (plist-get pr :number)))
          (top (magit-dash-status--repo-root)))
     (if (and num top)
-        (let ((entry (list :number num :repo (file-name-nondirectory (directory-file-name top)))))
-          (magit-dash-gh-pr-dashboard-open-worktree))
+        (magit-dash-gh-pr-dashboard-open-worktree
+         (list :number num :repo (file-name-nondirectory (directory-file-name top))))
       (user-error "No pull request at point"))))
 
 (defun magit-dash-status-pr-checkout ()
@@ -684,7 +690,7 @@ Calls CALLBACK with list of PR plists."
   (let* ((pr (magit-dash-status--current-pr))
          (branch (and (listp pr) (plist-get pr :head-ref))))
     (if (and branch (not (string-empty-p branch)))
-        (magit-checkout branch)
+        (magit--checkout branch)
       (user-error "No branch found for pull request"))))
 
 (defun magit-dash-status-pr-checks ()
@@ -692,8 +698,14 @@ Calls CALLBACK with list of PR plists."
   (interactive)
   (if (fboundp 'magit-gh-pr-checks)
       (magit-gh-pr-checks)
-    (magit-dash-status-ci-menu)))
-
+    (let* ((pr (magit-dash-status--current-pr))
+           (num (and (listp pr) (plist-get pr :number)))
+           (top (magit-dash-status--repo-root)))
+      (if (and num top)
+          (progn
+            (require 'magit-dash-gh-actions)
+            (magit-dash-gh-actions-fetch-for-pr num top))
+        (call-interactively #'magit-dash-status-ci-menu)))))
 (defun magit-dash-status-pr-fetch-threads ()
   "Fetch comments and review threads for pull request to disk."
   (interactive)
@@ -704,20 +716,18 @@ Calls CALLBACK with list of PR plists."
 (defun magit-dash-status-pr-refresh ()
   "Force refresh of PR status for current repository."
   (interactive)
-  (let ((top (magit-dash-status--repo-root))
-        (buf (current-buffer)))
+  (let* ((top (magit-dash-status--repo-root))
+         (buf (current-buffer))
+         (pending 2)
+         (on-done (lambda (&rest _)
+                    (setq pending (1- pending))
+                    (when (buffer-live-p buf)
+                      (magit-dash-status--schedule-refresh buf))
+                    (when (<= pending 0)
+                      (message "magit-dash: PR status refreshed")))))
     (message "magit-dash: refreshing PR status...")
-    (magit-dash-status--fetch-branch-pr
-     top
-     (lambda (_)
-       (magit-dash-status--fetch-authored-prs
-        top
-        (lambda (_)
-          (when (buffer-live-p buf)
-            (with-current-buffer buf (magit-refresh-buffer buf)))
-          (message "magit-dash: PR status refreshed"))
-        t))
-     t)))
+    (magit-dash-status--fetch-branch-pr top on-done t)
+    (magit-dash-status--fetch-authored-prs top on-done t)))
 
 (transient-define-prefix magit-dash-status-pr-menu ()
   "Actions for GitHub pull request."
@@ -742,24 +752,19 @@ Calls CALLBACK with list of PR plists."
 (defun magit-dash-status-refresh-all ()
   "Force refresh all GitHub status information for the current repository."
   (interactive)
-  (let ((top (magit-dash-status--repo-root))
-        (buf (current-buffer)))
+  (let* ((top (magit-dash-status--repo-root))
+         (buf (current-buffer))
+         (pending 3)
+         (on-done (lambda (&rest _)
+                    (setq pending (1- pending))
+                    (when (buffer-live-p buf)
+                      (magit-dash-status--schedule-refresh buf))
+                    (when (<= pending 0)
+                      (message "magit-dash: refreshed all status data")))))
     (message "magit-dash: refreshing all status data...")
-    (magit-dash-status--fetch-ci
-     top
-     (lambda (_)
-       (magit-dash-status--fetch-branch-pr
-        top
-        (lambda (_)
-          (magit-dash-status--fetch-authored-prs
-           top
-           (lambda (_)
-             (when (buffer-live-p buf)
-               (with-current-buffer buf (magit-refresh-buffer buf)))
-             (message "magit-dash: refreshed all status data"))
-           t))
-        t))
-     t)))
+    (magit-dash-status--fetch-ci top on-done t)
+    (magit-dash-status--fetch-branch-pr top on-done t)
+    (magit-dash-status--fetch-authored-prs top on-done t)))
 
 ;;;###autoload
 (transient-define-prefix magit-dash-dispatch ()

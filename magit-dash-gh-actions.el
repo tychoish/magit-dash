@@ -328,9 +328,9 @@ Creates an artifact directory under plans/ containing:
 When WORKFLOW is nil, fetches available active workflows and prompts
 if more than one exists (or selects the only one).
 REPO-OR-PATH defaults to the repository at point or `default-directory'.
-REF defaults to the current branch (or 'main').
+REF defaults to the current branch (or `main').
 INPUTS is an optional alist of (KEY . VALUE) strings passed as -f KEY=VALUE.
-ON-COMPLETE is called with 'ok or 'error on finish."
+ON-COMPLETE is called with `ok' or `error' on finish."
   (interactive)
   (magit-dash-gh--check-gh)
   (let* ((repo-path (cond

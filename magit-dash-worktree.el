@@ -26,6 +26,7 @@
 (require 'magit-git)
 (require 'magit-process)
 (require 'magit-worktree)
+(require 'magit-dash-gh)
 
 ;; Forward declarations for magit-dash core functions and variables
 (declare-function magit-dash-repo-name "magit-dash")
@@ -35,7 +36,6 @@
 (declare-function magit-dash--repo-at-point "magit-dash")
 (declare-function magit-dash--resolve-repo-path "magit-dash")
 (declare-function magit-dash-refresh "magit-dash")
-(declare-function magit-dash-gh--with-repo-dir "magit-dash")
 (defvar magit-dash-repo-list)
 
 ;;; Customization
