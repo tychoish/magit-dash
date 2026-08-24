@@ -173,6 +173,16 @@
           (should (string-match-p "#20" content))
           (should (string-match-p "PR 20" content)))))))
 
+(ert-deftest magit-dash-status/insert-authored-prs-omitted-when-empty ()
+  "Section is omitted entirely when no open authored PRs exist."
+  (with-temp-buffer
+    (let ((top "/tmp/fake-repo"))
+      (cl-letf (((symbol-function 'magit-dash-status--github-repo-p) (lambda (&rest _) t))
+                ((symbol-function 'magit-dash-status--repo-root) (lambda (&rest _) top)))
+        (magit-dash-gh--cache-set top :status-authored-prs nil)
+        (magit-dash-gh--cache-set top :status-authored-prs-time (float-time))
+        (magit-dash-status-insert-authored-prs)
+        (should (equal "" (buffer-string)))))))
 ;;; In-Flight and Recursion Safety Tests
 
 (ert-deftest magit-dash-status/in-flight-deduplication ()

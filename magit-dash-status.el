@@ -506,8 +506,7 @@ Calls CALLBACK with list of PR plists."
   (when (and magit-dash-status-enable
              (magit-dash-status--github-repo-p))
     (let* ((top (magit-dash-status--repo-root))
-           (cached (magit-dash-gh--cache-get top :status-authored-prs))
-           (has-time (magit-dash-gh--cache-get top :status-authored-prs-time)))
+           (cached (magit-dash-gh--cache-get top :status-authored-prs)))
       (when (and (magit-dash-status--cache-stale-p top :status-authored-prs)
                  (not (magit-dash-status--in-flight-p top :status-authored-prs)))
         (let ((buf (current-buffer)))
@@ -515,22 +514,18 @@ Calls CALLBACK with list of PR plists."
            top
            (lambda (&rest _)
              (magit-dash-status--schedule-refresh buf)))))
-      (magit-insert-section (magit-dash-status-prs-section "prs")
-        (let ((start (point)))
-          (magit-insert-heading
-            (if has-time
-                (format "Pull Requests (author: @me, %d)" (if (listp cached) (length cached) 0))
-              "Pull Requests (author: @me, …)"))
-          (put-text-property start (point) 'keymap magit-dash-status-prs-section-map))
-        (when (and (listp cached) cached)
+      (when (and (listp cached) cached)
+        (magit-insert-section (magit-dash-status-prs-section "prs")
+          (let ((start (point)))
+            (magit-insert-heading (format "Pull Requests (author: @me, %d)" (length cached)))
+            (put-text-property start (point) 'keymap magit-dash-status-prs-section-map))
           (dolist (pr cached)
             (magit-insert-section (magit-dash-status-pr-section (plist-get pr :number))
               (let ((start (point)))
                 (insert (magit-dash-status--format-pr-row pr))
                 (insert "\n")
-                (put-text-property start (point) 'keymap magit-dash-status-pr-section-map)))))
-        (insert "\n")))))
-
+                (put-text-property start (point) 'keymap magit-dash-status-pr-section-map))))
+          (insert "\n"))))))
 ;;; Transient Actions for CI
 
 (defun magit-dash-status--current-ci-run ()
