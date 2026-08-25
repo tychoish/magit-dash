@@ -34,8 +34,13 @@
 (declare-function agent-shell-insert "agent-shell")
 (declare-function agent-shell-buffers "agent-shell")
 (declare-function agent-shell-get-config "agent-shell")
+(declare-function agent-shell-subscribe-to "agent-shell")
+(declare-function agent-shell-unsubscribe "agent-shell")
+(declare-function agent-shell--display-buffer "agent-shell")
+(declare-function agent-shell-viewport--show-buffer "agent-shell-viewport")
 (declare-function agent-shell-menu-new-shell-in-dir "agent-shell-menu")
 (declare-function agent-shell-queue-add-unassigned "agent-shell-queue")
+(defvar agent-shell-prefer-viewport-interaction)
 
 ;;; Faces
 
@@ -233,6 +238,27 @@ Returns the buffer."
       (magit-dash-ci--rename-ci-buffer-when-ready buf project-name)
       buf)))
 
+(defun magit-dash-ci--focus-shell-buffer (buf)
+  "Pop to and focus agent-shell buffer BUF."
+  (when (buffer-live-p buf)
+    (if (and (fboundp 'agent-shell-viewport--show-buffer)
+             (bound-and-true-p agent-shell-prefer-viewport-interaction))
+        (agent-shell-viewport--show-buffer :shell-buffer buf)
+      (if (fboundp 'agent-shell--display-buffer)
+          (agent-shell--display-buffer buf)
+        (pop-to-buffer buf)))))
+
+(defun magit-dash-ci--focus-on-turn-complete (shell-buffer)
+  "Subscribe to `turn-complete' on SHELL-BUFFER to focus it once the turn completes."
+  (when (and shell-buffer (fboundp 'agent-shell-subscribe-to))
+    (letrec ((token (agent-shell-subscribe-to
+                     :shell-buffer shell-buffer
+                     :event 'turn-complete
+                     :on-event (lambda (_event)
+                                 (agent-shell-unsubscribe :subscription token)
+                                 (magit-dash-ci--focus-shell-buffer shell-buffer)))))
+      token)))
+
 (defun magit-dash-ci--dispatch-prompt (repo prompt)
   "Send PROMPT to an agent for REPO.
 When an agent-shell session already open, scoped exactly to REPO's own
@@ -250,11 +276,14 @@ pasted manually."
      ((and existing
            (y-or-n-p (format "magit-dash fix-CI: reuse open agent-shell %s for %s? "
                              (buffer-name (car existing)) project-name)))
-      (agent-shell-insert :text prompt :submit t :shell-buffer (car existing))
-      (message "magit-dash fix-CI: sent to %s" (buffer-name (car existing))))
+      (let ((shell-buffer (car existing)))
+        (magit-dash-ci--focus-on-turn-complete shell-buffer)
+        (agent-shell-insert :text prompt :submit t :shell-buffer shell-buffer)
+        (message "magit-dash fix-CI: sent to %s" (buffer-name shell-buffer))))
      ((fboundp 'agent-shell-menu-new-shell-in-dir)
       (if-let* ((shell-buffer (magit-dash-ci--new-shell-buffer default-directory project-name)))
           (progn
+            (magit-dash-ci--focus-on-turn-complete shell-buffer)
             (agent-shell-insert :text prompt :submit t :shell-buffer shell-buffer)
             (message "magit-dash fix-CI: started %s" (buffer-name shell-buffer)))
         (message "magit-dash fix-CI: new agent-shell for %s did not initialize" project-name)))

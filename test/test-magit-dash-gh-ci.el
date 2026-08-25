@@ -140,6 +140,58 @@ what the function does."
             (should (eq fake-buf (nth 2 inserted)))))
       (kill-buffer fake-buf))))
 
+(ert-deftest magit-dash-gh-ci/focus-shell-buffer-uses-agent-shell-display ()
+  "focus-shell-buffer delegates to agent-shell--display-buffer."
+  (let ((fake-buf (generate-new-buffer " *test-focus-shell*"))
+        (displayed-buf nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'agent-shell--display-buffer)
+                   (lambda (buf) (setq displayed-buf buf))))
+          (magit-dash-ci--focus-shell-buffer fake-buf)
+          (should (eq fake-buf displayed-buf)))
+      (kill-buffer fake-buf))))
+
+(ert-deftest magit-dash-gh-ci/focus-shell-buffer-uses-viewport-when-preferred ()
+  "focus-shell-buffer delegates to agent-shell-viewport--show-buffer when preferred."
+  (let ((fake-buf (generate-new-buffer " *test-focus-viewport*"))
+        (show-args nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'agent-shell-viewport--show-buffer)
+                   (cl-function (lambda (&key shell-buffer) (setq show-args shell-buffer)))))
+          (setq-local agent-shell-prefer-viewport-interaction t)
+          (magit-dash-ci--focus-shell-buffer fake-buf)
+          (should (eq fake-buf show-args)))
+      (kill-buffer fake-buf))))
+
+(ert-deftest magit-dash-gh-ci/focus-on-turn-complete-subscribes-and-triggers-focus ()
+  "focus-on-turn-complete subscribes to turn-complete and focuses when event fires."
+  (let* ((fake-buf (generate-new-buffer " *test-sub-shell*"))
+         (subscribed-event nil)
+         (on-event-fn nil)
+         (unsubscribed-token nil)
+         (focused-buf nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'agent-shell-subscribe-to)
+                   (cl-function
+                    (lambda (&key shell-buffer event on-event)
+                      (setq subscribed-event event
+                            on-event-fn on-event)
+                      'dummy-token)))
+                  ((symbol-function 'agent-shell-unsubscribe)
+                   (cl-function
+                    (lambda (&key subscription)
+                      (setq unsubscribed-token subscription))))
+                  ((symbol-function 'magit-dash-ci--focus-shell-buffer)
+                   (lambda (buf) (setq focused-buf buf))))
+          (magit-dash-ci--focus-on-turn-complete fake-buf)
+          (should (eq 'turn-complete subscribed-event))
+          (should (functionp on-event-fn))
+          ;; Simulate turn-complete firing
+          (funcall on-event-fn '(:event turn-complete))
+          (should (eq 'dummy-token unsubscribed-token))
+          (should (eq fake-buf focused-buf)))
+      (kill-buffer fake-buf))))
+
 (ert-deftest magit-dash-gh-ci/dispatch-prompt-queues-when-no-shell-open ()
   "Falls back to the unassigned queue bucket when no shell is open and no
 agent-shell-menu is loaded."
