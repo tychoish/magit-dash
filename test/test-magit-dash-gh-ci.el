@@ -129,6 +129,7 @@ what the function does."
             (setq default-directory "/tmp/test/"))
           (cl-letf (((symbol-function 'agent-shell-buffers)
                      (lambda () (list fake-buf)))
+                    ((symbol-function 'agent-shell-subscribe-to) #'ignore)
                     ((symbol-function 'y-or-n-p) (lambda (_prompt) t))
                     ((symbol-function 'agent-shell-insert)
                      (cl-function

@@ -1567,17 +1567,7 @@ they are not consulted even when their own auto-* flags are set."
   (let ((repo (magit-dash-repo--make :name "r" :path "/tmp/r")))
     (should (null (magit-dash--has-sync-configured-p repo)))))
 
-;;;; Builder and agent-shell commands
-
-(ert-deftest magit-dash/builder-delegates-to-builder ()
-  "builder command invokes builder-compile-project in the repo directory."
-  (let ((called-in nil))
-    (cl-letf (((symbol-function 'magit-dash--repo-at-point)
-               (lambda () (magit-dash-repo--make :name "r" :path "/tmp/r")))
-              ((symbol-function 'builder-compile-project)
-               (lambda () (interactive) (setq called-in default-directory))))
-      (magit-dash-builder))
-    (should (string-prefix-p "/tmp/r" (or called-in "")))))
+;;;; Agent-shell commands
 
 (ert-deftest magit-dash/agent-shell-queue-callable ()
   "agent-shell-queue command calls agent-shell-queue-buffer-open."

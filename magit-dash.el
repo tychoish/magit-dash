@@ -1596,7 +1596,6 @@ When both together exceed the available window space they split it proportionall
     (define-key m (kbd "g")   #'magit-dash-refresh)
     (define-key m (kbd "G")   #'magit-dash-stage-all)
     (define-key m (kbd "i")   #'magit-dash-add-tag)
-    (define-key m (kbd "j")   #'magit-dash-builder)
     (define-key m (kbd "k")   #'magit-dash-worktree-delete)
     (define-key m (kbd "l")   #'magit-dash-magit-log)
     (define-key m (kbd "L")   #'magit-dash-magit-log-full)
@@ -2898,8 +2897,6 @@ When disabled, only explicitly marked repos are targeted."
      :inapt-if-not magit-dash--has-missing-repos-p)
     ("cb"  "Bootstrap repo"  magit-dash-bootstrap-repo
      :inapt-if-not magit-dash--repo-has-upstream-p)
-    ("j"   "Build"           magit-dash-builder
-     :inapt-if-not magit-dash--has-auto-commit-p)
     ("x"   "Run command"     magit-dash-run-command
      :inapt-if-not magit-dash--has-commands-p)
     ("X"   "Run in background" magit-dash-run-command-background
