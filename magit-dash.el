@@ -32,9 +32,11 @@
 (require 'seq)
 (require 'subr-x)
 (require 'tabulated-list)
-(require 'transient)
-(require 'magit)
 (require 'project)
+(require 'transient)
+(require 'savehist)
+(require 'magit)
+
 (require 'annotated-completing-read)
 (require 'sprite)
 
@@ -66,7 +68,6 @@
 (declare-function magit-dash-gh-ci-open "magit-dash-gh-ci")
 (declare-function magit-dash-gh-ci-fetch "magit-dash-gh-ci")
 (declare-function magit-dash-gh-workflow-run "magit-dash-gh-actions")
-(declare-function builder-compile-project "builder")
 (declare-function magit-gh-pr-dash "magit-dash-gh-pr")
 
 (defconst magit-dash-buffer-name "*magit-dash-repos*")
@@ -1375,6 +1376,8 @@ Missing/uninitialized submodules are marked with :submodule \\='missing."
   "Alist of (COLUMN-SYMBOL . ENABLED) for the repository dashboard.
 Persisted across sessions via `savehist-additional-variables'.")
 
+(add-to-list 'savehist-additional-variables 'magit-dash-columns)
+
 (defconst magit-dash--all-columns
   '(name branch fetched updated ci status worktree sync cached upstream)
   "All available dashboard columns in display order.")
@@ -1430,11 +1433,6 @@ Name and Branch widths are computed dynamically in `magit-dash--build-format'.")
         (not magit-dash-show-discovered-worktrees))
   (magit-dash-refresh))
 
-;;;###autoload
-(defun magit-dash-setup-savehist ()
-  "Add `magit-dash-columns' to `savehist-additional-variables'."
-  (when (boundp 'savehist-additional-variables)
-    (add-to-list 'savehist-additional-variables 'magit-dash-columns)))
 
 ;;;; Formatting helpers
 
@@ -2568,12 +2566,6 @@ Signals `user-error' when the current row is not a worktree."
     (magit-dash--with-repo repo
       (call-interactively #'magit-worktree-delete))
     (magit-dash-refresh)))
-
-(defun magit-dash-builder ()
-  "Run `builder-compile-project' in the repository at point."
-  (interactive)
-  (magit-dash--with-repo (magit-dash--repo-at-point)
-    (call-interactively #'builder-compile-project)))
 
 (defun magit-dash-agent-shell ()
   "Switch to an `agent-shell' session for the repository at point."

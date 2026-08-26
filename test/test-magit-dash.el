@@ -1710,6 +1710,10 @@ they are not consulted even when their own auto-* flags are set."
   (should (eq t (alist-get 'ci magit-dash-columns)))
   (should (eq nil (alist-get 'upstream magit-dash-columns))))
 
+(ert-deftest magit-dash/savehist-additional-variables ()
+  "magit-dash-columns is included in savehist-additional-variables."
+  (should (memq 'magit-dash-columns savehist-additional-variables)))
+
 (ert-deftest magit-dash/column-disabled ()
   "A disabled column is excluded from active-columns."
   (let ((magit-dash-columns
