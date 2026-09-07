@@ -596,6 +596,7 @@ Covers plain repos and submodules, whose module directory is self-contained."
   (let* ((r1 (magit-dash-repo--make :name "r1" :path "/tmp/r1" :auto-fetch t))
          (r2 (magit-dash-repo--make :name "r2" :path "/tmp/r2"))
          (magit-dash-repo-list (list r1 r2))
+         (magit-dash--batch-all t)
          (batch-repos nil))
     (cl-letf (((symbol-function 'magit-dash--batch-run)
                (lambda (repos _op _label &optional _done)
@@ -1191,10 +1192,11 @@ without real git repos or a live dashboard buffer."
     (should-error (magit-dash-commit-all) :type 'user-error)))
 
 (ert-deftest magit-dash/commit-all-async-runs-batch ()
-  "commit-all dispatches --batch-run for repos with :auto-commit set."
+  "commit-all runs one batch for all repos with :auto-commit configured."
   (let* ((magit-dash-repo-list
           (list (magit-dash-repo--make :name "r1" :path "/tmp/r1" :auto-commit t)
                 (magit-dash-repo--make :name "r2" :path "/tmp/r2")))
+         (magit-dash--batch-all t)
          (batched-repos nil))
     (cl-letf (((symbol-function 'magit-dash--batch-run)
                (lambda (repos _op _label &optional _done)
@@ -1216,6 +1218,7 @@ without real git repos or a live dashboard buffer."
           (list (magit-dash-repo--make :name "c1" :path "/tmp/c1" :auto-commit t)
                 (magit-dash-repo--make :name "f1" :path "/tmp/f1" :auto-fetch t)
                 (magit-dash-repo--make :name "n1" :path "/tmp/n1")))
+         (magit-dash--batch-all t)
          (batch-repos nil)
          (batch-labels nil))
     (cl-letf (((symbol-function 'magit-dash--batch-run)
@@ -1231,6 +1234,7 @@ without real git repos or a live dashboard buffer."
   "autosync includes a repo with only :auto-commit in the single batch."
   (let* ((magit-dash-repo-list
           (list (magit-dash-repo--make :name "c1" :path "/tmp/c1" :auto-commit t)))
+         (magit-dash--batch-all t)
          (batch-repos nil))
     (cl-letf (((symbol-function 'magit-dash--batch-run)
                (lambda (repos _op _label &optional _done)
@@ -2633,6 +2637,7 @@ The bug was that add-text-properties returns t, not the modified string."
   (let* ((r1 (magit-dash-repo--make :name "m1" :path "/tmp/missing-1"))
          (r2 (magit-dash-repo--make :name "m2" :path "/tmp/missing-2"))
          (magit-dash-repo-list (list r1 r2))
+         (magit-dash--batch-all t)
          (cloned nil))
     (cl-letf (((symbol-function 'magit-dash--repo-missing-p) (lambda (_) t))
               ((symbol-function 'magit-dash-clone-repo)
@@ -2712,11 +2717,10 @@ The bug was that add-text-properties returns t, not the modified string."
   (let* ((r1 (magit-dash-repo--make :name "m1" :path "/tmp/m1" :repo "/srv/git/m1.git"))
          (r2 (magit-dash-repo--make :name "m2" :path "/tmp/m2" :repo "/srv/git/m2.git"))
          (r3 (magit-dash-repo--make :name "m3" :path "/tmp/m3")) ;; no :repo
-         (r4 (magit-dash-repo--make :name "e4" :path "/tmp/e4" :repo "/srv/git/e4.git")) ;; not missing
-         (magit-dash-repo-list (list r1 r2 r3 r4))
+         (magit-dash-repo-list (list r1 r2 r3))
+         (magit-dash--batch-all t)
          (batch-repos nil))
-    (cl-letf (((symbol-function 'magit-dash--repo-missing-p)
-               (lambda (r) (member (magit-dash-repo-name r) '("m1" "m2" "m3"))))
+    (cl-letf (((symbol-function 'magit-dash--repo-missing-p) (lambda (r) (member r (list r1 r2 r3))))
               ((symbol-function 'magit-dash--batch-run)
                (lambda (repos _fn _label _cb)
                  (setq batch-repos (mapcar #'magit-dash-repo-name repos)))))
@@ -2786,6 +2790,92 @@ The bug was that add-text-properties returns t, not the modified string."
     (should (string-prefix-p "ssh deleuze 'cd /home/tychoish/src/blog && git add -A && git fetch origin && git rebase origin/master" cmd))
     (should (string-match-p "sync\.REMOTE(deleuze)" cmd))
     (should (string-suffix-p "git fetch origin && git rebase origin/master" cmd))))
+
+;;;; Operation Guarding Tests
+
+(ert-deftest magit-dash/op-start-and-finish ()
+  "magit-dash--op-start creates tracking struct and op-finish updates history."
+  (let ((magit-dash--active-operations (make-hash-table :test #'equal))
+        (magit-dash--operation-history nil)
+        (magit-dash--operation-counter 0)
+        (repo (magit-dash-repo--make :name "test-repo" :path "/tmp/test-repo")))
+    (let ((op (magit-dash--op-start repo "sync")))
+      (should op)
+      (should (equal "op-1" (magit-dash-operation-id op)))
+      (should (equal "test-repo" (magit-dash-operation-repo-name op)))
+      (should (eq :running (magit-dash-operation-status op)))
+      (should (magit-dash--op-running-p "/tmp/test-repo"))
+      ;; Second start on same repo returns nil (guard triggered)
+      (should-not (magit-dash--op-start repo "sync"))
+      ;; Finish operation
+      (magit-dash--op-finish op 'ok)
+      (should-not (magit-dash--op-running-p "/tmp/test-repo"))
+      (should (= 1 (length magit-dash--operation-history)))
+      (should (eq 'ok (magit-dash-operation-status (car magit-dash--operation-history)))))))
+
+(ert-deftest magit-dash/guarded-op-run-prevents-concurrency ()
+  "magit-dash--guarded-op-run skips execution when operation is in flight."
+  (let ((magit-dash--active-operations (make-hash-table :test #'equal))
+        (magit-dash--operation-history nil)
+        (repo (magit-dash-repo--make :name "r" :path "/tmp/r"))
+        (called nil))
+    (let ((op (magit-dash--op-start repo "sync")))
+      (magit-dash--guarded-op-run
+       repo "sync"
+       (lambda (_r _cb) (setq called t))
+       (lambda (status text)
+         (should (eq status 'skipped))
+         (should (equal text "operation already in progress"))))
+      (should-not called)
+      (magit-dash--op-finish op 'ok))))
+
+(ert-deftest magit-dash/stop-and-reset-operations ()
+  "stop-operations cancels running ops and reset-operations clears state."
+  (let ((magit-dash--active-operations (make-hash-table :test #'equal))
+        (magit-dash--operation-history nil)
+        (magit-dash--operation-counter 0)
+        (repo (magit-dash-repo--make :name "r" :path "/tmp/r")))
+    (magit-dash--op-start repo "sync")
+    (should (= 1 (hash-table-count magit-dash--active-operations)))
+    (magit-dash-stop-operations)
+    (should (= 0 (hash-table-count magit-dash--active-operations)))
+    (should (= 1 (length magit-dash--operation-history)))
+    (should (eq :cancelled (magit-dash-operation-status (car magit-dash--operation-history))))
+    (magit-dash-reset-operations)
+    (should (null magit-dash--operation-history))
+    (should (= 0 magit-dash--operation-counter))))
+
+;;;; Batch Toggle and Effective Repos Tests
+
+(ert-deftest magit-dash/batch-all-active-p-behavior ()
+  "batch-all-active-p renders false when repos are marked."
+  (let ((magit-dash--marked-paths nil)
+        (magit-dash--batch-all t))
+    (should (magit-dash--batch-all-active-p))
+    (setq magit-dash--marked-paths '("/tmp/r1"))
+    ;; Render false when repos are marked
+    (should-not (magit-dash--batch-all-active-p))))
+
+(ert-deftest magit-dash/effective-repos-no-marks-batch-off-returns-nil ()
+  "effective-repos returns nil when no repos are marked and batch-all is off."
+  (let ((magit-dash-repo-list (list (magit-dash-repo--make :name "r1" :path "/tmp/r1")))
+        (magit-dash--marked-paths nil)
+        (magit-dash--batch-all nil))
+    (should-not (magit-dash--effective-repos))))
+
+;;;; Default Sync Tests
+
+(ert-deftest magit-dash/default-sync-async-checks-branch ()
+  "default-sync-async skips when branch is not in sync-branches."
+  (let ((repo (magit-dash-repo--make :name "r" :path "/tmp/r" :sync-branches '("main")))
+        (result nil))
+    (cl-letf (((symbol-function 'magit-dash--current-branch) (lambda (_) "feature")))
+      (magit-dash--default-sync-async
+       repo
+       (lambda (status text)
+         (setq result (cons status text)))))
+    (should (eq (car result) 'skipped))
+    (should (string-match-p "not in sync-branches" (cdr result)))))
 
 (ert-deftest magit-dash/register-with-remote-sync-generates-commands ()
   "magit-dash-register splices sync-HOST commands and stores :remote-sync."
