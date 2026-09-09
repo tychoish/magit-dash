@@ -1740,7 +1740,8 @@ When both together exceed the available window space they split it proportionall
     (define-key m (kbd "T")   #'magit-dash-toggle-column)
     (define-key m (kbd "u")   #'magit-dash-pull)
     (define-key m (kbd "U")   #'magit-dash-pull-all)
-    (define-key m (kbd "w")   #'magit-dash-worktree-add)
+    (define-key m (kbd "w")   #'magit-dash-open-worktree-dispatch)
+    (define-key m (kbd "W")   #'magit-dash-worktree-add)
     (define-key m (kbd "x")   #'magit-dash-run-command)
     (define-key m (kbd "X")   #'magit-dash-run-command-background)
     (define-key m (kbd "B")   #'magit-dash-bootstrap-repo)
@@ -2955,6 +2956,8 @@ When disabled, only explicitly marked repos are targeted."
     ("cw"  "Trigger workflow" magit-dash-gh-workflow-run
      :inapt-if-not magit-dash--repo-has-ci-p)]
    ["Worktree"
+    ("wp"  "Dispatch task"   magit-dash-open-worktree-dispatch
+     :inapt-if-not magit-dash--repo-at-point-p)
     ("wa"  "Add"             magit-dash-worktree-add
      :inapt-if-not magit-dash--can-add-worktree-p)
     ("wd"  "Delete"          magit-dash-worktree-delete
