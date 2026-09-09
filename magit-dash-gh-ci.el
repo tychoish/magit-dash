@@ -246,7 +246,11 @@ Returns the buffer."
         (agent-shell-viewport--show-buffer :shell-buffer buf)
       (if (fboundp 'agent-shell--display-buffer)
           (agent-shell--display-buffer buf)
-        (pop-to-buffer buf)))))
+        (pop-to-buffer buf))
+      (with-current-buffer buf
+        (goto-char (point-max))
+        (when-let* ((win (get-buffer-window buf t)))
+          (set-window-point win (point-max)))))))
 
 (defun magit-dash-ci--focus-on-turn-complete (shell-buffer)
   "Subscribe to `turn-complete' on SHELL-BUFFER to focus it once the turn completes."
