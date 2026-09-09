@@ -141,83 +141,6 @@ what the function does."
             (should (eq fake-buf (nth 2 inserted)))))
       (kill-buffer fake-buf))))
 
-(ert-deftest magit-dash-gh-ci/focus-shell-buffer-uses-agent-shell-display ()
-  "focus-shell-buffer delegates to agent-shell--display-buffer."
-  (let ((fake-buf (generate-new-buffer " *test-focus-shell*"))
-        (displayed-buf nil))
-    (unwind-protect
-        (cl-letf (((symbol-function 'agent-shell--display-buffer)
-                   (lambda (buf) (setq displayed-buf buf))))
-          (magit-dash-ci--focus-shell-buffer fake-buf)
-          (should (eq fake-buf displayed-buf)))
-      (kill-buffer fake-buf))))
-
-(ert-deftest magit-dash-gh-ci/focus-shell-buffer-uses-viewport-when-preferred ()
-  "focus-shell-buffer delegates to agent-shell-viewport--show-buffer when preferred."
-  (let ((fake-buf (generate-new-buffer " *test-focus-viewport*"))
-        (show-args nil))
-    (unwind-protect
-        (cl-letf (((symbol-function 'agent-shell-viewport--show-buffer)
-                   (cl-function (lambda (&key shell-buffer) (setq show-args shell-buffer)))))
-          (setq-local agent-shell-prefer-viewport-interaction t)
-          (magit-dash-ci--focus-shell-buffer fake-buf)
-          (should (eq fake-buf show-args)))
-      (kill-buffer fake-buf))))
-
-(ert-deftest magit-dash-gh-ci/focus-on-turn-complete-subscribes-and-triggers-focus ()
-  "focus-on-turn-complete subscribes to turn-complete and focuses when event fires."
-  (let* ((fake-buf (generate-new-buffer " *test-sub-shell*"))
-         (subscribed-event nil)
-         (on-event-fn nil)
-         (unsubscribed-token nil)
-         (focused-buf nil))
-    (unwind-protect
-        (cl-letf (((symbol-function 'agent-shell-subscribe-to)
-                   (cl-function
-                    (lambda (&key shell-buffer event on-event)
-                      (setq subscribed-event event
-                            on-event-fn on-event)
-                      'dummy-token)))
-                  ((symbol-function 'agent-shell-unsubscribe)
-                   (cl-function
-                    (lambda (&key subscription)
-                      (setq unsubscribed-token subscription))))
-                  ((symbol-function 'magit-dash-ci--focus-shell-buffer)
-                   (lambda (buf) (setq focused-buf buf))))
-          (magit-dash-ci--focus-on-turn-complete fake-buf)
-          (should (eq 'turn-complete subscribed-event))
-          (should (functionp on-event-fn))
-          ;; Simulate turn-complete firing
-          (funcall on-event-fn '(:event turn-complete))
-          (should (eq 'dummy-token unsubscribed-token))
-          (should (eq fake-buf focused-buf)))
-      (kill-buffer fake-buf))))
-
-(ert-deftest magit-dash-gh-ci/dispatch-prompt-queues-when-no-shell-open ()
-  "Falls back to the unassigned queue bucket when no shell is open and no
-agent-shell-menu is loaded."
-  (magit-dash-gh-ci-test--call-with-unbound
-   '(agent-shell-menu-new-shell-in-dir)
-   (lambda ()
-     (let* ((repo (magit-dash-gh-ci-test/make-repo))
-            (queued nil))
-       (cl-letf (((symbol-function 'agent-shell-buffers) (lambda () nil))
-                 ((symbol-function 'agent-shell-queue-add-unassigned)
-                  (lambda (prompt &optional _background) (setq queued prompt))))
-         (magit-dash-ci--dispatch-prompt repo "fix it please")
-         (should (equal "fix it please" queued)))))))
-
-(ert-deftest magit-dash-gh-ci/dispatch-prompt-falls-back-to-kill-ring ()
-  "Copies to the kill ring when neither agent-shell-menu nor the queue is available."
-  (magit-dash-gh-ci-test--call-with-unbound
-   '(agent-shell-menu-new-shell-in-dir agent-shell-queue-add-unassigned)
-   (lambda ()
-     (let ((repo (magit-dash-gh-ci-test/make-repo)))
-       (cl-letf (((symbol-function 'agent-shell-buffers) (lambda () nil)))
-         (kill-new "unrelated")
-         (magit-dash-ci--dispatch-prompt repo "fix it please")
-         (should (equal "fix it please" (current-kill 0))))))))
-
 ;;; magit-dash-ci-dispatch-fix-operation
 
 (ert-deftest magit-dash-gh-ci/dispatch-fix-operation-errors-when-ci-disabled ()
@@ -226,48 +149,50 @@ agent-shell-menu is loaded."
     (should-error (magit-dash-ci-dispatch-fix-operation repo) :type 'user-error)))
 
 (ert-deftest magit-dash-gh-ci/dispatch-fix-operation-uses-cached-run-id ()
-  "Passes the cached run-id through to the download pipeline without fetching."
+  "Passes the cached run-id through to agent-shell-prompt-exec."
   (let* ((repo (magit-dash-gh-ci-test/make-repo "cached" "/tmp/cached-repo" "main"))
-         (captured-ctx nil))
+         (captured-prompt nil)
+         (captured-args nil))
     (magit-dash-gh--cache-set "/tmp/cached-repo" :ci-status (list :run-id 123 :url "https://example.com"))
-    (cl-letf (((symbol-function 'magit-dash-gh--check-gh) (lambda () nil))
-              ((symbol-function 'magit-dash-gh-ci-fetch)
+    (cl-letf (((symbol-function 'magit-dash-gh-ci-fetch)
                (lambda (&rest _) (error "should not fetch when status is already cached")))
-              ((symbol-function 'magit-dash-gh-actions--step-run-info)
-               (lambda (ctx) (setq captured-ctx ctx))))
+              ((symbol-function 'agent-shell-prompt-exec)
+               (lambda (prompt args)
+                 (setq captured-prompt prompt
+                       captured-args args))))
       (magit-dash-ci-dispatch-fix-operation repo)
-      (should (= 123 (plist-get captured-ctx :run-id)))
-      (should (equal "/tmp/cached-repo" (plist-get captured-ctx :repo-dir)))
-      (should (equal "main" (plist-get captured-ctx :branch)))
-      (should (functionp (plist-get captured-ctx :on-complete))))))
+      (should (eq 'fix-ci captured-prompt))
+      (should (equal "cached" (plist-get captured-args :repo)))
+      (should (= 123 (plist-get captured-args :run-id))))))
 
 (ert-deftest magit-dash-gh-ci/dispatch-fix-operation-fetches-when-uncached ()
-  "Fetches CI status first when none is cached, then proceeds with its run-id."
+  "Fetches CI status first when none is cached, then calls agent-shell-prompt-exec."
   (let* ((repo (magit-dash-gh-ci-test/make-repo "uncached" "/tmp/uncached-repo" "main"))
          (fetch-called nil)
-         (captured-ctx nil))
-    (cl-letf (((symbol-function 'magit-dash-gh--check-gh) (lambda () nil))
-              ((symbol-function 'magit-dash-gh-ci-fetch)
+         (captured-prompt nil)
+         (captured-args nil))
+    (cl-letf (((symbol-function 'magit-dash-gh-ci-fetch)
                (lambda (r callback)
                  (setq fetch-called r)
                  (funcall callback (list :run-id 456 :url "https://example.com"))))
-              ((symbol-function 'magit-dash-gh-actions--step-run-info)
-               (lambda (ctx) (setq captured-ctx ctx))))
+              ((symbol-function 'agent-shell-prompt-exec)
+               (lambda (prompt args)
+                 (setq captured-prompt prompt
+                       captured-args args))))
       (magit-dash-ci-dispatch-fix-operation repo)
       (should (eq repo fetch-called))
-      (should (= 456 (plist-get captured-ctx :run-id))))))
+      (should (eq 'fix-ci captured-prompt))
+      (should (= 456 (plist-get captured-args :run-id))))))
 
 (ert-deftest magit-dash-gh-ci/dispatch-fix-operation-messages-when-fetch-finds-no-run ()
-  "Does not error or download when the fetch callback finds no run."
+  "Does not error or call prompt-exec when the fetch callback finds no run."
   (let* ((repo (magit-dash-gh-ci-test/make-repo "empty" "/tmp/empty-repo" "main"))
-         (download-called nil))
-    (cl-letf (((symbol-function 'magit-dash-gh--check-gh) (lambda () nil))
-              ((symbol-function 'magit-dash-gh-ci-fetch)
+         (exec-called nil))
+    (cl-letf (((symbol-function 'magit-dash-gh-ci-fetch)
                (lambda (_r callback) (funcall callback nil)))
-              ((symbol-function 'magit-dash-gh-actions--step-run-info)
-               (lambda (&rest _) (setq download-called t))))
+              ((symbol-function 'agent-shell-prompt-exec)
+               (lambda (&rest _) (setq exec-called t))))
       (magit-dash-ci-dispatch-fix-operation repo)
-      (should-not download-called))))
-
+      (should-not exec-called))))
 (provide 'test-magit-dash-gh-ci)
 ;;; test-magit-dash-gh-ci.el ends here
