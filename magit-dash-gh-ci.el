@@ -164,7 +164,13 @@ Does nothing when no CI status is cached for REPO."
                       (o (plist-get info :owner))
                       (r (plist-get info :repo)))
             (format "%s/%s" o r)))
-        (magit-dash-repo-name repo))))
+        (when-let ((pair (or (magit-dash-gh--owner-repo-from-url (magit-dash-repo-repo repo))
+                             (magit-dash-gh--owner-repo-from-url (magit-dash-repo-clone-url repo)))))
+          (format "%s/%s" (car pair) (cdr pair)))
+        (let ((name (magit-dash-repo-name repo)))
+          (if (string-match-p "/" name)
+              name
+            (user-error "Cannot determine GitHub owner/repo slug for %s" name))))))
 
 (defun magit-dash-ci--download-and-dispatch (repo run-id)
   "Dispatch the `fix-ci' prompt library workflow for REPO and RUN-ID.

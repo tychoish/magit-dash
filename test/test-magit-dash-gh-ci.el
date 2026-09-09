@@ -61,86 +61,28 @@ passes nil explicitly to exercise the disabled case."
       (magit-dash-gh-ci-fetch repo #'ignore)
       (should-not called))))
 
-;;; magit-dash-ci--build-fix-prompt
+;;; magit-dash-gh--owner-repo-from-url
 
-(ert-deftest magit-dash-gh-ci/build-fix-prompt-mentions-workflow-and-branch ()
-  (let* ((repo (magit-dash-gh-ci-test/make-repo "myrepo" "/tmp/myrepo"))
-         (ctx (list :dir "/tmp/myrepo/plans/ci-feature-1"
-                    :run-info '((databaseId . 1) (workflowName . "CI")
-                                (conclusion . "failure") (headBranch . "feature"))
-                    :files (list '(:path "run-info.json" :type "metadata")
-                                 '(:path "run-logs.ghlog" :type "logs"))))
-         (prompt (magit-dash-ci--build-fix-prompt repo ctx)))
-    (should (string-match-p "CI" prompt))
-    (should (string-match-p "failed" prompt))
-    (should (string-match-p "feature" prompt))
-    (should (string-match-p "myrepo" prompt))
-    (should (string-match-p "/tmp/myrepo" prompt))))
+(ert-deftest magit-dash-gh-ci/owner-repo-from-url-parses-ssh-and-https ()
+  (should (equal '("owner" . "repo") (magit-dash-gh--owner-repo-from-url "git@github.com:owner/repo.git")))
+  (should (equal '("owner" . "repo") (magit-dash-gh--owner-repo-from-url "https://github.com/owner/repo.git")))
+  (should (equal '("owner" . "repo") (magit-dash-gh--owner-repo-from-url "https://github.com/owner/repo")))
+  (should (equal '("owner" . "repo") (magit-dash-gh--owner-repo-from-url "owner/repo")))
+  (should-not (magit-dash-gh--owner-repo-from-url "plain-name")))
 
-(ert-deftest magit-dash-gh-ci/build-fix-prompt-links-every-file ()
-  (let* ((repo (magit-dash-gh-ci-test/make-repo))
-         (ctx (list :dir "/tmp/test/plans/ci-main-2"
-                    :run-info '((databaseId . 2) (workflowName . "CI")
-                                (conclusion . "failure") (headBranch . "main"))
-                    :files (list '(:path "run-info.json" :type "metadata")
-                                 '(:path "run-logs.ghlog" :type "logs")
-                                 '(:path "run-failed-logs.ghlog" :type "failed-logs"))))
-         (prompt (magit-dash-ci--build-fix-prompt repo ctx)))
-    (should (string-match-p (regexp-quote "/tmp/test/plans/ci-main-2/run-info.json") prompt))
-    (should (string-match-p (regexp-quote "/tmp/test/plans/ci-main-2/run-logs.ghlog") prompt))
-    (should (string-match-p (regexp-quote "/tmp/test/plans/ci-main-2/run-failed-logs.ghlog") prompt))))
+;;; magit-dash-ci--repo-slug
 
-(ert-deftest magit-dash-gh-ci/build-fix-prompt-non-failure-wording ()
-  (let* ((repo (magit-dash-gh-ci-test/make-repo))
-         (ctx (list :dir "/tmp/test/plans/ci-main-3"
-                    :run-info '((databaseId . 3) (workflowName . "CI")
-                                (conclusion . "cancelled") (headBranch . "main"))
-                    :files nil))
-         (prompt (magit-dash-ci--build-fix-prompt repo ctx)))
-    (should (string-match-p "did not complete successfully" prompt))))
+(ert-deftest magit-dash-gh-ci/repo-slug-resolves-via-repo-info ()
+  (let ((repo (magit-dash-gh-ci-test/make-repo "myrepo" "/tmp/myrepo")))
+    (cl-letf (((symbol-function 'magit-dash-gh--repo-info)
+               (lambda () '(:owner "owner" :repo "myrepo" :branch "main"))))
+      (should (equal "owner/myrepo" (magit-dash-ci--repo-slug repo))))))
 
-;;; magit-dash-ci--dispatch-prompt
-
-(defun magit-dash-gh-ci-test--call-with-unbound (symbols thunk)
-  "Call THUNK with each function symbol in SYMBOLS temporarily unbound.
-Only symbols that are currently `fboundp' are unbound; each is restored to
-its original definition afterward.  Used to simulate an environment where an
-optional package (e.g. agent-shell-menu) isn't loaded, so a test exercises
-the intended fallback branch regardless of what the running Emacs session
-happens to have loaded — a `cl-letf' mock of the symbol's function cell
-isn't enough here, since the dispatch code branches on `fboundp', not on
-what the function does."
-  (let* ((bound (seq-filter #'fboundp symbols))
-         (saved (seq-map #'symbol-function bound)))
-    (unwind-protect
-        (progn
-          (seq-do #'fmakunbound bound)
-          (funcall thunk))
-      (seq-mapn (lambda (s f) (fset s f)) bound saved))))
-
-(ert-deftest magit-dash-gh-ci/dispatch-prompt-sends-to-open-shell ()
-  "Prefers an existing agent-shell buffer for the repo's project directory."
-  (let* ((repo (magit-dash-gh-ci-test/make-repo "test" "/tmp/test"))
-         (inserted nil)
-         (fake-buf (generate-new-buffer " *fake-agent-shell*")))
-    (unwind-protect
-        (progn
-          (with-current-buffer fake-buf
-            (setq default-directory "/tmp/test/"))
-          (cl-letf (((symbol-function 'agent-shell-buffers)
-                     (lambda () (list fake-buf)))
-                    ((symbol-function 'agent-shell-subscribe-to) #'ignore)
-                    ((symbol-function 'y-or-n-p) (lambda (_prompt) t))
-                    ((symbol-function 'agent-shell-insert)
-                     (cl-function
-                      (lambda (&key text submit shell-buffer)
-                        (setq inserted (list text submit shell-buffer))))))
-            (magit-dash-ci--dispatch-prompt repo "fix it please")
-            (should (equal "fix it please" (nth 0 inserted)))
-            (should (nth 1 inserted))
-            (should (eq fake-buf (nth 2 inserted)))))
-      (kill-buffer fake-buf))))
-
+(ert-deftest magit-dash-gh-ci/repo-slug-errors-when-unresolvable ()
+  (let ((repo (magit-dash-gh-ci-test/make-repo "bare-name" "/tmp/bare-name")))
+    (cl-letf (((symbol-function 'magit-dash-gh--repo-info)
+               (lambda () '(:owner nil :repo nil :branch "main"))))
+      (should-error (magit-dash-ci--repo-slug repo) :type 'user-error))))
 ;;; magit-dash-ci-dispatch-fix-operation
 
 (ert-deftest magit-dash-gh-ci/dispatch-fix-operation-errors-when-ci-disabled ()

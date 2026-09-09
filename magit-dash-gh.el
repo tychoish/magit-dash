@@ -94,7 +94,10 @@ Signals `user-error' when not inside a git repository."
 	 (output (string-trim
 		  (shell-command-to-string
 		   "gh repo view --json defaultBranchRef --jq .defaultBranchRef.name"))))
-    (if (string-empty-p output) "main" output)))
+    (if (and (not (string-empty-p output))
+             (not (string-match-p "[[:space:]]" output)))
+        output
+      "main")))
 
 (defun magit-dash-gh--prune-cache-file ()
   "Return the cache file path for the current repo, or nil when caching is disabled.
@@ -472,16 +475,47 @@ signal."
         (setq default-directory dir))
       proc)))
 
+(defun magit-dash-gh--owner-repo-from-url (url)
+  "Extract (OWNER . REPO) pair from URL or slug string if possible."
+  (when (and url (stringp url))
+    (let ((clean (replace-regexp-in-string "\\.git\\'" "" (string-trim url))))
+      (cond
+       ((string-match "github\\.com[:/]\\([^/]+\\)/\\([^/]+\\)\\'" clean)
+        (cons (match-string 1 clean) (match-string 2 clean)))
+       ((string-match "\\`\\([^/]+\\)/\\([^/]+\\)\\'" clean)
+        (cons (match-string 1 clean) (match-string 2 clean)))))))
+
 (defun magit-dash-gh--repo-info ()
   "Return a plist :owner :repo :branch for the current repository.
-Uses `gh repo view' and `magit-get-current-branch'."
-  (let* ((default-directory (magit-dash-gh--repo-dir))
-         (output (string-trim
-                  (shell-command-to-string
-                   "gh repo view --json owner,name --jq '[.owner.login,.name]|@tsv'")))
-         (parts (split-string output "\t")))
-    (list :owner  (nth 0 parts)
-          :repo   (nth 1 parts)
+Uses `gh repo view', git remotes, and `magit-get-current-branch'."
+  (let* ((dir (magit-dash-gh--repo-dir))
+         (default-directory dir)
+         owner repo)
+    (ignore-errors
+      (let* ((output (string-trim
+                      (shell-command-to-string
+                       "gh repo view --json owner,name --jq '[.owner.login,.name]|@tsv'")))
+             (parts (split-string output "\t")))
+        (when (and (= (length parts) 2)
+                   (not (string-empty-p (nth 0 parts)))
+                   (not (string-empty-p (nth 1 parts)))
+                   (not (string-match-p "[[:space:]]" (nth 0 parts)))
+                   (not (string-match-p "[[:space:]]" (nth 1 parts))))
+          (setq owner (nth 0 parts)
+                repo  (nth 1 parts)))))
+    (unless (and owner repo)
+      (let ((urls (ignore-errors
+                    (delq nil (list (magit-get "remote" "origin" "url")
+                                    (magit-get "remote" "pushdefault" "url")
+                                    (magit-get "remote" "upstream" "url"))))))
+        (seq-some (lambda (u)
+                    (when-let ((pair (magit-dash-gh--owner-repo-from-url u)))
+                      (setq owner (car pair)
+                            repo  (cdr pair))
+                      t))
+                  urls)))
+    (list :owner  owner
+          :repo   repo
           :branch (magit-get-current-branch))))
 
 ;;; Account switching
