@@ -148,51 +148,18 @@ what the function does."
   (let ((repo (magit-dash-gh-ci-test/make-repo "disabled" "/tmp/disabled-repo" nil nil)))
     (should-error (magit-dash-ci-dispatch-fix-operation repo) :type 'user-error)))
 
-(ert-deftest magit-dash-gh-ci/dispatch-fix-operation-uses-cached-run-id ()
-  "Passes the cached run-id through to agent-shell-prompt-exec."
-  (let* ((repo (magit-dash-gh-ci-test/make-repo "cached" "/tmp/cached-repo" "main"))
+(ert-deftest magit-dash-gh-ci/dispatch-fix-operation-dispatches-fix-ci ()
+  "Dispatches fix-ci via agent-shell-prompt-exec with resolved slug."
+  (let* ((repo (magit-dash-gh-ci-test/make-repo "myrepo" "/tmp/myrepo" "main"))
          (captured-prompt nil)
          (captured-args nil))
-    (magit-dash-gh--cache-set "/tmp/cached-repo" :ci-status (list :run-id 123 :url "https://example.com"))
-    (cl-letf (((symbol-function 'magit-dash-gh-ci-fetch)
-               (lambda (&rest _) (error "should not fetch when status is already cached")))
+    (cl-letf (((symbol-function 'magit-dash-ci--repo-slug) (lambda (_) "owner/myrepo"))
               ((symbol-function 'agent-shell-prompt-exec)
                (lambda (prompt args)
                  (setq captured-prompt prompt
                        captured-args args))))
       (magit-dash-ci-dispatch-fix-operation repo)
       (should (eq 'fix-ci captured-prompt))
-      (should (equal "cached" (plist-get captured-args :repo)))
-      (should (= 123 (plist-get captured-args :run-id))))))
-
-(ert-deftest magit-dash-gh-ci/dispatch-fix-operation-fetches-when-uncached ()
-  "Fetches CI status first when none is cached, then calls agent-shell-prompt-exec."
-  (let* ((repo (magit-dash-gh-ci-test/make-repo "uncached" "/tmp/uncached-repo" "main"))
-         (fetch-called nil)
-         (captured-prompt nil)
-         (captured-args nil))
-    (cl-letf (((symbol-function 'magit-dash-gh-ci-fetch)
-               (lambda (r callback)
-                 (setq fetch-called r)
-                 (funcall callback (list :run-id 456 :url "https://example.com"))))
-              ((symbol-function 'agent-shell-prompt-exec)
-               (lambda (prompt args)
-                 (setq captured-prompt prompt
-                       captured-args args))))
-      (magit-dash-ci-dispatch-fix-operation repo)
-      (should (eq repo fetch-called))
-      (should (eq 'fix-ci captured-prompt))
-      (should (= 456 (plist-get captured-args :run-id))))))
-
-(ert-deftest magit-dash-gh-ci/dispatch-fix-operation-messages-when-fetch-finds-no-run ()
-  "Does not error or call prompt-exec when the fetch callback finds no run."
-  (let* ((repo (magit-dash-gh-ci-test/make-repo "empty" "/tmp/empty-repo" "main"))
-         (exec-called nil))
-    (cl-letf (((symbol-function 'magit-dash-gh-ci-fetch)
-               (lambda (_r callback) (funcall callback nil)))
-              ((symbol-function 'agent-shell-prompt-exec)
-               (lambda (&rest _) (setq exec-called t))))
-      (magit-dash-ci-dispatch-fix-operation repo)
-      (should-not exec-called))))
+      (should (equal "owner/myrepo" (plist-get captured-args :repo))))))
 (provide 'test-magit-dash-gh-ci)
 ;;; test-magit-dash-gh-ci.el ends here
