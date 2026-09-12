@@ -331,6 +331,10 @@ Detailed API documentation for all modules, options, and commands is available i
 | Symbol / Command                       | Kind     | Description                                                          |
 |----------------------------------------+----------+----------------------------------------------------------------------|
 | [[file:docs/api.org::#magit-dash-open][~magit-dash-open~]]                      | Command  | Open the primary multi-repository status dashboard buffer            |
+| [[file:docs/api.org::#magit-dash-hide-repo][~magit-dash-hide-repo~]]                 | Command  | Hide repository at point (or marked repositories) from list view     |
+| [[file:docs/api.org::#magit-dash-unhide-all][~magit-dash-unhide-all~]]                | Command  | Restore all hidden repositories to the dashboard list view           |
+| [[file:docs/api.org::#magit-dash-unhide-repo][~magit-dash-unhide-repo~]]               | Command  | Select and restore a single hidden repository via completion         |
+| [[file:docs/api.org::#magit-dash-hide-select][~magit-dash-hide-select~]]               | Command  | Interactive picker to toggle repository visibility in dashboard      |
 | [[file:docs/api.org::#magit-dash-open-repo][~magit-dash-open-repo~]]                 | Command  | Interactive fuzzy picker to jump quickly to any local git repository |
 | [[file:docs/api.org::#magit-dash-register][~magit-dash-register~]]                  | Function | Register a repository with sync rules, hooks, commands, and remotes  |
 | [[file:docs/api.org::#magit-dash-status-setup][~magit-dash-status-setup~]]              | Function | Install GitHub CI/PR section headers and dispatch key into Magit     |

@@ -791,6 +791,133 @@ without real git repos or a live dashboard buffer."
           (magit-dash-refresh))))
     (should (= 2 (length built)))))
 
+(ert-deftest magit-dash/hide-repo-at-point ()
+  "Hiding repo at point adds path to `magit-dash--hidden-paths' and removes entry."
+  (let* ((r1 (magit-dash-repo--make :name "r1" :path "/tmp/r1"))
+         (r2 (magit-dash-repo--make :name "r2" :path "/tmp/r2"))
+         (magit-dash-repo-list (list r1 r2)))
+    (with-temp-buffer
+      (magit-dash-mode)
+      (setq tabulated-list-entries
+            (list (magit-dash--build-entry r1)
+                  (magit-dash--build-entry r2)))
+      (cl-letf (((symbol-function 'magit-dash--repo-at-point) (lambda () r1)))
+        (magit-dash-hide-repo)
+        (should (equal magit-dash--hidden-paths '("/tmp/r1")))
+        (should (= 1 (length tabulated-list-entries)))
+        (should (eq (caar tabulated-list-entries) r2))))))
+
+(ert-deftest magit-dash/hide-repo-marked ()
+  "Hiding when marks exist hides all marked repos and clears marks."
+  (let* ((r1 (magit-dash-repo--make :name "r1" :path "/tmp/r1"))
+         (r2 (magit-dash-repo--make :name "r2" :path "/tmp/r2"))
+         (r3 (magit-dash-repo--make :name "r3" :path "/tmp/r3"))
+         (magit-dash-repo-list (list r1 r2 r3)))
+    (with-temp-buffer
+      (magit-dash-mode)
+      (setq tabulated-list-entries
+            (list (magit-dash--build-entry r1)
+                  (magit-dash--build-entry r2)
+                  (magit-dash--build-entry r3)))
+      (setq-local magit-dash--marked-paths '("/tmp/r1" "/tmp/r3"))
+      (magit-dash-hide-repo)
+      (should (null magit-dash--marked-paths))
+      (should (member "/tmp/r1" magit-dash--hidden-paths))
+      (should (member "/tmp/r3" magit-dash--hidden-paths))
+      (should-not (member "/tmp/r2" magit-dash--hidden-paths))
+      (should (= 1 (length tabulated-list-entries)))
+      (should (eq (caar tabulated-list-entries) r2)))))
+
+(ert-deftest magit-dash/hide-repo-omits-from-refresh ()
+  "Refresh excludes repositories in `magit-dash--hidden-paths'."
+  (let* ((r1 (magit-dash-repo--make :name "r1" :path "/tmp/r1"))
+         (r2 (magit-dash-repo--make :name "r2" :path "/tmp/r2"))
+         (magit-dash-repo-list (list r1 r2))
+         (built nil))
+    (magit-dash-test--with-refresh-stubs
+      (cl-letf (((symbol-function 'magit-dash--build-entry)
+                 (lambda (r) (push (magit-dash-repo-name r) built) nil)))
+        (with-temp-buffer
+          (setq-local magit-dash--hidden-paths '("/tmp/r1"))
+          (magit-dash-refresh))))
+    (should (= 1 (length built)))
+    (should (member "r2" built))
+    (should-not (member "r1" built))))
+
+(ert-deftest magit-dash/unhide-all-restores-entries ()
+  "Unhiding all clears `magit-dash--hidden-paths' and restores repos on refresh."
+  (let* ((r1 (magit-dash-repo--make :name "r1" :path "/tmp/r1"))
+         (r2 (magit-dash-repo--make :name "r2" :path "/tmp/r2"))
+         (magit-dash-repo-list (list r1 r2))
+         (built nil))
+    (magit-dash-test--with-refresh-stubs
+      (cl-letf (((symbol-function 'magit-dash--build-entry)
+                 (lambda (r) (push (magit-dash-repo-name r) built) nil)))
+        (with-temp-buffer
+          (setq-local magit-dash--hidden-paths '("/tmp/r1" "/tmp/r2"))
+          (magit-dash-unhide-all)
+          (should (null magit-dash--hidden-paths)))))
+    (should (= 2 (length built)))
+    (should (member "r1" built))
+    (should (member "r2" built))))
+
+(ert-deftest magit-dash/has-hidden-p-and-can-hide-p ()
+  "Tests transient predicates for hidden repos."
+  (with-temp-buffer
+    (magit-dash-mode)
+    (should-not (magit-dash--has-hidden-p))
+    (setq-local magit-dash--hidden-paths '("/tmp/foo"))
+    (should (magit-dash--has-hidden-p))
+    ;; can-hide-p with marks
+    (should-not (magit-dash--can-hide-p))
+    (setq-local magit-dash--marked-paths '("/tmp/bar"))
+    (should (magit-dash--can-hide-p))))
+
+(ert-deftest magit-dash/unhide-repo-acr ()
+  "Unhiding a single repo via ACR removes only that path."
+  (let* ((r1 (magit-dash-repo--make :name "r1" :path "/tmp/r1"))
+         (r2 (magit-dash-repo--make :name "r2" :path "/tmp/r2"))
+         (magit-dash-repo-list (list r1 r2)))
+    (magit-dash-test--with-refresh-stubs
+      (with-temp-buffer
+        (setq-local magit-dash--hidden-paths '("/tmp/r1" "/tmp/r2"))
+        (cl-letf (((symbol-function 'annotated-completing-read) (lambda (_table &rest _) "/tmp/r1")))
+          (magit-dash-unhide-repo)
+          (should (equal magit-dash--hidden-paths '("/tmp/r2"))))))))
+
+(ert-deftest magit-dash/unhide-repo-errors-when-none ()
+  "Unhiding when no repos are hidden signals user-error."
+  (with-temp-buffer
+    (setq-local magit-dash--hidden-paths nil)
+    (should-error (magit-dash-unhide-repo) :type 'user-error)))
+
+(ert-deftest magit-dash/hide-select-acr ()
+  "Toggling repo visibility via ACR hides visible repo and unhides hidden repo."
+  (let* ((r1 (magit-dash-repo--make :name "r1" :path "/tmp/r1"))
+         (r2 (magit-dash-repo--make :name "r2" :path "/tmp/r2"))
+         (magit-dash-repo-list (list r1 r2)))
+    (magit-dash-test--with-refresh-stubs
+      (with-temp-buffer
+        (magit-dash-mode)
+        ;; 1. Hide r1
+        (cl-letf (((symbol-function 'annotated-completing-read) (lambda (_table &rest _) r1)))
+          (magit-dash-hide-select)
+          (should (member "/tmp/r1" magit-dash--hidden-paths)))
+        ;; 2. Unhide r1
+        (cl-letf (((symbol-function 'annotated-completing-read) (lambda (_table &rest _) r1)))
+          (magit-dash-hide-select)
+          (should-not (member "/tmp/r1" magit-dash--hidden-paths)))))))
+
+(ert-deftest magit-dash/keymap-prefixed-hide ()
+  "Verify hide keybindings are prefixed under h."
+  (let ((map magit-dash-mode-map))
+    (should (eq (lookup-key map (kbd "h r")) #'magit-dash-hide-repo))
+    (should (eq (lookup-key map (kbd "h c")) #'magit-dash-unhide-all))
+    (should (eq (lookup-key map (kbd "h u")) #'magit-dash-unhide-repo))
+    (should (eq (lookup-key map (kbd "h s")) #'magit-dash-hide-select))
+    (should (eq (lookup-key map (kbd "x c")) #'magit-dash-run-command))
+    (should (eq (lookup-key map (kbd "x b")) #'magit-dash-run-command-background))))
+
 ;;;; magit-dash--build-format
 
 (ert-deftest magit-dash/build-format-elastic-width ()
@@ -2038,21 +2165,28 @@ in magit-dash-repo-list, preventing duplicate rows."
 ;;;; Transient menu key conflict detection
 
 (defun test-magit-dash--transient-keys (prefix)
-  "Collect all key strings from transient PREFIX layout.
-Layout shape: [2 nil (ROW)] where ROW = [transient-columns nil (COL...)]
-and each COL = [transient-column PROPS ((transient-suffix :key K ...) ...)]."
+  "Collect all key strings from transient PREFIX layout across all rows and columns."
   (when-let* ((layout (get prefix 'transient--layout))
               ((vectorp layout))
-              (rows (aref layout 2))
-              (row (car rows))
-              ((vectorp row))
-              (cols (aref row 2)))
-    (thread-last (if (vectorp cols) (append cols nil) cols)
-      (seq-filter #'vectorp)
-      (seq-mapcat (lambda (col) (aref col 2)))
-      (seq-filter (lambda (s) (and (listp s) (eq (car s) 'transient-suffix))))
-      (seq-map (lambda (s) (plist-get (cdr s) :key)))
-      (seq-remove #'null))))
+              (rows (aref layout 2)))
+    (let ((keys nil))
+      (seq-do
+       (lambda (row)
+         (when (vectorp row)
+           (let ((cols (aref row 2)))
+             (seq-do
+              (lambda (col)
+                (when (vectorp col)
+                  (let ((items (aref col 2)))
+                    (seq-do
+                     (lambda (s)
+                       (when (and (listp s) (eq (car s) 'transient-suffix))
+                         (when-let* ((k (plist-get (cdr s) :key)))
+                           (push k keys))))
+                     items))))
+              (if (vectorp cols) (append cols nil) cols)))))
+       rows)
+      (nreverse keys))))
 
 (ert-deftest magit-dash/transient-predicates-safe-with-no-repo ()
   "All transient :inapt-if-not predicates return nil (not error) with no repo at point."

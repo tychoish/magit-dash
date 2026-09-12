@@ -542,6 +542,8 @@ run the command in the background without popping up or stealing focus."
                 (save-window-excursion (funcall target))
                 (message "magit-dash: [%s] function '%s' finished" repo-name cmd-name))
             (funcall target)))
+         ((symbolp target)
+          (user-error "Command '%s' resolves to undefined function '%s'" cmd-name target))
          (t (user-error "Command has unsupported type %s" (type-of target))))))))
 
 (defun magit-dash--resolve-git-dir (path)
@@ -1723,6 +1725,10 @@ When both together exceed the available window space they split it proportionall
     (define-key m (kbd "F")   #'magit-dash-fetch-all)
     (define-key m (kbd "g")   #'magit-dash-refresh)
     (define-key m (kbd "G")   #'magit-dash-stage-all)
+    (define-key m (kbd "h r") #'magit-dash-hide-repo)
+    (define-key m (kbd "h c") #'magit-dash-unhide-all)
+    (define-key m (kbd "h u") #'magit-dash-unhide-repo)
+    (define-key m (kbd "h s") #'magit-dash-hide-select)
     (define-key m (kbd "i")   #'magit-dash-add-tag)
     (define-key m (kbd "k")   #'magit-dash-worktree-delete)
     (define-key m (kbd "l")   #'magit-dash-magit-log)
@@ -1743,8 +1749,8 @@ When both together exceed the available window space they split it proportionall
     (define-key m (kbd "U")   #'magit-dash-pull-all)
     (define-key m (kbd "w")   #'magit-dash-open-worktree-dispatch)
     (define-key m (kbd "W")   #'magit-dash-worktree-add)
-    (define-key m (kbd "x")   #'magit-dash-run-command)
-    (define-key m (kbd "X")   #'magit-dash-run-command-background)
+    (define-key m (kbd "x c") #'magit-dash-run-command)
+    (define-key m (kbd "x b") #'magit-dash-run-command-background)
     (define-key m (kbd "B")   #'magit-dash-bootstrap-repo)
     (define-key m (kbd "C")   #'magit-dash-clone-repo)
     (define-key m (kbd "y")   #'magit-dash-prune-branches)
@@ -1777,6 +1783,9 @@ These tags are session-local and are not saved to the repo registry.")
 
 (defvar-local magit-dash--marked-paths nil
   "List of repo paths currently marked for batch operations.")
+
+(defvar-local magit-dash--hidden-paths nil
+  "List of repo paths currently hidden from the dashboard view.")
 
 (defvar-local magit-dash--batch-all nil
   "When non-nil, batch operations act on all repos in the table.
@@ -1994,13 +2003,19 @@ as data arrives."
                             (or (magit-dash-gh--cache-get (magit-dash-repo-path repo) :submodules) '())))
                   magit-dash-repo-list)
           paths))
-  (let ((repos (magit-dash--sorted-repos
-                (if magit-dash--tag-filter
-                    (seq-filter (lambda (r)
-                                  (memq magit-dash--tag-filter
-                                        (magit-dash--all-tags-for r)))
-                                magit-dash-repo-list)
-                  magit-dash-repo-list))))
+  (let* ((visible-base
+          (seq-filter
+           (lambda (r)
+             (and (not (member (magit-dash-repo-path r) magit-dash--hidden-paths))
+                  (if magit-dash--tag-filter
+                      (memq magit-dash--tag-filter
+                            (magit-dash--all-tags-for r))
+                    t)))
+           magit-dash-repo-list))
+         (repos (seq-filter
+                 (lambda (r)
+                   (not (member (magit-dash-repo-path r) magit-dash--hidden-paths)))
+                 (magit-dash--sorted-repos visible-base))))
     (setq tabulated-list-format (magit-dash--build-format repos))
     (tabulated-list-init-header)
     (setq tabulated-list-entries (seq-map #'magit-dash--build-entry repos))
@@ -2808,6 +2823,15 @@ Signals `user-error' when `magit-dash-repo-list' is empty."
   (when-let* ((repo (ignore-errors (magit-dash--repo-at-point))))
     (not (magit-dash-repo-worktree repo))))
 
+(defun magit-dash--has-hidden-p ()
+  "Return non-nil when at least one repository is hidden in the dashboard."
+  (and magit-dash--hidden-paths t))
+
+(defun magit-dash--can-hide-p ()
+  "Return non-nil when repos can be hidden (marked repos exist or point on repo)."
+  (or (magit-dash--has-marks-p)
+      (magit-dash--repo-at-point-p)))
+
 ;;;; Mark/select support
 
 (defun magit-dash--update-entry-for (repo)
@@ -2837,11 +2861,142 @@ Signals `user-error' when `magit-dash-repo-list' is empty."
 (defun magit-dash-unmark-all ()
   "Unmark all repositories in the dashboard."
   (interactive)
+  (setq magit-dash--marked-paths nil)
   (setq tabulated-list-entries
         (seq-map (lambda (entry)
                    (magit-dash--build-entry (car entry)))
                  tabulated-list-entries))
   (tabulated-list-print t))
+
+;;;###autoload
+(defun magit-dash-hide-repo (&optional repo)
+  "Hide REPO or repository at point from the list view.
+If any repositories are marked, hides all marked repositories and clears marks.
+Otherwise, hides REPO if non-nil, or the repository at point.
+Use `magit-dash-unhide-all' to restore all hidden repositories."
+  (interactive)
+  (let ((targets (cond
+                  (repo (list repo))
+                  ((magit-dash--has-marks-p)
+                   (prog1
+                       (seq-filter (lambda (r)
+                                     (member (magit-dash-repo-path r) magit-dash--marked-paths))
+                                   (if (derived-mode-p 'magit-dash-mode)
+                                       (seq-map #'car tabulated-list-entries)
+                                     magit-dash-repo-list))
+                     (setq magit-dash--marked-paths nil)))
+                  (t (list (magit-dash--repo-at-point))))))
+    (unless targets
+      (user-error "No repository selected to hide"))
+    (dolist (target targets)
+      (let ((path (magit-dash-repo-path target)))
+        (unless (member path magit-dash--hidden-paths)
+          (push path magit-dash--hidden-paths))))
+    (if (derived-mode-p 'magit-dash-mode)
+        (progn
+          (setq tabulated-list-entries
+                (seq-remove (lambda (entry)
+                              (member (magit-dash-repo-path (car entry))
+                                      magit-dash--hidden-paths))
+                            tabulated-list-entries))
+          (tabulated-list-print t))
+      (magit-dash-refresh))
+    (if (= (length targets) 1)
+        (message "Hidden repository: %s ('hc' to clear hidden, 'hu' to unhide)"
+                 (magit-dash-repo-name (car targets)))
+      (message "Hidden %d repositories ('hc' to clear hidden, 'hu' to unhide)"
+               (length targets)))))
+
+(defalias 'magit-dash-hide #'magit-dash-hide-repo)
+
+;;;###autoload
+(defun magit-dash-unhide-all ()
+  "Restore all hidden repositories to the dashboard view."
+  (interactive)
+  (let ((count (length magit-dash--hidden-paths)))
+    (if (zerop count)
+        (message "No repositories are hidden")
+      (setq magit-dash--hidden-paths nil)
+      (magit-dash-refresh)
+      (message "Unhid %d repositor%s" count (if (= count 1) "y" "ies")))))
+
+(defalias 'magit-dash-hide-clear #'magit-dash-unhide-all)
+
+;;;###autoload
+(defun magit-dash-unhide-repo (&optional repo)
+  "Select a hidden repository using `annotated-completing-read' and restore it.
+If REPO is non-nil, restores REPO directly."
+  (interactive)
+  (unless magit-dash--hidden-paths
+    (user-error "No repositories are currently hidden"))
+  (let* ((candidates
+          (seq-map
+           (lambda (path)
+             (let* ((r (seq-find (lambda (item) (equal (magit-dash-repo-path item) path))
+                                 magit-dash-repo-list))
+                    (name (if r (magit-dash-repo-name r)
+                            (file-name-nondirectory (directory-file-name path))))
+                    (ann (if r (magit-dash--repo-annotation r) path)))
+               (cons name (cons ann path))))
+           magit-dash--hidden-paths))
+         (table (map-into candidates '(hash-table :test equal)))
+         (target-path
+          (or (and repo (magit-dash-repo-path repo))
+              (annotated-completing-read
+               table
+               :prompt "Unhide repository: "
+               :require-match t
+               :category 'magit-dash-repo))))
+    (when target-path
+      (setq magit-dash--hidden-paths (delete target-path magit-dash--hidden-paths))
+      (magit-dash-refresh)
+      (let ((r (seq-find (lambda (item) (equal (magit-dash-repo-path item) target-path))
+                         magit-dash-repo-list)))
+        (message "Unhid repository: %s"
+                 (if r (magit-dash-repo-name r)
+                   (file-name-nondirectory (directory-file-name target-path))))))))
+
+;;;###autoload
+(defun magit-dash-hide-select ()
+  "Select a repository using `annotated-completing-read' to toggle its hidden state.
+If the chosen repository is hidden, unhides it.  Otherwise, hides it."
+  (interactive)
+  (unless magit-dash-repo-list
+    (user-error "No registered repositories"))
+  (let* ((candidates
+          (seq-map
+           (lambda (r)
+             (let* ((path (magit-dash-repo-path r))
+                    (hidden-p (member path magit-dash--hidden-paths))
+                    (status (if hidden-p "[hidden] " "[visible] "))
+                    (base-ann (magit-dash--repo-annotation r))
+                    (ann (concat status base-ann)))
+               (cons (magit-dash-repo-name r) (cons ann r))))
+           magit-dash-repo-list))
+         (table (map-into candidates '(hash-table :test equal)))
+         (repo (annotated-completing-read
+                table
+                :prompt "Toggle repository visibility: "
+                :require-match t
+                :category 'magit-dash-repo)))
+    (when repo
+      (let ((path (magit-dash-repo-path repo)))
+        (if (member path magit-dash--hidden-paths)
+            (progn
+              (setq magit-dash--hidden-paths (delete path magit-dash--hidden-paths))
+              (magit-dash-refresh)
+              (message "Unhid repository: %s" (magit-dash-repo-name repo)))
+          (push path magit-dash--hidden-paths)
+          (if (derived-mode-p 'magit-dash-mode)
+              (progn
+                (setq tabulated-list-entries
+                      (seq-remove (lambda (entry)
+                                    (equal (magit-dash-repo-path (car entry)) path))
+                                  tabulated-list-entries))
+                (tabulated-list-print t))
+            (magit-dash-refresh))
+          (message "Hidden repository: %s ('hc' to clear hidden, 'hu' to unhide)"
+                   (magit-dash-repo-name repo)))))))
 
 (defun magit-dash--batch-all-active-p ()
   "Return non-nil when batch mode is active for all visible repos.
@@ -3036,7 +3191,7 @@ When disabled, only explicitly marked repos are targeted."
      :inapt-if-not magit-dash--has-auto-commit-p)
     ("sy"  "Sync one"        magit-dash-sync
      :inapt-if-not magit-dash--has-auto-sync-p)
-    ("ds"  "Default sync"    magit-dash-default-sync)
+    ("sd"  "Default sync"    magit-dash-default-sync)
     ("vo"  "View operations" magit-dash-view-operations)
     ("so"  "Stop operations" magit-dash-stop-operations)
     ("cl"  "Clone repo"      magit-dash-clone-repo
@@ -3045,9 +3200,9 @@ When disabled, only explicitly marked repos are targeted."
      :inapt-if-not magit-dash--has-missing-repos-p)
     ("cb"  "Bootstrap repo"  magit-dash-bootstrap-repo
      :inapt-if-not magit-dash--repo-has-upstream-p)
-    ("x"   "Run command"     magit-dash-run-command
+    ("xc"  "Run command"     magit-dash-run-command
      :inapt-if-not magit-dash--has-commands-p)
-    ("X"   "Run in background" magit-dash-run-command-background
+    ("xb"  "Run in background" magit-dash-run-command-background
      :inapt-if-not magit-dash--has-commands-p)
     ("y"   "Prune branches"  magit-dash-prune-branches
      :inapt-if-not magit-dash--repo-at-point-p)
@@ -3058,6 +3213,24 @@ When disabled, only explicitly marked repos are targeted."
    ["Dashboard"
     ("pr"  "PR dashboard"    magit-gh-pr-dash)
     ("nt"  "Filter by tag"   magit-dash-filter-by-tag)
+    ("hr"  (lambda () (if (magit-dash--has-marks-p) "Hide marked" "Hide repo"))
+     magit-dash-hide-repo
+     :inapt-if-not magit-dash--can-hide-p
+     :transient t)
+    ("hc"  (lambda () (format "Hide clear%s"
+                              (if magit-dash--hidden-paths
+                                  (format " (%d)" (length magit-dash--hidden-paths))
+                                "")))
+     magit-dash-unhide-all
+     :inapt-if-not magit-dash--has-hidden-p
+     :transient t)
+    ("hu"  "Unhide repo…"
+     magit-dash-unhide-repo
+     :inapt-if-not magit-dash--has-hidden-p
+     :transient t)
+    ("hs"  "Hide/unhide (ACR)…"
+     magit-dash-hide-select
+     :transient t)
     ("nb"  (lambda () (if magit-dash-render-branch-name-as-basename
                           "Branch basename [on]"
                         "Branch basename [off]"))
