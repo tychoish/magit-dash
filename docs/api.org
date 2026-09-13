@@ -100,6 +100,27 @@ Execute BODY in the ‘magit-dash’ buffer. Refreshes the dashboard and ensures
 
 When non-nil, ~magit-dash-run-command~ executes commands in the background by default.
 
+**** [[file:../magit-dash.el::214][magit-dash-refresh-fetch]] :option:
+:PROPERTIES:
+:CUSTOM_ID: magit-dash-refresh-fetch
+:END:
+
+When non-nil, ~magit-dash-refresh~ performs a git fetch for eligible repositories (e.g. repos with ~:auto-fetch~, ~:auto-pull~, ~:sync-on-refresh~, or configured sync steps). Subject to ~magit-dash-refresh-fetch-min-interval~.
+
+**** [[file:../magit-dash.el::222][magit-dash-refresh-fetch-min-interval]] :option:
+:PROPERTIES:
+:CUSTOM_ID: magit-dash-refresh-fetch-min-interval
+:END:
+
+Minimum seconds between automatic fetches during ~magit-dash-refresh~ (default: 600, i.e. 10 minutes).
+
+**** [[file:../magit-dash.el::228][magit-dash-refresh-sync-min-interval]] :option:
+:PROPERTIES:
+:CUSTOM_ID: magit-dash-refresh-sync-min-interval
+:END:
+
+Minimum seconds between automatic full-syncs during ~magit-dash-refresh~ for repositories configured with ~:sync-on-refresh~ (default: 3600, i.e. 1 hour).
+
 **** [[file:../magit-dash.el::244][magit-dash-global-hooks]] :variable:
 :PROPERTIES:
 :CUSTOM_ID: magit-dash-global-hooks
@@ -119,11 +140,11 @@ Validate HOOKS and set ~magit-dash-global-hooks~ to it.
 :CUSTOM_ID: magit-dash-register
 :END:
 
-: (fn &key NAME PATH REPO INCLUDE-PRS INCLUDE-CI AUTO-FETCH AUTO-PULL AUTO-COMMIT AUTO-PUSH AUTO-SYNC-COMMAND HOOKS TAGS COMMANDS SORT-HINT WORKTREE SYNC-BRANCHES TIMER CLONE-URL REMOTE-URL WORKTREE-SYMLINKS SYMLINKS REMOTE-SYNC)
+: (fn &key NAME PATH REPO INCLUDE-PRS INCLUDE-CI AUTO-FETCH AUTO-PULL AUTO-COMMIT AUTO-PUSH AUTO-SYNC-COMMAND HOOKS TAGS COMMANDS SORT-HINT WORKTREE SYNC-BRANCHES TIMER CLONE-URL REMOTE-URL WORKTREE-SYMLINKS SYMLINKS REMOTE-SYNC SYNC-ON-REFRESH AUTO-SYNC-ON-REFRESH REFRESH-SYNC FETCH-ON-REFRESH)
 
 Register or replace a repository with /NAME/ at absolute /PATH/. /REPO/ is the upstream repository path or URL for bootstrapping. /INCLUDE-PRS/, /INCLUDE-CI/, /AUTO-FETCH/, /AUTO-PULL/, /AUTO-COMMIT/, /AUTO-PUSH/, /AUTO-SYNC-COMMAND/, /HOOKS/, /TAGS/, /COMMANDS/, /SORT-HINT/, /WORKTREE/, /SYNC-BRANCHES/, /TIMER/, /CLONE-URL/, /REMOTE-URL/, /WORKTREE-SYMLINKS/, /SYMLINKS/, and /REMOTE-SYNC/ configure the repository settings. Replaces any existing entry with the same name or path.
 
-Keyword arguments: :repo           path (or URL) of upstream repository for bootstrapping. :include-prs    include in PR dashboard fetches. :include-ci     include in CI status column fetches (GitHub Actions). :auto-fetch     non-nil — run git fetch --all during auto-sync. :auto-pull      non-nil — run git pull during auto-sync (implies fetch). Respects :sync-branches. :auto-commit    nil | t | FUNCTION — stage and commit dirty working tree. FUNCTION receives the repo struct and returns a commit message string. :auto-push      non-nil — run git push during auto-sync. Respects :sync-branches. :hooks          plist keyed by operation (~:fetch~/~:pull~/~:commit~/ ~:push~/~:sync~), each value a plist of: :pre        list of targets run before the operation; a target signaling ~error~ skips the operation (reported as ‘skipped’). :post       list of targets run after the operation succeeds (‘ok’ or a no-op ‘skipped’); failures are logged but never fail sync. :operation  a single target that replaces the default implementation for that operation.  For ~:fetch~/~:pull~/~:commit~/~:push~ the step still only runs when its own auto-* flag is set; for ~:sync~ it replaces the *entire* default pipeline (fetch/pull/commit/push and their own settings are not consulted). A target is a SYMBOL (looked up as a label in :commands), a STRING (run as a shell command in the repo directory), or a FUNCTION (called with (/REPO/ ON-COMPLETE), where ON-COMPLETE accepts ‘ok’, ‘skipped’, or ~error~). See also ~magit-dash-global-hooks~ for hooks applied across every repo. :auto-sync-command  deprecated; nil | SYMBOL | STRING | FUNCTION. Equivalent to :hooks (:sync (:operation VALUE)) — replaces the entire sync pipeline for this repo.  Merged with any explicit :hooks also passed. :sync-branches  list of branch names on which auto-pull and auto-push are permitted; nil means any branch. :tags           list of symbols for filtering in the dashboard. :commands       alist of (LABEL . FUNCTION) for the repo command picker. :sort-hint      number controlling display order; lower values appear first. Repos without a sort-hint appear after all sorted repos. :worktree       non-nil when this entry represents a git worktree. :timer          plist forwarded to ~magit-dash-register-sync-timer~ (requires magit-dash-timer).  Example: '(:kind idle :idle-delay 300). :clone-url      URL to clone repository from when missing on disk. :remote-url     alias for :clone-url. :worktree-symlinks  list of relative paths to symlink from main repo to worktrees. :symlinks       alias for :worktree-symlinks. :remote-sync    plist (:hosts, :branch, :path, :merge-method) declaring remote sync mirrors.
+Keyword arguments: :repo           path (or URL) of upstream repository for bootstrapping. :include-prs    include in PR dashboard fetches. :include-ci     include in CI status column fetches (GitHub Actions). :auto-fetch     non-nil — run git fetch --all during auto-sync. :auto-pull      non-nil — run git pull during auto-sync (implies fetch). Respects :sync-branches. :auto-commit    nil | t | FUNCTION — stage and commit dirty working tree. FUNCTION receives the repo struct and returns a commit message string. :auto-push      non-nil — run git push during auto-sync. Respects :sync-branches. :hooks          plist keyed by operation (~:fetch~/~:pull~/~:commit~/ ~:push~/~:sync~), each value a plist of: :pre        list of targets run before the operation; a target signaling ~error~ skips the operation (reported as ‘skipped’). :post       list of targets run after the operation succeeds (‘ok’ or a no-op ‘skipped’); failures are logged but never fail sync. :operation  a single target that replaces the default implementation for that operation.  For ~:fetch~/~:pull~/~:commit~/~:push~ the step still only runs when its own auto-* flag is set; for ~:sync~ it replaces the *entire* default pipeline (fetch/pull/commit/push and their own settings are not consulted). A target is a SYMBOL (looked up as a label in :commands), a STRING (run as a shell command in the repo directory), or a FUNCTION (called with (/REPO/ ON-COMPLETE), where ON-COMPLETE accepts ‘ok’, ‘skipped’, or ~error~). See also ~magit-dash-global-hooks~ for hooks applied across every repo. :auto-sync-command  deprecated; nil | SYMBOL | STRING | FUNCTION. Equivalent to :hooks (:sync (:operation VALUE)) — replaces the entire sync pipeline for this repo.  Merged with any explicit :hooks also passed. :sync-branches  list of branch names on which auto-pull and auto-push are permitted; nil means any branch. :tags           list of symbols for filtering in the dashboard. :commands       alist of (LABEL . FUNCTION) for the repo command picker. :sort-hint      number controlling display order; lower values appear first. Repos without a sort-hint appear after all sorted repos. :worktree       non-nil when this entry represents a git worktree. :timer          plist forwarded to ~magit-dash-register-sync-timer~ (requires magit-dash-timer).  Example: '(:kind idle :idle-delay 300). :clone-url      URL to clone repository from when missing on disk. :remote-url     alias for :clone-url. :worktree-symlinks  list of relative paths to symlink from main repo to worktrees. :symlinks       alias for :worktree-symlinks. :remote-sync    plist (:hosts, :branch, :path, :merge-method) declaring remote sync mirrors. :sync-on-refresh    non-nil — run full auto-sync pipeline during dashboard refresh, subject to `magit-dash-refresh-sync-min-interval'. :auto-sync-on-refresh alias for :sync-on-refresh. :refresh-sync       alias for :sync-on-refresh. :fetch-on-refresh   non-nil — mark repository as eligible for fetch on refresh.
 
 *** Registry Helpers
 

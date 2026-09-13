@@ -14,6 +14,10 @@
 - *Automated Background Timers*: Schedule recurring synchronization via
   [[file:api.org::#magit-dash-register-sync-timer][~magit-dash-register-sync-timer~]] and regulate network frequency using
   [[file:api.org::#magit-dash-sync-min-interval][~magit-dash-sync-min-interval~]].
+- *Refresh-Triggered Fetch and Full-Sync*: Automatically run git fetches or full syncs
+  during dashboard refresh (~magit-dash-refresh~ / ~g~), throttled by
+  [[file:api.org::#magit-dash-refresh-fetch-min-interval][~magit-dash-refresh-fetch-min-interval~]] (default 10 minutes) and
+  [[file:api.org::#magit-dash-refresh-sync-min-interval][~magit-dash-refresh-sync-min-interval~]] (default 1 hour).
 
 * Key Functions and Options
 
@@ -24,16 +28,20 @@
 - [[file:api.org::#magit-dash-sync-min-interval][~magit-dash-sync-min-interval~]]: Minimum threshold (in seconds) between automatic sync runs.
 - [[file:api.org::#magit-dash-register-sync-timer][~magit-dash-register-sync-timer~]]: Start periodic background synchronization timer.
 - [[file:api.org::#magit-dash-cancel-all-sync-timers][~magit-dash-cancel-all-sync-timers~]]: Cancel all active background sync timers.
+- [[file:api.org::#magit-dash-refresh-fetch][~magit-dash-refresh-fetch~]]: Non-nil enables automatic git fetch on dashboard refresh.
+- [[file:api.org::#magit-dash-refresh-fetch-min-interval][~magit-dash-refresh-fetch-min-interval~]]: Minimum threshold (in seconds, default 600) between fetches during refresh.
+- [[file:api.org::#magit-dash-refresh-sync-min-interval][~magit-dash-refresh-sync-min-interval~]]: Minimum threshold (in seconds, default 3600) between full syncs during refresh for repositories with ~:sync-on-refresh~.
 
 * Example
 
 #+BEGIN_SRC emacs-lisp
-  ;; Register a repository with custom pre/post hooks
+  ;; Register a repository with custom pre/post hooks and full-sync on refresh
   (magit-dash-register
    :name "work-repo"
    :path "~/src/work-repo"
    :auto-fetch t
    :auto-commit t
+   :sync-on-refresh t
    :hooks '(:fetch  (:post (docs))
             :commit (:pre  (lint-staged))
             :sync   (:post (notify-sync-complete))))

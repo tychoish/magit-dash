@@ -96,12 +96,16 @@
   (sync-branches nil)
   (clone-url nil)
   (worktree-symlinks nil)
-  (remote-sync nil))
+  (remote-sync nil)
+  (sync-on-refresh nil)
+  (fetch-on-refresh nil))
 
 (defalias 'magit-dash-repo-upstream-repo #'magit-dash-repo-repo)
 (defalias 'magit-dash-repo-upstream #'magit-dash-repo-repo)
 (defalias 'magit-dash-repo-remote-url #'magit-dash-repo-clone-url)
 (defalias 'magit-dash-repo-symlinks #'magit-dash-repo-worktree-symlinks)
+(defalias 'magit-dash-repo-auto-sync-on-refresh #'magit-dash-repo-sync-on-refresh)
+(defalias 'magit-dash-repo-refresh-sync #'magit-dash-repo-sync-on-refresh)
 
 (defvar magit-dash-repo-list '()
   "List of `magit-dash-repo' structs registered for dashboard display.
@@ -211,6 +215,27 @@ Refreshes the dashboard and ensures `magit-dash-mode' is active."
   :type 'boolean
   :group 'magit-dash)
 
+(defcustom magit-dash-refresh-fetch t
+  "When non-nil, `magit-dash-refresh' performs a git fetch for eligible repositories.
+A repository is eligible if it has fetch or sync configured (e.g. `:auto-fetch',
+`:auto-pull', `:sync-on-refresh', or other sync hooks/steps).
+Fetches are subject to `magit-dash-refresh-fetch-min-interval'."
+  :type 'boolean
+  :group 'magit-dash)
+
+(defcustom magit-dash-refresh-fetch-min-interval 600
+  "Minimum seconds between automatic fetches during `magit-dash-refresh'.
+Defaults to 600 seconds (10 minutes)."
+  :type 'integer
+  :group 'magit-dash)
+
+(defcustom magit-dash-refresh-sync-min-interval 3600
+  "Minimum seconds between automatic full-syncs during `magit-dash-refresh'.
+Applied to repositories configured with `:sync-on-refresh'.
+Defaults to 3600 seconds (1 hour)."
+  :type 'integer
+  :group 'magit-dash)
+
 (declare-function magit-dash-register-sync-timer "magit-dash-timer")
 
 ;;;; Hooks and operations
@@ -301,13 +326,14 @@ first)."
       (expand-file-name path-or-url)
     path-or-url))
 
-(cl-defun magit-dash-register (&key name path repo include-prs include-ci auto-fetch auto-pull auto-commit auto-push auto-sync-command hooks tags commands sort-hint worktree sync-branches timer clone-url remote-url worktree-symlinks symlinks remote-sync)
+(cl-defun magit-dash-register (&key name path repo include-prs include-ci auto-fetch auto-pull auto-commit auto-push auto-sync-command hooks tags commands sort-hint worktree sync-branches timer clone-url remote-url worktree-symlinks symlinks remote-sync sync-on-refresh auto-sync-on-refresh refresh-sync fetch-on-refresh)
   "Register or replace a repository with NAME at absolute PATH.
 REPO is the upstream repository path or URL for bootstrapping.
 INCLUDE-PRS, INCLUDE-CI, AUTO-FETCH, AUTO-PULL, AUTO-COMMIT, AUTO-PUSH,
 AUTO-SYNC-COMMAND, HOOKS, TAGS, COMMANDS, SORT-HINT, WORKTREE,
 SYNC-BRANCHES, TIMER, CLONE-URL, REMOTE-URL, WORKTREE-SYMLINKS, SYMLINKS,
-and REMOTE-SYNC configure the repository settings.
+REMOTE-SYNC, SYNC-ON-REFRESH, AUTO-SYNC-ON-REFRESH, REFRESH-SYNC,
+and FETCH-ON-REFRESH configure the repository settings.
 Replaces any existing entry with the same name or path.
 
 Keyword arguments:
@@ -362,7 +388,12 @@ Keyword arguments:
                       worktrees.
   :symlinks       alias for :worktree-symlinks.
   :remote-sync    plist (:hosts, :branch, :path, :merge-method) declaring
-                  remote sync mirrors."
+                  remote sync mirrors.
+  :sync-on-refresh    non-nil — run full auto-sync pipeline during dashboard
+                      refresh, subject to `magit-dash-refresh-sync-min-interval'.
+  :auto-sync-on-refresh alias for :sync-on-refresh.
+  :refresh-sync       alias for :sync-on-refresh.
+  :fetch-on-refresh   non-nil — mark repository as eligible for fetch on refresh."
   (unless (and name path)
     (user-error "Magit-dash: must specify name (%s) and path (%s)" name path))
   (when auto-sync-command
@@ -399,7 +430,8 @@ Keyword arguments:
                           :branch rs-branch
                           :merge-method rs-merge-method))))
                hosts))))
-         (effective-commands (append commands remote-sync-commands)))
+         (effective-commands (append commands remote-sync-commands))
+         (sync-refresh (or sync-on-refresh auto-sync-on-refresh refresh-sync)))
     (setq magit-dash-repo-list
           (thread-last magit-dash-repo-list
             (seq-remove (lambda (r)
@@ -423,7 +455,9 @@ Keyword arguments:
                            :sync-branches sync-branches
                            :clone-url url
                            :worktree-symlinks links
-                           :remote-sync remote-sync))))))
+                           :remote-sync remote-sync
+                           :sync-on-refresh sync-refresh
+                           :fetch-on-refresh fetch-on-refresh))))))
   (when (and timer (fboundp 'magit-dash-register-sync-timer))
     (apply #'magit-dash-register-sync-timer :name name :repos (list name) timer)))
 
@@ -800,6 +834,7 @@ not via a thrown error."
 (defun magit-dash--fetch-async (repo on-complete)
   "Run git fetch for REPO asynchronously.
 Calls ON-COMPLETE with symbol `ok' on success or `error' and error text on failure."
+  (magit-dash--record-fetch-attempt repo)
   (magit-dash--run-git
    (magit-dash-repo-path repo)
    '("fetch")
@@ -885,6 +920,7 @@ When sync-branches is nil any branch is allowed and the current branch is return
 (defun magit-dash--auto-fetch-async (repo on-complete)
   "Run git fetch --all for REPO asynchronously.
 Calls ON-COMPLETE with `ok' on success or `error' and error text on failure."
+  (magit-dash--record-fetch-attempt repo)
   (magit-dash--run-git
    (magit-dash-repo-path repo)
    '("fetch" "--all")
@@ -1214,6 +1250,7 @@ the default pipeline entirely, including its own fetch/pull/commit/push
 settings) or, absent that, the default pipeline of fetch/pull/commit/push
 per REPO's auto-* flags — wrapped by `:sync''s own `:pre'/`:post' hooks.
 Call ON-COMPLETE with `ok', `skipped', or `error'."
+  (magit-dash--record-sync-attempt repo)
   (magit-dash--guarded-op-run
    repo "sync"
    (lambda (r cb)
@@ -1298,8 +1335,12 @@ ON-ALL-DONE with an alist of (NAME . STATUS)."
   (if repo-path
       (progn
         (magit-dash-gh--cache-remove repo-path)
+        (remhash (expand-file-name repo-path) magit-dash--repo-last-fetch-attempts)
+        (remhash (expand-file-name repo-path) magit-dash--repo-last-sync-attempts)
         (message "Cleared cache for %s" repo-path))
     (clrhash magit-dash-gh--cache)
+    (clrhash magit-dash--repo-last-fetch-attempts)
+    (clrhash magit-dash--repo-last-sync-attempts)
     (message "Cleared entire cache")))
 
 (defun magit-dash-cache-reset-all ()
@@ -1391,6 +1432,8 @@ immediately after its parent and gets its own CI status fetched."
                       (file-name-nondirectory (directory-file-name main-path))))
          (sort-hint (and main-repo (magit-dash-repo-sort-hint main-repo)))
          (include-ci (and main-repo (magit-dash-repo-include-ci main-repo)))
+         (sync-on-refresh (and main-repo (magit-dash-repo-sync-on-refresh main-repo)))
+         (fetch-on-refresh (and main-repo (magit-dash-repo-fetch-on-refresh main-repo)))
          blocks current)
     (seq-do (lambda (line)
               (if (string-empty-p line)
@@ -1416,7 +1459,9 @@ immediately after its parent and gets its own CI status fetched."
               :worktree t
               :branch (or branch "detached")
               :sort-hint sort-hint
-              :include-ci include-ci)))))
+              :include-ci include-ci
+              :sync-on-refresh sync-on-refresh
+              :fetch-on-refresh fetch-on-refresh)))))
       (seq-remove #'null))))
 
 (defun magit-dash--prune-and-list-worktrees (path)
@@ -1986,12 +2031,131 @@ registered entry is shown instead."
                                    (magit-dash-gh--cache-get (magit-dash-repo-path repo) :submodules))))))
                 sorted)))
 
+(defvar magit-dash--repo-last-fetch-attempts (make-hash-table :test #'equal)
+  "Hash table mapping expanded repo path to float-time of last fetch attempt.")
+
+(defvar magit-dash--repo-last-sync-attempts (make-hash-table :test #'equal)
+  "Hash table mapping expanded repo path to float-time of last sync attempt.")
+
+(defun magit-dash--record-fetch-attempt (repo)
+  "Record current timestamp as last fetch attempt for REPO."
+  (puthash (expand-file-name (magit-dash-repo-path repo))
+           (float-time)
+           magit-dash--repo-last-fetch-attempts))
+
+(defun magit-dash--record-sync-attempt (repo)
+  "Record current timestamp as last sync attempt for REPO."
+  (let ((path (expand-file-name (magit-dash-repo-path repo))))
+    (puthash path (float-time) magit-dash--repo-last-sync-attempts)
+    (puthash path (float-time) magit-dash--repo-last-fetch-attempts)))
+
+(defun magit-dash--repo-fetch-interval-elapsed-p (repo &optional interval)
+  "Return non-nil when INTERVAL seconds have elapsed since last fetch for REPO.
+INTERVAL defaults to `magit-dash-refresh-fetch-min-interval'.
+Checks both in-memory last attempt timestamp and on-disk FETCH_HEAD age."
+  (let* ((min-int (or interval magit-dash-refresh-fetch-min-interval 600))
+         (path (magit-dash-repo-path repo))
+         (exp-path (expand-file-name path))
+         (last-attempt (gethash exp-path magit-dash--repo-last-fetch-attempts))
+         (now (float-time))
+         (fetch-age (magit-dash--fetch-age path)))
+    (cond
+     ((and last-attempt (< (- now last-attempt) min-int))
+      nil)
+     ((and fetch-age (< fetch-age min-int))
+      nil)
+     (t t))))
+
+(defun magit-dash--repo-sync-interval-elapsed-p (repo &optional interval)
+  "Return non-nil when INTERVAL seconds have elapsed since last sync for REPO.
+INTERVAL defaults to `magit-dash-refresh-sync-min-interval'.
+Checks in-memory last sync attempt timestamp."
+  (let* ((min-int (or interval magit-dash-refresh-sync-min-interval 3600))
+         (exp-path (expand-file-name (magit-dash-repo-path repo)))
+         (last-attempt (gethash exp-path magit-dash--repo-last-sync-attempts))
+         (now (float-time)))
+    (if last-attempt
+        (>= (- now last-attempt) min-int)
+      t)))
+
+(defun magit-dash--refresh-fetch-eligible-p (repo)
+  "Return non-nil when REPO is eligible for automatic fetch during refresh.
+A repository is eligible if it exists on disk, is not a missing submodule,
+and has fetch or sync configured."
+  (and (not (eq (magit-dash-repo-submodule repo) 'missing))
+       (file-directory-p (magit-dash-repo-path repo))
+       (or (magit-dash-repo-fetch-on-refresh repo)
+           (magit-dash-repo-auto-fetch repo)
+           (magit-dash-repo-auto-pull repo)
+           (magit-dash-repo-sync-on-refresh repo)
+           (magit-dash-repo-remote-sync repo)
+           (magit-dash--repo-operation repo :fetch)
+           (magit-dash--has-sync-configured-p repo))))
+
+(defun magit-dash--refresh-sync-eligible-p (repo)
+  "Return non-nil when REPO is eligible for automatic full sync during refresh."
+  (and (not (eq (magit-dash-repo-submodule repo) 'missing))
+       (file-directory-p (magit-dash-repo-path repo))
+       (magit-dash-repo-sync-on-refresh repo)))
+
+(defun magit-dash--refresh-fetch-or-sync-async (repos)
+  "Run automatic sync or fetch for eligible repos in REPOS during refresh.
+Honors `magit-dash-refresh-fetch', `magit-dash-refresh-fetch-min-interval',
+`magit-dash-refresh-sync-min-interval', and per-repo `:sync-on-refresh'."
+  (let ((buf (get-buffer magit-dash-buffer-name)))
+    (seq-do
+     (lambda (repo)
+       (cond
+        ((and (magit-dash--refresh-sync-eligible-p repo)
+              (magit-dash--repo-sync-interval-elapsed-p repo))
+         (magit-dash--record-sync-attempt repo)
+         (magit-dash--auto-sync-async
+          repo
+          (lambda (_status &optional _text)
+            (magit-dash--collect-stats-async
+             repo
+             (lambda (_stats)
+               (when (and buf (buffer-live-p buf))
+                 (with-current-buffer buf
+                   (magit-dash--update-entry repo)))))
+            (when (magit-dash-repo-include-ci repo)
+              (magit-dash-gh-ci-fetch
+               repo
+               (lambda (_ci)
+                 (when (and buf (buffer-live-p buf))
+                   (with-current-buffer buf
+                     (magit-dash--update-entry repo)))))))))
+        ((and magit-dash-refresh-fetch
+              (magit-dash--refresh-fetch-eligible-p repo)
+              (magit-dash--repo-fetch-interval-elapsed-p repo))
+         (magit-dash--record-fetch-attempt repo)
+         (magit-dash--guarded-op-run
+          repo "fetch"
+          (lambda (r cb)
+            (magit-dash--run-operation r :fetch cb))
+          (lambda (_status &optional _text)
+            (magit-dash--collect-stats-async
+             repo
+             (lambda (_stats)
+               (when (and buf (buffer-live-p buf))
+                 (with-current-buffer buf
+                   (magit-dash--update-entry repo)))))
+            (when (magit-dash-repo-include-ci repo)
+              (magit-dash-gh-ci-fetch
+               repo
+               (lambda (_ci)
+                 (when (and buf (buffer-live-p buf))
+                   (with-current-buffer buf
+                     (magit-dash--update-entry repo)))))))))))
+     repos)))
+
 (defun magit-dash-refresh ()
   "Refresh the dashboard, clearing all per-repo caches and re-fetching.
 Discovers worktrees and submodules synchronously, renders the table with
 the last known state, then clears :stats, :pr-counts, and :ci-status for
 every repo and re-fetches all three in the background, updating each row
-as data arrives."
+as data arrives.  Also triggers background fetch or full-sync for eligible
+repositories subject to interval thresholds."
   (interactive)
   (magit-dash--discover-worktrees)
   (magit-dash--discover-submodules)
@@ -2037,7 +2201,8 @@ as data arrives."
               (when (buffer-live-p buf)
                 (with-current-buffer buf
                   (magit-dash--update-entry repo)))))))
-       repos))))
+       repos))
+    (magit-dash--refresh-fetch-or-sync-async repos)))
 
 (defun magit-dash-hard-refresh ()
   "Clear all caches and repopulate the dashboard from scratch.
@@ -2045,6 +2210,8 @@ Unlike `magit-dash-refresh', discards all cached stats so every repo is
 re-collected asynchronously."
   (interactive)
   (clrhash magit-dash-gh--cache)
+  (clrhash magit-dash--repo-last-fetch-attempts)
+  (clrhash magit-dash--repo-last-sync-attempts)
   (magit-dash-refresh))
 
 

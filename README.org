@@ -172,6 +172,11 @@ Below is an example ~use-package~ configuration block setting useful options wit
   ;; Repository switching (magit-dash-open)
   (setq magit-dash-open-scan-depth 2)                  ; default: 2 (directory scanning depth)
 
+  ;; Refresh fetch & sync behavior
+  (setq magit-dash-refresh-fetch t)                    ; default: t (fetch on refresh for configured repos)
+  (setq magit-dash-refresh-fetch-min-interval 600)     ; default: 600 (10 minutes between refresh fetches)
+  (setq magit-dash-refresh-sync-min-interval 3600)     ; default: 3600 (1 hour between refresh full syncs)
+
   ;; Periodic synchronization (magit-dash-timer)
   (setq magit-dash-sync-min-interval 300)              ; default: 300 (minimum seconds between auto-syncs)
 
@@ -192,6 +197,7 @@ Below is an example ~use-package~ configuration block setting useful options wit
 - *Cache TTL*: ~magit-dash-status-cache-ttl~ defines the freshness interval (in seconds) for cached GitHub CLI results.
 - *Worktree Symlinks*: ~magit-dash-worktree-global-symlinks~ and ~magit-dash-worktree-auto-symlink~ automatically link shared environment directories (=node_modules=, =.venv=, =.env=) into newly created worktrees.
 - *CI Log Capture*: ~magit-dash-gh-actions-include-failed-log~ creates filtered failure summaries alongside complete GitHub Actions run logs.
+- *Refresh Fetch & Sync*: ~magit-dash-refresh-fetch~ (default ~t~), ~magit-dash-refresh-fetch-min-interval~ (default 600s / 10m), and ~magit-dash-refresh-sync-min-interval~ (default 3600s / 1h) control background fetches and repo-level ~:sync-on-refresh~ full syncs when refreshing the dashboard.
 
 * Auto-Sync and Hooks
 :PROPERTIES:
