@@ -153,6 +153,7 @@ Does nothing when no CI status is cached for REPO."
 
 ;;; Fix-CI prompt dispatch
 
+(declare-function agent-shell-prompt-dispatch "agent-shell-prompt")
 (declare-function agent-shell-prompt-exec "agent-shell-prompt")
 
 (defun magit-dash-ci--repo-slug (repo)
@@ -172,29 +173,33 @@ Does nothing when no CI status is cached for REPO."
               name
             (user-error "Cannot determine GitHub owner/repo slug for %s" name))))))
 
+(defun magit-dash-ci--dispatch-prompt (id args)
+  "Dispatch prompt ID with ARGS plist.
+Calls `agent-shell-prompt-dispatch' (or fallback `agent-shell-prompt-exec') with `:args' ARGS."
+  (let ((fn (cond ((fboundp 'agent-shell-prompt-dispatch) #'agent-shell-prompt-dispatch)
+                  ((fboundp 'agent-shell-prompt-exec) #'agent-shell-prompt-exec)
+                  (t (user-error "magit-dash fix-CI requires the agent-shell-prompt library")))))
+    (funcall fn id :args args)))
+
 (defun magit-dash-ci--download-and-dispatch (repo run-id)
   "Dispatch the `fix-ci' prompt library workflow for REPO and RUN-ID.
-Requires `agent-shell-prompt-exec' to be available from the `agent-shell-prompt' library."
-  (if (fboundp 'agent-shell-prompt-exec)
-      (let* ((path (magit-dash-repo-path repo))
-             (slug (magit-dash-ci--repo-slug repo))
-             (default-directory (file-name-as-directory path)))
-        (agent-shell-prompt-exec 'fix-ci (list :repo slug :run-id run-id)))
-    (user-error "magit-dash fix-CI requires the agent-shell-prompt library")))
+Requires `agent-shell-prompt-dispatch' to be available from the `agent-shell-prompt' library."
+  (let* ((path (magit-dash-repo-path repo))
+         (slug (magit-dash-ci--repo-slug repo))
+         (default-directory (file-name-as-directory path)))
+    (magit-dash-ci--dispatch-prompt 'fix-ci (list :repo slug :run-id run-id))))
 
 ;;;###autoload
 (defun magit-dash-ci-dispatch-fix-operation (repo)
   "Dispatch the `fix-ci' prompt library workflow for REPO.
-Invokes `agent-shell-prompt-exec' with `:repo' set to REPO's OWNER/NAME slug."
+Invokes `agent-shell-prompt-dispatch' with `:repo' set to REPO's OWNER/NAME slug."
   (unless (magit-dash-repo-include-ci repo)
     (user-error "magit-dash fix-CI: %s does not have CI enabled (:include-ci)"
                 (magit-dash-repo-name repo)))
   (let* ((path (magit-dash-repo-path repo))
-         (slug (magit-dash-ci--repo-slug repo)))
-    (if (fboundp 'agent-shell-prompt-exec)
-        (let ((default-directory (file-name-as-directory path)))
-          (agent-shell-prompt-exec 'fix-ci (list :repo slug)))
-      (user-error "magit-dash fix-CI requires the agent-shell-prompt library"))))
+         (slug (magit-dash-ci--repo-slug repo))
+         (default-directory (file-name-as-directory path)))
+    (magit-dash-ci--dispatch-prompt 'fix-ci (list :repo slug))))
 
 (provide 'magit-dash-gh-ci)
 ;;; magit-dash-gh-ci.el ends here
