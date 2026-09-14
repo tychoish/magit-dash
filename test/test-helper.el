@@ -1,10 +1,10 @@
 ;;; test-helper.el --- ERT test infrastructure for magit-dash -*- lexical-binding: t; no-byte-compile: t; -*-
 
 ;;; Commentary:
-;; Loaded before other test files by both `run-tests' and manual
+;; Loaded before other test files by both the test runner and manual
 ;; `emacs -batch -l' invocations.
 ;; Adds the magit-dash repo root to load-path so test files can require
-;; local modules; `run-tests' handles fetching external dependencies.
+;; local modules.
 
 ;;; Code:
 

@@ -25,4 +25,24 @@ jobs:
 
     steps:
       - uses: actions/checkout@v5
-      - run: emacs --script run-tests
+
+      - name: Lint Source Code
+        uses: tychoish/elisp-ci/lint@main
+        with:
+          fail-on-warning: "false"
+
+      - name: Run ERT Tests
+        uses: tychoish/elisp-ci@main
+
+      - name: Measure Code Coverage
+        uses: tychoish/elisp-ci/coverage@main
+        with:
+          report-format: "lcov"
+          output-file: "coverage/lcov.info"
+
+      - name: Upload Coverage to Codecov
+        uses: codecov/codecov-action@v5
+        if: ${{ !cancelled() }}
+        with:
+          files: coverage/lcov.info
+          fail_ci_if_error: false
