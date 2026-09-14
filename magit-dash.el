@@ -2312,9 +2312,16 @@ cached dashboard stats."
   (when-let* ((repo (ignore-errors (magit-dash--repo-at-point))))
     (magit-dash--repo-missing-p repo)))
 
+(defun magit-dash--all-repos ()
+  "Return all visible repos in dashboard buffer, or `magit-dash-repo-list'."
+  (or (and (derived-mode-p 'magit-dash-mode)
+           tabulated-list-entries
+           (seq-map #'car tabulated-list-entries))
+      magit-dash-repo-list))
+
 (defun magit-dash--has-missing-repos-p ()
   "Return non-nil if any registered repository in the dashboard is missing."
-  (seq-some #'magit-dash--repo-missing-p (magit-dash--effective-repos)))
+  (seq-some #'magit-dash--repo-missing-p (magit-dash--all-repos)))
 
 
 (defun magit-dash--default-clone-url (repo)
@@ -2380,7 +2387,12 @@ Runs asynchronously and refreshes the dashboard on completion."
 (defun magit-dash-clone-all-missing ()
   "Clone all configured but missing repositories asynchronously."
   (interactive)
-  (let ((missing (seq-filter #'magit-dash--repo-missing-p (magit-dash--effective-repos))))
+  (let* ((marked-missing (when magit-dash--marked-paths
+                           (seq-filter #'magit-dash--repo-missing-p
+                                       (magit-dash--effective-repos))))
+         (missing (or marked-missing
+                      (seq-filter #'magit-dash--repo-missing-p
+                                  (magit-dash--all-repos)))))
     (unless missing
       (user-error "No missing repositories to clone"))
     (message "magit-dash: cloning %d missing repository(ies)..." (length missing))
@@ -3029,11 +3041,12 @@ Signals `user-error' when `magit-dash-repo-list' is empty."
   "Unmark all repositories in the dashboard."
   (interactive)
   (setq magit-dash--marked-paths nil)
-  (setq tabulated-list-entries
-        (seq-map (lambda (entry)
-                   (magit-dash--build-entry (car entry)))
-                 tabulated-list-entries))
-  (tabulated-list-print t))
+  (when (derived-mode-p 'tabulated-list-mode)
+    (setq tabulated-list-entries
+          (seq-map (lambda (entry)
+                     (magit-dash--build-entry (car entry)))
+                   tabulated-list-entries))
+    (tabulated-list-print t)))
 
 ;;;###autoload
 (defun magit-dash-hide-repo (&optional repo)
@@ -3174,9 +3187,7 @@ or when `magit-dash--batch-all' is nil."
 (defun magit-dash--effective-repos ()
   "Return marked repos if any are marked; if none are marked and `magit-dash--batch-all' is set, return all visible repos; otherwise return nil.
 Falls back to `magit-dash-repo-list' when not in a dashboard buffer."
-  (let ((all (if (derived-mode-p 'magit-dash-mode)
-                 (seq-map #'car tabulated-list-entries)
-               magit-dash-repo-list)))
+  (let ((all (magit-dash--all-repos)))
     (cond
      (magit-dash--marked-paths
       (seq-filter (lambda (r)
@@ -3330,7 +3341,7 @@ When disabled, only explicitly marked repos are targeted."
      :transient t)
     ("mt"  "Mark by tag"     magit-dash-mark-by-tag
      :transient t)
-    ("u"   "Clear marks"     magit-dash-unmark-all
+    ("mc"  "Clear marks"     magit-dash-unmark-all
      :inapt-if-not magit-dash--has-marks-p
      :transient t)
     ("ma"   (lambda () (if (magit-dash--batch-all-active-p) "Batch: all [on]" "Batch: all [off]"))

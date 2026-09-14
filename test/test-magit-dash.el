@@ -2219,6 +2219,30 @@ A conflict (e.g. \"b\" and \"bp\" coexisting) causes transient to raise
          (should (equal nil conflict))))
      keys)))
 
+(defun test-magit-dash--all-transient-suffixes (prefix)
+  "Collect all suffix plists from transient PREFIX layout across all rows and columns."
+  (when-let* ((layout (get prefix 'transient--layout))
+              ((vectorp layout))
+              (rows (aref layout 2)))
+    (thread-last rows
+      (seq-filter #'vectorp)
+      (seq-mapcat (lambda (row)
+                    (let ((cols (aref row 2)))
+                      (if (vectorp cols) (append cols nil) cols))))
+      (seq-filter #'vectorp)
+      (seq-mapcat (lambda (col) (aref col 2)))
+      (seq-filter (lambda (s) (and (listp s) (eq (car s) 'transient-suffix))))
+      (seq-map #'cdr))))
+
+(ert-deftest magit-dash/transient-menu-clear-marks-key ()
+  "Clear marks suffix in `magit-dash-menu' is bound to mc."
+  (let* ((suffixes (test-magit-dash--all-transient-suffixes 'magit-dash-menu))
+         (unmark-suffix (seq-find (lambda (s)
+                                    (eq (plist-get s :command) 'magit-dash-unmark-all))
+                                  suffixes)))
+    (should unmark-suffix)
+    (should (equal "mc" (plist-get unmark-suffix :key)))))
+
 ;;;; Ephemeral tag tests
 
 (ert-deftest magit-dash/all-tags-for-permanent-only ()
@@ -2781,6 +2805,56 @@ The bug was that add-text-properties returns t, not the modified string."
       (should (member "m1" cloned))
       (should (member "m2" cloned)))))
 
+(ert-deftest magit-dash/has-missing-repos-p-when-nothing-marked ()
+  "has-missing-repos-p returns non-nil when repos are missing even if nothing is marked and batch-all is nil."
+  (let* ((r1 (magit-dash-repo--make :name "m1" :path "/tmp/missing-1"))
+         (r2 (magit-dash-repo--make :name "e1" :path "/tmp/existing-1"))
+         (magit-dash-repo-list (list r1 r2))
+         (magit-dash--marked-paths nil)
+         (magit-dash--batch-all nil))
+    (cl-letf (((symbol-function 'magit-dash--repo-missing-p)
+               (lambda (r) (equal (magit-dash-repo-name r) "m1"))))
+      (should (magit-dash--has-missing-repos-p)))))
+
+(ert-deftest magit-dash/has-missing-repos-p-when-none-missing ()
+  "has-missing-repos-p returns nil when no repos are missing."
+  (let* ((r1 (magit-dash-repo--make :name "e1" :path "/tmp/existing-1"))
+         (magit-dash-repo-list (list r1))
+         (magit-dash--marked-paths nil)
+         (magit-dash--batch-all nil))
+    (cl-letf (((symbol-function 'magit-dash--repo-missing-p) (lambda (_) nil)))
+      (should-not (magit-dash--has-missing-repos-p)))))
+
+(ert-deftest magit-dash/clone-all-missing-when-nothing-marked ()
+  "clone-all-missing clones all missing repos when nothing is marked and batch-all is nil."
+  (let* ((r1 (magit-dash-repo--make :name "m1" :path "/tmp/missing-1"))
+         (r2 (magit-dash-repo--make :name "m2" :path "/tmp/missing-2"))
+         (r3 (magit-dash-repo--make :name "e1" :path "/tmp/existing-1"))
+         (magit-dash-repo-list (list r1 r2 r3))
+         (magit-dash--marked-paths nil)
+         (magit-dash--batch-all nil)
+         (cloned nil))
+    (cl-letf (((symbol-function 'magit-dash--repo-missing-p)
+               (lambda (r) (member (magit-dash-repo-name r) '("m1" "m2"))))
+              ((symbol-function 'magit-dash-clone-repo)
+               (lambda (repo &optional _url) (push (magit-dash-repo-name repo) cloned))))
+      (magit-dash-clone-all-missing)
+      (should (equal (sort cloned #'string<) '("m1" "m2"))))))
+
+(ert-deftest magit-dash/clone-all-missing-targets-marked-when-present ()
+  "clone-all-missing targets only marked missing repos when marks are present."
+  (let* ((r1 (magit-dash-repo--make :name "m1" :path "/tmp/missing-1"))
+         (r2 (magit-dash-repo--make :name "m2" :path "/tmp/missing-2"))
+         (magit-dash-repo-list (list r1 r2))
+         (magit-dash--marked-paths '("/tmp/missing-1"))
+         (magit-dash--batch-all nil)
+         (cloned nil))
+    (cl-letf (((symbol-function 'magit-dash--repo-missing-p) (lambda (_) t))
+              ((symbol-function 'magit-dash-clone-repo)
+               (lambda (repo &optional _url) (push (magit-dash-repo-name repo) cloned))))
+      (magit-dash-clone-all-missing)
+      (should (equal cloned '("m1"))))))
+
 
 (ert-deftest magit-dash/update-default-directory-existing-repo ()
   "update-default-directory sets default-directory to repo path when repo exists."
@@ -2997,6 +3071,12 @@ The bug was that add-text-properties returns t, not the modified string."
         (magit-dash--marked-paths nil)
         (magit-dash--batch-all nil))
     (should-not (magit-dash--effective-repos))))
+
+(ert-deftest magit-dash/unmark-all-clears-marked-paths ()
+  "unmark-all sets `magit-dash--marked-paths' to nil."
+  (let ((magit-dash--marked-paths '("/tmp/r1" "/tmp/r2")))
+    (magit-dash-unmark-all)
+    (should (null magit-dash--marked-paths))))
 
 ;;;; Default Sync Tests
 
