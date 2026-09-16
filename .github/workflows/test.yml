@@ -12,14 +12,14 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
-    container: silex/emacs:${{ matrix.emacs_version }}-ci
+    container: silex/emacs:${{ matrix.emacs-version }}-ci
     timeout-minutes: 5
     permissions:
       contents: read
     strategy:
       fail-fast: false
       matrix:
-        emacs_version:
+        emacs-version:
           - "29.4"
           - "30.2"
 
@@ -27,15 +27,15 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Lint Source Code
-        uses: tychoish/elisp-ci/lint@main
+        uses: tychoish/elisp-ci/lint@v0.1.0
         with:
           fail-on-warning: "false"
 
       - name: Run ERT Tests
-        uses: tychoish/elisp-ci@main
+        uses: tychoish/elisp-ci@v0.1.0
 
       - name: Measure Code Coverage
-        uses: tychoish/elisp-ci/coverage@main
+        uses: tychoish/elisp-ci/coverage@v0.1.0
         with:
           report-format: "lcov"
           output-file: "coverage/lcov.info"
