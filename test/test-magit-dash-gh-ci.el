@@ -92,12 +92,12 @@ passes nil explicitly to exercise the disabled case."
     (should-error (magit-dash-ci-dispatch-fix-operation repo) :type 'user-error)))
 
 (ert-deftest magit-dash-gh-ci/dispatch-fix-operation-dispatches-fix-ci ()
-  "Dispatches fix-ci via agent-shell-prompt-dispatch with resolved slug."
+  "Dispatches fix-ci via agent-shell-workflow-dispatch with resolved slug."
   (let* ((repo (magit-dash-gh-ci-test/make-repo "myrepo" "/tmp/myrepo" "main"))
          (captured-prompt nil)
          (captured-kwargs nil))
     (cl-letf (((symbol-function 'magit-dash-ci--repo-slug) (lambda (_) "owner/myrepo"))
-              ((symbol-function 'agent-shell-prompt-dispatch)
+              ((symbol-function 'agent-shell-workflow-dispatch)
                (lambda (prompt &rest kwargs)
                  (setq captured-prompt prompt
                        captured-kwargs kwargs))))
@@ -106,12 +106,12 @@ passes nil explicitly to exercise the disabled case."
       (should (equal "owner/myrepo" (plist-get (plist-get captured-kwargs :args) :repo))))))
 
 (ert-deftest magit-dash-gh-ci/download-and-dispatch-dispatches-fix-ci-with-run-id ()
-  "Dispatches fix-ci via agent-shell-prompt-dispatch with slug and run-id."
+  "Dispatches fix-ci via agent-shell-workflow-dispatch with slug and run-id."
   (let* ((repo (magit-dash-gh-ci-test/make-repo "myrepo" "/tmp/myrepo" "main"))
          (captured-prompt nil)
          (captured-kwargs nil))
     (cl-letf (((symbol-function 'magit-dash-ci--repo-slug) (lambda (_) "owner/myrepo"))
-              ((symbol-function 'agent-shell-prompt-dispatch)
+              ((symbol-function 'agent-shell-workflow-dispatch)
                (lambda (prompt &rest kwargs)
                  (setq captured-prompt prompt
                        captured-kwargs kwargs))))
