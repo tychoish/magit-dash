@@ -46,7 +46,7 @@
   "When non-nil, download a failed-steps-only log alongside the full run log.")
 
 (defvar magit-dash-gh-actions-open-dired nil
-  "When non-nil, open a dired buffer in the artifact directory after fetch completes.")
+  "When non-nil, open dired in artifact directory after fetch completes.")
 
 ;;; Log viewer mode
 

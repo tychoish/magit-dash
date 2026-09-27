@@ -99,7 +99,7 @@ Signals `user-error' if token resolution fails."
 ACCOUNT is an account plist (:user USER :host HOST), a string username,
 or nil. When nil, calls FN unchanged.
 When ACCOUNT is given, resolves the token via `magit-dash-gh--account-token'
-and dynamically binds GH_TOKEN (or GH_ENTERPRISE_TOKEN) in `process-environment'."
+and binds GH_TOKEN (or GH_ENTERPRISE_TOKEN) in `process-environment'."
   (if (null account)
       (funcall fn)
     (let* ((user (if (stringp account) account (plist-get account :user)))

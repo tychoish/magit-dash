@@ -46,15 +46,18 @@
 
 (defface magit-dash-ci-pass-face
   '((t :inherit success))
-  "Face for a passing CI run in the repository dashboard.")
+  "Face for a passing CI run in the repository dashboard."
+  :group 'magit-dash)
 
 (defface magit-dash-ci-fail-face
   '((t :inherit error))
-  "Face for a failing CI run in the repository dashboard.")
+  "Face for a failing CI run in the repository dashboard."
+  :group 'magit-dash)
 
 (defface magit-dash-ci-pending-face
   '((t :inherit warning))
-  "Face for an in-progress CI run in the repository dashboard.")
+  "Face for an in-progress CI run in the repository dashboard."
+  :group 'magit-dash)
 
 ;;; Internal helpers
 

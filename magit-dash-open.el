@@ -169,7 +169,7 @@ candidates.  Worktrees and submodules are enumerated for every repo found."
 ;;; Projectile integration
 
 (defun magit-dash-open--projectile-candidates ()
-  "Return (path . `repo') pairs from projectile known-projects, limited to git repos."
+  "Return (path . `repo') pairs from projectile known-projects for git repos."
   (when (and (fboundp 'projectile-load-known-projects)
              (boundp 'projectile-known-projects))
     (ignore-errors (projectile-load-known-projects))
