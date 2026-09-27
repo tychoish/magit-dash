@@ -121,6 +121,13 @@ Minimum seconds between automatic fetches during ~magit-dash-refresh~ (default: 
 
 Minimum seconds between automatic full-syncs during ~magit-dash-refresh~ for repositories configured with ~:sync-on-refresh~ (default: 3600, i.e. 1 hour).
 
+**** magit-dash-multi-github-host :variable:
+:PROPERTIES:
+:CUSTOM_ID: magit-dash-multi-github-host
+:END:
+
+Default GitHub host endpoint used when :gh-host is not specified during repo registration (defaults to nil, which falls back to \"github.com\").
+
 **** [[file:../magit-dash.el::244][magit-dash-global-hooks]] :variable:
 :PROPERTIES:
 :CUSTOM_ID: magit-dash-global-hooks
@@ -1066,6 +1073,13 @@ Function (TYPE SLUG ID) => string naming a collection run directory. TYPE is a s
 :END:
 
 Serialization format for index files written by collect commands. ‘json’ (default, always available) or ‘yaml’ (requires the ‘yaml’ package).
+
+**** magit-dash-gh-validate-repo-accounts :command:
+:PROPERTIES:
+:CUSTOM_ID: magit-dash-gh-validate-repo-accounts
+:END:
+
+Validate that configured :gh-account tokens can be resolved via `gh auth token` for REPOS (defaults to `magit-dash-repo-list`). Returns an alist of (REPO-NAME . STATUS) where STATUS is `ok` or an error message string, and emits warnings for any failed accounts.
 
 **** [[file:../magit-dash-gh.el::555][magit-dash-gh-auth-switch]] :command:
 :PROPERTIES:

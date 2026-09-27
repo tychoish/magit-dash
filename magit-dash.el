@@ -98,8 +98,12 @@
   (worktree-symlinks nil)
   (remote-sync nil)
   (sync-on-refresh nil)
-  (fetch-on-refresh nil))
+  (fetch-on-refresh nil)
+  (gh-account nil)
+  (gh-host "github.com"))
 
+(defalias 'magit-dash-repo-account #'magit-dash-repo-gh-account)
+(defalias 'magit-dash-repo-host #'magit-dash-repo-gh-host)
 (defalias 'magit-dash-repo-upstream-repo #'magit-dash-repo-repo)
 (defalias 'magit-dash-repo-upstream #'magit-dash-repo-repo)
 (defalias 'magit-dash-repo-remote-url #'magit-dash-repo-clone-url)
@@ -176,16 +180,24 @@ and return the struct."
     (when (> (length magit-dash--operation-history) 50)
       (setq magit-dash--operation-history (seq-take magit-dash--operation-history 50)))))
 
+(defvar magit-dash--guarded-repos nil
+  "List of expanded repo paths currently executing within `magit-dash--guarded-op-run'.")
+
 (defun magit-dash--guarded-op-run (repo label op-fn on-complete)
   "Run OP-FN for REPO with operation guard LABEL.
 If an operation is already running for REPO, invoke ON-COMPLETE with `skipped'
-and skip execution."
-  (if-let* ((op (magit-dash--op-start repo label)))
-      (funcall op-fn repo
-               (lambda (status &optional text)
-                 (magit-dash--op-finish op status text)
-                 (funcall on-complete status text)))
-    (funcall on-complete 'skipped "operation already in progress")))
+and skip execution.  Re-entrant invocations for the same repo within the same
+guard context are permitted and execute OP-FN directly."
+  (let ((path (expand-file-name (magit-dash-repo-path repo))))
+    (if (member path magit-dash--guarded-repos)
+        (funcall op-fn repo on-complete)
+      (if-let* ((op (magit-dash--op-start repo label)))
+          (let ((magit-dash--guarded-repos (cons path magit-dash--guarded-repos)))
+            (funcall op-fn repo
+                     (lambda (status &optional text)
+                       (magit-dash--op-finish op status text)
+                       (funcall on-complete status text))))
+        (funcall on-complete 'skipped "operation already in progress")))))
 (defmacro with-magit-dash (&rest body)
   "Execute BODY in the `magit-dash' buffer.
 Refreshes the dashboard and ensures `magit-dash-mode' is active."
@@ -209,6 +221,12 @@ Refreshes the dashboard and ensures `magit-dash-mode' is active."
        ,@body)))
 
 
+
+(defcustom magit-dash-multi-github-host nil
+  "Default GitHub host used by `magit-dash-register' when `:gh-host' is unspecified.
+When nil, defaults to \"github.com\"."
+  :type '(choice (const :tag "Default (github.com)" nil) string)
+  :group 'magit-dash)
 
 (defcustom magit-dash-run-command-in-background nil
   "When non-nil, `magit-dash-run-command' executes commands in the background by default."
@@ -326,7 +344,7 @@ first)."
       (expand-file-name path-or-url)
     path-or-url))
 
-(cl-defun magit-dash-register (&key name path repo include-prs include-ci auto-fetch auto-pull auto-commit auto-push auto-sync-command hooks tags commands sort-hint worktree sync-branches timer clone-url remote-url worktree-symlinks symlinks remote-sync sync-on-refresh auto-sync-on-refresh refresh-sync fetch-on-refresh)
+(cl-defun magit-dash-register (&key name path repo include-prs include-ci auto-fetch auto-pull auto-commit auto-push auto-sync-command hooks tags commands sort-hint worktree sync-branches timer clone-url remote-url worktree-symlinks symlinks remote-sync sync-on-refresh auto-sync-on-refresh refresh-sync fetch-on-refresh gh-account gh-host)
   "Register or replace a repository with NAME at absolute PATH.
 REPO is the upstream repository path or URL for bootstrapping.
 INCLUDE-PRS, INCLUDE-CI, AUTO-FETCH, AUTO-PULL, AUTO-COMMIT, AUTO-PUSH,
@@ -393,7 +411,9 @@ Keyword arguments:
                       refresh, subject to `magit-dash-refresh-sync-min-interval'.
   :auto-sync-on-refresh alias for :sync-on-refresh.
   :refresh-sync       alias for :sync-on-refresh.
-  :fetch-on-refresh   non-nil — mark repository as eligible for fetch on refresh."
+  :fetch-on-refresh   non-nil — mark repository as eligible for fetch on refresh.
+  :gh-account         GitHub account login (e.g. \"myuser\") used for gh CLI commands.
+  :gh-host            GitHub host (defaults to \"github.com\" or `magit-dash-multi-github-host\')."
   (unless (and name path)
     (user-error "Magit-dash: must specify name (%s) and path (%s)" name path))
   (when auto-sync-command
@@ -457,7 +477,9 @@ Keyword arguments:
                            :worktree-symlinks links
                            :remote-sync remote-sync
                            :sync-on-refresh sync-refresh
-                           :fetch-on-refresh fetch-on-refresh))))))
+                           :fetch-on-refresh fetch-on-refresh
+                           :gh-account gh-account
+                           :gh-host (or gh-host magit-dash-multi-github-host "github.com")))))))
   (when (and timer (fboundp 'magit-dash-register-sync-timer))
     (apply #'magit-dash-register-sync-timer :name name :repos (list name) timer)))
 

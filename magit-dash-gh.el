@@ -35,6 +35,14 @@
 (declare-function magit-dash-open-repo "magit-dash-open")
 (declare-function magit-gh-pr-dash "magit-dash-gh-pr")
 (declare-function magit-dash-status-refresh-all "magit-dash-status")
+(declare-function magit-dash-repo-p "magit-dash")
+(declare-function magit-dash-repo-name "magit-dash")
+(declare-function magit-dash-repo-path "magit-dash")
+(declare-function magit-dash-repo-gh-account "magit-dash")
+(declare-function magit-dash-repo-gh-host "magit-dash")
+(declare-function magit-dash--repo-at-point "magit-dash")
+(declare-function magit-dash--repo-at-point-p "magit-dash")
+(defvar magit-dash-repo-list)
 
 ;;; Core helpers shared by all magit-dash-gh-* modules
 (defmacro magit-dash-gh--with-repo-dir (path &rest body)
@@ -72,6 +80,109 @@ Each value is a plist containing data like :stats, :pr-counts, etc.")
   (unless (executable-find "gh")
     (user-error "magit-gh: `gh' CLI not found on PATH")))
 
+(defun magit-dash-gh--account-token (user &optional host)
+  "Return the auth token for USER on HOST using `gh auth token'.
+HOST defaults to \"github.com\".
+Signals `user-error' if token resolution fails."
+  (let* ((h (or host "github.com"))
+         (args (list "auth" "token" "-u" user "-h" h)))
+    (with-temp-buffer
+      (let ((code (apply #'call-process "gh" nil (list (current-buffer) t) nil args)))
+        (let ((output (string-trim (buffer-string))))
+          (if (= code 0)
+              output
+            (user-error "magit-gh: failed to obtain token for account '%s' on host '%s': %s"
+                        user h output)))))))
+
+(defun magit-dash-gh--call-with-account (account fn)
+  "Call FN with `process-environment' configured for ACCOUNT.
+ACCOUNT is an account plist (:user USER :host HOST), a string username,
+or nil. When nil, calls FN unchanged.
+When ACCOUNT is given, resolves the token via `magit-dash-gh--account-token'
+and dynamically binds GH_TOKEN (or GH_ENTERPRISE_TOKEN) in `process-environment'."
+  (if (null account)
+      (funcall fn)
+    (let* ((user (if (stringp account) account (plist-get account :user)))
+           (host (or (when (listp account) (plist-get account :host)) "github.com"))
+           (token (magit-dash-gh--account-token user host))
+           (env-var (if (string= host "github.com") "GH_TOKEN" "GH_ENTERPRISE_TOKEN"))
+           (process-environment
+            (cons (format "%s=%s" env-var token)
+                  (if (not (string= host "github.com"))
+                      (cons (format "GH_HOST=%s" host) process-environment)
+                    process-environment))))
+      (funcall fn))))
+
+(defmacro with-magit-gh-account (account &rest body)
+  "Execute BODY with environment configured for ACCOUNT.
+ACCOUNT is an account plist (:user USER :host HOST) or nil.
+When ACCOUNT is nil, executes BODY unchanged.
+When ACCOUNT is given, resolves the token via `magit-dash-gh--account-token'
+and binds GH_TOKEN (for github.com) or GH_ENTERPRISE_TOKEN (for Enterprise
+hosts) in `process-environment' for the duration of BODY."
+  (declare (indent 1))
+  `(magit-dash-gh--call-with-account ,account (lambda () ,@body)))
+
+(defun magit-dash-gh--repo-account (&optional repo-or-path)
+  "Return (:user USER :host HOST) plist for REPO-OR-PATH, or nil.
+Resolves REPO-OR-PATH to a `magit-dash-repo' struct. When the resolved repo
+has a non-nil `:gh-account' slot, returns `(:user USER :host HOST)' with HOST
+defaulting to \"github.com\" when nil. Returns nil when REPO-OR-PATH has
+no configured account or cannot be resolved to a registered repo."
+  (let ((repo
+         (cond
+          ((and repo-or-path (fboundp 'magit-dash-repo-p) (magit-dash-repo-p repo-or-path))
+           repo-or-path)
+          ((stringp repo-or-path)
+           (let ((exp (expand-file-name repo-or-path)))
+             (or (seq-find (lambda (r)
+                             (equal (expand-file-name (magit-dash-repo-path r)) exp))
+                           (and (boundp 'magit-dash-repo-list) magit-dash-repo-list))
+                 (seq-find (lambda (r)
+                             (equal (magit-dash-repo-name r) repo-or-path))
+                           (and (boundp 'magit-dash-repo-list) magit-dash-repo-list)))))
+          ((and (fboundp 'magit-dash--repo-at-point-p) (magit-dash--repo-at-point-p))
+           (magit-dash--repo-at-point))
+          (t
+           (when-let* ((top (or (ignore-errors (magit-toplevel)) default-directory))
+                       (exp (expand-file-name top)))
+             (seq-find (lambda (r)
+                         (equal (expand-file-name (magit-dash-repo-path r)) exp))
+                       (and (boundp 'magit-dash-repo-list) magit-dash-repo-list)))))))
+    (when (and repo (magit-dash-repo-gh-account repo))
+      (list :user (magit-dash-repo-gh-account repo)
+            :host (or (magit-dash-repo-gh-host repo) "github.com")))))
+
+;;;###autoload
+(defun magit-dash-gh-validate-accounts (&optional repos)
+  "Validate that configured `:gh-account' tokens can be resolved for REPOS.
+REPOS defaults to `magit-dash-repo-list'.
+Tests each repo with a non-nil `:gh-account' by calling
+`magit-dash-gh--account-token'. Returns an alist of (REPO-NAME . STATUS) where
+STATUS is `ok' or an error message string.
+Also emits a warning for any accounts that fail to authenticate."
+  (interactive)
+  (let* ((target-repos (or repos (and (boundp 'magit-dash-repo-list) magit-dash-repo-list)))
+         (results nil))
+    (dolist (repo target-repos)
+      (when-let* ((account (magit-dash-repo-gh-account repo))
+                  (host (or (magit-dash-repo-gh-host repo) "github.com")))
+        (condition-case err
+            (progn
+              (magit-dash-gh--account-token account host)
+              (push (cons (magit-dash-repo-name repo) 'ok) results))
+          (error
+           (let ((msg (error-message-string err)))
+             (display-warning 'magit-dash
+                              (format "Failed to authenticate account '%s' for repo '%s': %s"
+                                      account (magit-dash-repo-name repo) msg)
+                              :warning)
+             (push (cons (magit-dash-repo-name repo) msg) results))))))
+    (nreverse results)))
+
+(defalias 'magit-dash-gh-validate-repo-accounts #'magit-dash-gh-validate-accounts)
+
+
 (defun magit-dash-gh--repo-dir ()
   "Return the current git repository root for running `gh' commands.
 Signals `user-error' when not inside a git repository."
@@ -91,9 +202,10 @@ Signals `user-error' when not inside a git repository."
 (defun magit-dash-gh--default-branch ()
   "Return the repository's default branch name, falling back to \"main\"."
   (let* ((default-directory (magit-dash-gh--repo-dir))
-	 (output (string-trim
-		  (shell-command-to-string
-		   "gh repo view --json defaultBranchRef --jq .defaultBranchRef.name"))))
+         (output (with-magit-gh-account (magit-dash-gh--repo-account default-directory)
+                   (string-trim
+                    (shell-command-to-string
+                     "gh repo view --json defaultBranchRef --jq .defaultBranchRef.name")))))
     (if (and (not (string-empty-p output))
              (not (string-match-p "[[:space:]]" output)))
         output
@@ -144,7 +256,8 @@ Uses a single gh call fetching up to `magit-dash-gh-prune-pr-limit' PRs."
 	 (table (or table (magit-dash-gh--prune-load-cache)))
 	 (cmd (format "gh pr list --state all --limit %d --json number,state,headRefName,title"
 		      magit-dash-gh-prune-pr-limit))
-	 (output (string-trim (shell-command-to-string cmd))))
+	 (output (with-magit-gh-account (magit-dash-gh--repo-account default-directory)
+                   (string-trim (shell-command-to-string cmd)))))
     (when (string-prefix-p "[" output)
       (thread-last (json-parse-string output :array-type 'list :object-type 'alist)
         (seq-filter #'magit-dash-gh--pr-closed-p)
@@ -449,31 +562,32 @@ signal."
         (if on-error
             (funcall on-error msg 1)
           (message "magit-gh: gh %s failed: %s" (car args) msg)))
-    (let* ((default-directory dir)
-           (buf (generate-new-buffer " *magit-dash-gh-proc*"))
-           (proc (make-process
-                  :name "magit-gh"
-                  :buffer buf
-                  :command (cons "gh" args)
-                  :connection-type 'pipe
-                  :noquery t
-                  :sentinel
-                  (lambda (proc _event)
-                    (when (memq (process-status proc) '(exit signal))
-                      (let ((output (with-current-buffer (process-buffer proc)
-                                      (buffer-string)))
-                            (code (process-exit-status proc)))
-                        (kill-buffer (process-buffer proc))
-                        (if (= code 0)
-                            (funcall on-success output)
-                          (if on-error
-                              (funcall on-error output code)
-                            (message "magit-gh: gh %s exited %d: %s"
-                                     (car args) code
-                                     (string-trim output))))))))))
-      (with-current-buffer buf
-        (setq default-directory dir))
-      proc)))
+    (with-magit-gh-account (magit-dash-gh--repo-account dir)
+      (let* ((default-directory dir)
+             (buf (generate-new-buffer " *magit-dash-gh-proc*"))
+             (proc (make-process
+                    :name "magit-gh"
+                    :buffer buf
+                    :command (cons "gh" args)
+                    :connection-type 'pipe
+                    :noquery t
+                    :sentinel
+                    (lambda (proc _event)
+                      (when (memq (process-status proc) '(exit signal))
+                        (let ((output (with-current-buffer (process-buffer proc)
+                                        (buffer-string)))
+                              (code (process-exit-status proc)))
+                          (kill-buffer (process-buffer proc))
+                          (if (= code 0)
+                              (funcall on-success output)
+                            (if on-error
+                                (funcall on-error output code)
+                              (message "magit-gh: gh %s exited %d: %s"
+                                       (car args) code
+                                       (string-trim output))))))))))
+        (with-current-buffer buf
+          (setq default-directory dir))
+        proc))))
 
 (defun magit-dash-gh--owner-repo-from-url (url)
   "Extract (OWNER . REPO) pair from URL or slug string if possible."
@@ -492,9 +606,10 @@ Uses `gh repo view', git remotes, and `magit-get-current-branch'."
          (default-directory dir)
          owner repo)
     (ignore-errors
-      (let* ((output (string-trim
-                      (shell-command-to-string
-                       "gh repo view --json owner,name --jq '[.owner.login,.name]|@tsv'")))
+      (let* ((output (with-magit-gh-account (magit-dash-gh--repo-account dir)
+                       (string-trim
+                        (shell-command-to-string
+                         "gh repo view --json owner,name --jq '[.owner.login,.name]|@tsv'"))))
              (parts (split-string output "\t")))
         (when (and (= (length parts) 2)
                    (not (string-empty-p (nth 0 parts)))
@@ -520,22 +635,48 @@ Uses `gh repo view', git remotes, and `magit-get-current-branch'."
 
 ;;; Account switching
 
+(defun magit-dash-gh--parse-auth-hosts-json (json-str)
+  "Parse JSON-STR from `gh auth status --json hosts' into a list of account plists.
+Returns a list of (:host HOST :user USER :active ACTIVE-P) plists."
+  (let* ((parsed (json-parse-string json-str :object-type 'alist :array-type 'list :false-object :false))
+         (hosts (map-elt parsed 'hosts))
+         (accounts nil))
+    (dolist (host-entry hosts)
+      (let* ((host-name (format "%s" (car host-entry)))
+             (users (cdr host-entry)))
+        (dolist (u users)
+          (push (list :host (or (map-elt u 'host) host-name)
+                      :user (map-elt u 'login)
+                      :active (eq (map-elt u 'active) t))
+                accounts))))
+    (nreverse accounts)))
+
 (defun magit-dash-gh--auth-accounts ()
   "Return a list of (:host HOST :user USER :active ACTIVE-P) plists.
-Parsed from `gh auth status', across all configured hosts."
+Parsed from `gh auth status --json hosts' (with fallback to regex parsing of
+`gh auth status')."
   (magit-dash-gh--check-gh)
-  (with-temp-buffer
-    (insert (shell-command-to-string "gh auth status 2>&1"))
-    (goto-char (point-min))
-    (let (accounts)
-      (while (re-search-forward
-              "Logged in to \\([^[:space:]]+\\) account \\([^[:space:]]+\\).*\n[[:space:]]*- Active account: \\(true\\|false\\)"
-              nil t)
-        (push (list :host (match-string 1)
-                    :user (match-string 2)
-                    :active (string= (match-string 3) "true"))
-              accounts))
-      (nreverse accounts))))
+  (let ((accounts nil))
+    (condition-case nil
+        (with-temp-buffer
+          (let ((code (call-process "gh" nil (list (current-buffer) nil) nil "auth" "status" "--json" "hosts")))
+            (when (= code 0)
+              (setq accounts (magit-dash-gh--parse-auth-hosts-json (buffer-string))))))
+      (error nil))
+    (or accounts
+        ;; Fallback to regex parsing
+        (with-temp-buffer
+          (insert (shell-command-to-string "gh auth status 2>&1"))
+          (goto-char (point-min))
+          (let (regex-accounts)
+            (while (re-search-forward
+                    "Logged in to \\([^[:space:]]+\\) account \\([^[:space:]]+\\).*\n[[:space:]]*- Active account: \\(true\\|false\\)"
+                    nil t)
+              (push (list :host (match-string 1)
+                          :user (match-string 2)
+                          :active (string= (match-string 3) "true"))
+                    regex-accounts))
+            (nreverse regex-accounts))))))
 
 (defun magit-dash-gh--auth-select-account (accounts)
   "Prompt to select one of ACCOUNTS via `annotated-completing-read'.

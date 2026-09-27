@@ -12,6 +12,7 @@
 
 (require 'ert)
 (require 'cl-lib)
+(require 'magit-dash)
 (require 'magit-dash-gh)
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -561,5 +562,137 @@ even when other real candidates exist."
 (ert-deftest magit-dash-gh/collect-default-name-slugifies ()
   (should (equal "ci-feature-my-thing-99"
                  (magit-dash-gh--collect-default-name 'ci "feature/my-thing" 99))))
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;; GitHub Account Selection & Token Management
+
+(ert-deftest magit-dash-gh/account-token-success ()
+  "account-token returns trimmed token on gh auth token exit 0."
+  (cl-letf (((symbol-function 'call-process)
+             (lambda (_cmd _infile destination _display &rest _args)
+               (with-current-buffer (if (listp destination) (car destination) (current-buffer))
+                 (insert "ghp_mock_token_12345
+"))
+               0)))
+    (should (equal "ghp_mock_token_12345"
+                   (magit-dash-gh--account-token "alice" "github.com")))))
+
+(ert-deftest magit-dash-gh/account-token-failure ()
+  "account-token signals user-error on gh auth token exit non-zero."
+  (cl-letf (((symbol-function 'call-process)
+             (lambda (_cmd _infile destination _display &rest _args)
+               (with-current-buffer (if (listp destination) (car destination) (current-buffer))
+                 (insert "no token found for user
+"))
+               1)))
+    (should-error (magit-dash-gh--account-token "bob" "github.com")
+                  :type 'user-error)))
+
+(ert-deftest magit-dash-gh/with-account-nil ()
+  "with-magit-gh-account nil executes body without altering environment."
+  (let ((token-before (getenv "GH_TOKEN")))
+    (should (equal "result"
+                   (with-magit-gh-account nil
+                     (should (equal token-before (getenv "GH_TOKEN")))
+                     "result")))))
+
+(ert-deftest magit-dash-gh/with-account-github-com ()
+  "with-magit-gh-account binds GH_TOKEN for github.com."
+  (cl-letf (((symbol-function 'magit-dash-gh--account-token)
+             (lambda (user host)
+               (format "token-for-%s-on-%s" user host))))
+    (with-magit-gh-account '(:user "alice" :host "github.com")
+      (should (equal "token-for-alice-on-github.com" (getenv "GH_TOKEN")))
+      (should-not (getenv "GH_ENTERPRISE_TOKEN")))))
+
+(ert-deftest magit-dash-gh/with-account-enterprise ()
+  "with-magit-gh-account binds GH_ENTERPRISE_TOKEN and GH_HOST for enterprise hosts."
+  (cl-letf (((symbol-function 'magit-dash-gh--account-token)
+             (lambda (user host)
+               (format "ent-token-for-%s-on-%s" user host))))
+    (with-magit-gh-account '(:user "corp-dev" :host "ghe.myorg.internal")
+      (should (equal "ent-token-for-corp-dev-on-ghe.myorg.internal" (getenv "GH_ENTERPRISE_TOKEN")))
+      (should (equal "ghe.myorg.internal" (getenv "GH_HOST"))))))
+
+(ert-deftest magit-dash-gh/with-account-string ()
+  "with-magit-gh-account supports plain username string defaulting to github.com."
+  (cl-letf (((symbol-function 'magit-dash-gh--account-token)
+             (lambda (user host)
+               (format "token-%s-%s" user host))))
+    (with-magit-gh-account "dev1"
+      (should (equal "token-dev1-github.com" (getenv "GH_TOKEN"))))))
+
+(ert-deftest magit-dash-gh/repo-account-struct ()
+  "repo-account extracts account and host from a magit-dash-repo struct."
+  (let ((r-account (magit-dash-repo--make :name "r1" :path "/tmp/r1"
+                                         :gh-account "octo" :gh-host "github.corp.com"))
+        (r-no-account (magit-dash-repo--make :name "r2" :path "/tmp/r2")))
+    (should (equal '(:user "octo" :host "github.corp.com")
+                   (magit-dash-gh--repo-account r-account)))
+    (should (null (magit-dash-gh--repo-account r-no-account)))))
+
+(ert-deftest magit-dash-gh/repo-account-lookup-path-and-name ()
+  "repo-account resolves repo via path string or name string in repo list."
+  (let* ((r1 (magit-dash-repo--make :name "repo-one" :path "/tmp/repo-one"
+                                   :gh-account "user1"))
+         (r2 (magit-dash-repo--make :name "repo-two" :path "/tmp/repo-two"))
+         (magit-dash-repo-list (list r1 r2)))
+    ;; By expanded path
+    (should (equal '(:user "user1" :host "github.com")
+                   (magit-dash-gh--repo-account "/tmp/repo-one")))
+    ;; By repo name
+    (should (equal '(:user "user1" :host "github.com")
+                   (magit-dash-gh--repo-account "repo-one")))
+    ;; Repo without account
+    (should (null (magit-dash-gh--repo-account "/tmp/repo-two")))
+    ;; Unregistered path
+    (should (null (magit-dash-gh--repo-account "/tmp/unregistered")))))
+
+(ert-deftest magit-dash-gh/parse-auth-hosts-json ()
+  "parse-auth-hosts-json parses JSON status structure."
+  (let* ((json "{\"hosts\":{\"github.com\":[{\"active\":true,\"host\":\"github.com\",\"login\":\"u1\"},{\"active\":false,\"host\":\"github.com\",\"login\":\"u2\"}],\"ghe.internal\":[{\"active\":true,\"host\":\"ghe.internal\",\"login\":\"corp-u1\"}]}}")
+         (accounts (magit-dash-gh--parse-auth-hosts-json json)))
+    (should (= 3 (length accounts)))
+    (should (equal '(:host "github.com" :user "u1" :active t) (nth 0 accounts)))
+    (should (equal '(:host "github.com" :user "u2" :active nil) (nth 1 accounts)))
+    (should (equal '(:host "ghe.internal" :user "corp-u1" :active t) (nth 2 accounts)))))
+
+(ert-deftest magit-dash-gh/auth-accounts-json-and-fallback ()
+  "auth-accounts parses JSON when available and falls back to regex."
+  (cl-letf (((symbol-function 'executable-find) (lambda (_) "/usr/bin/gh")))
+    ;; 1. JSON success
+    (cl-letf (((symbol-function 'call-process)
+               (lambda (_cmd _in dest _disp &rest _args)
+                 (with-current-buffer (car dest)
+                   (insert "{\"hosts\":{\"github.com\":[{\"active\":true,\"host\":\"github.com\",\"login\":\"json-user\"}]}}"))
+                 0)))
+      (let ((accounts (magit-dash-gh--auth-accounts)))
+        (should (= 1 (length accounts)))
+        (should (equal "json-user" (plist-get (car accounts) :user)))))
+    ;; 2. JSON failure, fallback to regex
+    (cl-letf (((symbol-function 'call-process)
+               (lambda (&rest _) 1))
+              ((symbol-function 'shell-command-to-string)
+               (lambda (_)
+                 "Logged in to github.com account fallback-user (/config)\n  - Active account: true\n")))
+      (let ((accounts (magit-dash-gh--auth-accounts)))
+        (should (= 1 (length accounts)))
+        (should (equal "fallback-user" (plist-get (car accounts) :user)))))))
+
+(ert-deftest magit-dash-gh/validate-accounts ()
+  "validate-accounts checks token resolution and reports status alist."
+  (let* ((r-good (magit-dash-repo--make :name "good" :path "/tmp/good" :gh-account "good-user"))
+         (r-bad (magit-dash-repo--make :name "bad" :path "/tmp/bad" :gh-account "bad-user"))
+         (r-none (magit-dash-repo--make :name "none" :path "/tmp/none")))
+    (cl-letf (((symbol-function 'magit-dash-gh--account-token)
+               (lambda (user &optional _host)
+                 (if (string= user "good-user")
+                     "token-ok"
+                   (user-error "auth failed for %s" user)))))
+      (let ((results (magit-dash-gh-validate-accounts (list r-good r-bad r-none))))
+        (should (= 2 (length results)))
+        (should (eq 'ok (cdr (assoc "good" results))))
+        (should (string-match-p "auth failed" (cdr (assoc "bad" results))))))))
 
 ;;; test-magit-dash-gh.el ends here

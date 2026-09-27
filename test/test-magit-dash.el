@@ -3380,3 +3380,52 @@ The bug was that add-text-properties returns t, not the modified string."
       (magit-dash-hard-refresh))
     (should (= 0 (hash-table-count magit-dash--repo-last-fetch-attempts)))
     (should (= 0 (hash-table-count magit-dash--repo-last-sync-attempts)))))
+
+
+;;;; GitHub Account and Host settings
+
+(ert-deftest magit-dash/repo-gh-account-and-host-slots ()
+  "magit-dash-repo struct supports :gh-account and :gh-host slots and aliases."
+  (let ((default-repo (magit-dash-repo--make :name "r-def" :path "/tmp/r-def"))
+        (custom-repo (magit-dash-repo--make :name "r-cust" :path "/tmp/r-cust"
+                                            :gh-account "my-user"
+                                            :gh-host "github.corp.example.com")))
+    (should (null (magit-dash-repo-gh-account default-repo)))
+    (should (equal "github.com" (magit-dash-repo-gh-host default-repo)))
+    (should (equal "my-user" (magit-dash-repo-gh-account custom-repo)))
+    (should (equal "my-user" (magit-dash-repo-account custom-repo)))
+    (should (equal "github.corp.example.com" (magit-dash-repo-gh-host custom-repo)))
+    (should (equal "github.corp.example.com" (magit-dash-repo-host custom-repo)))))
+
+(ert-deftest magit-dash/register-gh-account-and-host ()
+  "magit-dash-register sets :gh-account and :gh-host slots."
+  (let ((magit-dash-repo-list nil))
+    (magit-dash-register :name "r" :path "/tmp/r"
+                         :gh-account "octocat"
+                         :gh-host "github.example.com")
+    (let ((repo (car magit-dash-repo-list)))
+      (should (equal "octocat" (magit-dash-repo-gh-account repo)))
+      (should (equal "github.example.com" (magit-dash-repo-gh-host repo))))))
+
+(ert-deftest magit-dash/register-gh-host-fallback-multi-github-host ()
+  "magit-dash-register falls back to `magit-dash-multi-github-host' when unspecified."
+  (let ((magit-dash-repo-list nil)
+        (magit-dash-multi-github-host "ghe.internal.net"))
+    (magit-dash-register :name "r" :path "/tmp/r" :gh-account "devuser")
+    (let ((repo (car magit-dash-repo-list)))
+      (should (equal "devuser" (magit-dash-repo-gh-account repo)))
+      (should (equal "ghe.internal.net" (magit-dash-repo-gh-host repo))))))
+
+(ert-deftest magit-dash/batch-sync-auto-sync-double-guard-fix ()
+  "Batch sync invokes auto-sync pipeline without being blocked by guarded-op-run double guard."
+  (let* ((r1 (magit-dash-repo--make :name "r1" :path "/tmp/r1" :auto-fetch t))
+         (magit-dash-repo-list (list r1))
+         (magit-dash--batch-all t)
+         (operation-called nil))
+    (cl-letf (((symbol-function 'magit-dash--run-operation)
+               (lambda (_repo op on-complete)
+                 (when (eq op :sync)
+                   (setq operation-called t))
+                 (funcall on-complete 'ok))))
+      (magit-dash-sync-all)
+      (should operation-called))))
