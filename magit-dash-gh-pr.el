@@ -211,7 +211,7 @@ Returns a list of plists :id :resolved :path :creator :last-commentor.
 
 ;;;###autoload
 (defun magit-dash-gh-pr-fetch (&optional pr-number)
-  "Download comments and review threads for PR-NUMBER (or the current branch's PR).
+  "Download review threads for PR-NUMBER (or current branch's PR).
 When PR-NUMBER is nil, auto-detects the PR for the current branch.
 
 Creates an artifact directory under plans/ containing:

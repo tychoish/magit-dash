@@ -348,7 +348,7 @@ Otherwise, prompts for repository selection via `annotated-completing-read'."
                             (magit-dash-repo-path (magit-dash--repo-at-point)))))))
     (if target-dir
         (magit-dash-worktree-dispatch target-dir)
-      (let* ((open-buffers (magit-dash-open--open-status-buffers))
+      (let* ((_open-buffers (magit-dash-open--open-status-buffers))
              (entries (magit-dash-open--collect-deep default-directory magit-dash-open-scan-depth))
              (path-map (map-into entries '(hash-table :test equal))))
         (when (bound-and-true-p magit-dash-repo-list)

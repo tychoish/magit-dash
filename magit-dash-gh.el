@@ -212,8 +212,8 @@ Signals `user-error' when not inside a git repository."
       "main")))
 
 (defun magit-dash-gh--prune-cache-file ()
-  "Return the cache file path for the current repo, or nil when caching is disabled.
-The filename uses the repo's directory basename plus a short hash for uniqueness."
+  "Return cache file path for current repo, or nil when caching is disabled.
+Uses repo directory basename plus a short hash for uniqueness."
   (when magit-dash-gh-prune-cache-dir
     (let* ((dir (magit-dash-gh--repo-dir))
 	   (basename (file-name-nondirectory (directory-file-name dir)))

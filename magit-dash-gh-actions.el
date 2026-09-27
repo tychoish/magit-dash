@@ -67,7 +67,7 @@ Applies ANSI colour sequences and provides read-only navigation."
 
 (defun magit-dash-gh-actions--run-annotation (run &optional ordinal)
   "Return a one-line annotation string for RUN alist.
-ORDINAL, when non-nil, is an integer position in the sorted run list (1 = most recent)."
+ORDINAL is integer position in sorted run list (1 = most recent)."
   (let ((sha (map-elt run 'headSha)))
     (format "%4s  %-12s %-12s  %-30s  %s"
             (if ordinal (format "#%d" ordinal) "")

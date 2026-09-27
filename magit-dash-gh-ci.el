@@ -165,7 +165,7 @@ Does nothing when no CI status is cached for REPO."
                       (o (plist-get info :owner))
                       (r (plist-get info :repo)))
             (format "%s/%s" o r)))
-        (when-let ((pair (or (magit-dash-gh--owner-repo-from-url (magit-dash-repo-repo repo))
+        (when-let* ((pair (or (magit-dash-gh--owner-repo-from-url (magit-dash-repo-repo repo))
                              (magit-dash-gh--owner-repo-from-url (magit-dash-repo-clone-url repo)))))
           (format "%s/%s" (car pair) (cdr pair)))
         (let ((name (magit-dash-repo-name repo)))
