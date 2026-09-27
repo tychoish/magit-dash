@@ -249,7 +249,7 @@ No-op when `magit-dash-gh-prune-cache-dir' is nil."
       (prin1 (map-values table) (current-buffer)))))
 
 (defun magit-dash-gh--fetch-closed-prs (&optional table)
-  "Fetch recent PRs from GitHub, merge closed ones into TABLE, persist and return it.
+  "Fetch recent PRs from GitHub, merge into TABLE, persist and return it.
 TABLE defaults to the on-disk cache for the current repo.
 Uses a single gh call fetching up to `magit-dash-gh-prune-pr-limit' PRs."
   (let* ((default-directory (magit-dash-gh--repo-dir))

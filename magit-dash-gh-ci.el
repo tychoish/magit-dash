@@ -22,6 +22,9 @@
 
 ;;; Code:
 
+(declare-function magit-dash-repo-repo "magit-dash")
+(declare-function magit-dash-repo-clone-url "magit-dash")
+
 (require 'map)
 (require 'magit-dash-gh)
 (require 'magit-dash-gh-actions)
@@ -178,7 +181,7 @@ Does nothing when no CI status is cached for REPO."
 
 (defun magit-dash-ci--dispatch-prompt (id args)
   "Dispatch prompt ID with ARGS plist.
-Calls `agent-shell-workflow-dispatch' (or fallback `agent-shell-workflow-exec') with `:args' ARGS."
+Calls dispatch (or fallback exec) with `:args' ARGS."
   (let ((fn (cond ((fboundp 'agent-shell-workflow-dispatch) #'agent-shell-workflow-dispatch)
                   ((fboundp 'agent-shell-workflow-exec) #'agent-shell-workflow-exec)
                   (t (user-error "magit-dash fix-CI requires the agent-shell-workflow library")))))
@@ -186,7 +189,7 @@ Calls `agent-shell-workflow-dispatch' (or fallback `agent-shell-workflow-exec') 
 
 (defun magit-dash-ci--download-and-dispatch (repo run-id)
   "Dispatch the `fix-ci' prompt library workflow for REPO and RUN-ID.
-Requires `agent-shell-workflow-dispatch' to be available from the `agent-shell-workflow' library."
+Requires `agent-shell-workflow-dispatch' from `agent-shell-workflow'."
   (let* ((path (magit-dash-repo-path repo))
          (slug (magit-dash-ci--repo-slug repo))
          (default-directory (file-name-as-directory path)))
@@ -195,7 +198,7 @@ Requires `agent-shell-workflow-dispatch' to be available from the `agent-shell-w
 ;;;###autoload
 (defun magit-dash-ci-dispatch-fix-operation (repo)
   "Dispatch the `fix-ci' prompt library workflow for REPO.
-Invokes `agent-shell-workflow-dispatch' with `:repo' set to REPO's OWNER/NAME slug."
+Invokes workflow dispatch with `:repo' set to REPO's OWNER/NAME slug."
   (unless (magit-dash-repo-include-ci repo)
     (user-error "magit-dash fix-CI: %s does not have CI enabled (:include-ci)"
                 (magit-dash-repo-name repo)))

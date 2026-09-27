@@ -246,7 +246,7 @@ default behaviour of `magit-dash-gh-actions-fetch'."
 
 ;;;###autoload
 (defun magit-dash-gh-actions-fetch-for-pr (pr-number repo-dir)
-  "Fetch GitHub Actions CI logs for PR-NUMBER using REPO-DIR as the working directory.
+  "Fetch GitHub Actions CI logs for PR-NUMBER with REPO-DIR as working directory.
 PR-NUMBER is an integer.  REPO-DIR must be a local checkout of the repository
 so that `gh' can resolve the remote when listing and downloading runs."
   (magit-dash-gh--check-gh)
