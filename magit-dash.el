@@ -70,6 +70,7 @@
 (declare-function magit-dash-gh-ci-fetch "magit-dash-gh-ci")
 (declare-function magit-dash-gh-workflow-run "magit-dash-gh-actions")
 (declare-function magit-gh-pr-dash "magit-dash-gh-pr")
+(declare-function magit-dash-gh-pr-views-menu "magit-dash-gh-pr")
 
 (defconst magit-dash-buffer-name "*magit-dash-repos*")
 
@@ -1803,7 +1804,7 @@ When both together exceed the available window space they split it proportionall
     (define-key m (kbd "m")   #'magit-dash-menu)
     (define-key m (kbd "n")   #'magit-dash-sync)
     (define-key m (kbd "o")   #'magit-dash-open-repo)
-    (define-key m (kbd "p")   #'magit-gh-pr-dash)
+    (define-key m (kbd "p")   #'magit-dash-gh-pr-views-menu)
     (define-key m (kbd "P")   #'magit-dash-push)
     (define-key m (kbd "q")   #'quit-window)
     (define-key m (kbd "Q")   #'magit-dash-agent-shell-queue)
@@ -3411,7 +3412,7 @@ When disabled, only explicitly marked repos are targeted."
     ("sb"  "Bump submodules" magit-dash-bump-submodules-menu
      :inapt-if-not magit-dash--repo-at-point-p)]
    ["Dashboard"
-    ("pr"  "PR dashboard"    magit-gh-pr-dash)
+    ("pr"  "PR views…"       magit-dash-gh-pr-views-menu)
     ("nt"  "Filter by tag"   magit-dash-filter-by-tag)
     ("hr"  (lambda () (if (magit-dash--has-marks-p) "Hide marked" "Hide repo"))
      magit-dash-hide-repo

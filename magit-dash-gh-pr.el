@@ -38,6 +38,8 @@
 (declare-function magit-dash--format-age "magit-dash")
 (declare-function magit-dash-repo-p "magit-dash")
 (declare-function magit-dash-repo-path "magit-dash")
+(declare-function magit-dash--repo-at-point "magit-dash")
+(declare-function magit-dash--repo-at-point-p "magit-dash")
 (declare-function magit-dash-gh-actions-fetch-for-pr "magit-dash-gh-actions")
 ;;; Configuration
 
@@ -340,7 +342,8 @@ Otherwise uses `gh search prs' for cross-repo listing."
         (append
          (list "pr" "list" "-R" repo "--state" state
                "--json"
-               "number,title,state,author,updatedAt,commentsCount,reviewDecision,statusCheckRollup,isDraft,url")
+               "number,title,state,author,updatedAt,comments,reviewDecision,statusCheckRollup,isDraft,url"
+               "--jq" "map(. + {commentsCount: (.comments | length)} | del(.comments))")
          (when author (list "--author" author)))
       (append
        (list "search" "prs"
@@ -477,6 +480,62 @@ Aggregates all open PRs by default across repositories."
 (defalias 'magit-gh-prs #'magit-gh-pr-dash)
 ;;;###autoload
 (defalias 'magit-dash-gh-pr-dash #'magit-gh-pr-dash)
+
+(defun magit-dash-gh-pr-dashboard--open-with-filters (filters)
+  "Open the PR dashboard buffer showing pull requests matching FILTERS."
+  (magit-dash-gh--check-gh)
+  (let ((buf (get-buffer-create magit-dash-gh-pr-buffer-name)))
+    (with-current-buffer buf
+      (unless (derived-mode-p 'magit-dash-gh-pr-dashboard-mode)
+        (magit-dash-gh-pr-dashboard-mode))
+      (setq-local magit-dash-gh-pr-dashboard--filters filters)
+      (magit-dash-gh-pr-dashboard-refresh))
+    (pop-to-buffer buf)))
+
+(defun magit-dash-gh-pr-dashboard--current-repo-slug ()
+  "Return the OWNER/NAME slug for the repo at point or `default-directory'.
+Signals `user-error' when no GitHub repository can be determined."
+  (let* ((repo-dir (if (magit-dash--repo-at-point-p)
+                       (magit-dash-repo-path (magit-dash--repo-at-point))
+                     (or (magit-toplevel) (user-error "Not inside a git repository"))))
+         (default-directory repo-dir)
+         (info (magit-dash-gh--repo-info))
+         (owner (plist-get info :owner))
+         (repo  (plist-get info :repo)))
+    (unless (and owner repo)
+      (user-error "Could not determine GitHub repository for %s" repo-dir))
+    (format "%s/%s" owner repo)))
+
+;;;###autoload
+(defun magit-dash-gh-pr-dash-all ()
+  "Open the PR dashboard showing all open pull requests across repositories."
+  (interactive)
+  (magit-dash-gh-pr-dashboard--open-with-filters
+   (list :state "open" :author nil :repo nil :org nil)))
+
+;;;###autoload
+(defun magit-dash-gh-pr-dash-mine ()
+  "Open the PR dashboard showing your open pull requests across repositories."
+  (interactive)
+  (magit-dash-gh-pr-dashboard--open-with-filters
+   (list :state "open" :author "@me" :repo nil :org nil)))
+
+;;;###autoload
+(defun magit-dash-gh-pr-dash-here ()
+  "Open the PR dashboard showing open pull requests for the repo at point."
+  (interactive)
+  (magit-dash-gh-pr-dashboard--open-with-filters
+   (list :state "open" :author nil
+         :repo (magit-dash-gh-pr-dashboard--current-repo-slug) :org nil)))
+
+;;;###autoload
+(defun magit-dash-gh-pr-dash-mine-here ()
+  "Open the PR dashboard showing your open pull requests for the repo at point."
+  (interactive)
+  (magit-dash-gh-pr-dashboard--open-with-filters
+   (list :state "open" :author "@me"
+         :repo (magit-dash-gh-pr-dashboard--current-repo-slug) :org nil)))
+
 (defun magit-dash-gh-pr-dashboard--find-local-path (repo-slug)
   "Return a local checkout path for REPO-SLUG (owner/name), or nil.
 Searches `magit-dash-repo-list' when bound, matching the repo name
@@ -551,6 +610,16 @@ its magit status buffer."
    ["Dashboard"
     ("g"   "Refresh"               magit-dash-gh-pr-dashboard-refresh)
     ("q"   "Quit"                  quit-window)]])
+
+;;;###autoload (autoload 'magit-dash-gh-pr-views-menu "magit-dash-gh-pr" nil t)
+(transient-define-prefix magit-dash-gh-pr-views-menu ()
+  "Jump to a pull request dashboard view."
+  [["Pull Requests"
+    ("a" "All repos — open PRs"  magit-dash-gh-pr-dash-all)
+    ("m" "All repos — my PRs"    magit-dash-gh-pr-dash-mine)
+    ("h" "This repo — open PRs"  magit-dash-gh-pr-dash-here)
+    ("n" "This repo — my PRs"    magit-dash-gh-pr-dash-mine-here)]])
+
 (provide 'magit-dash-gh-pr)
 
 ;;; magit-gh-pr.el ends here
