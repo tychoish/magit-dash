@@ -28,6 +28,7 @@
 (declare-function magit-dash-worktree-dispatch "magit-dash-worktree")
 (declare-function magit-dash--repo-at-point "magit-dash")
 (declare-function magit-dash-repo-path "magit-dash")
+(declare-function magit-dash-repo-worktree "magit-dash")
 
 
 ;;; Configuration

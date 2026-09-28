@@ -67,7 +67,8 @@ Example:
   :group 'magit-dash-worktree)
 
 (defcustom magit-dash-worktree-auto-symlink t
-  "When non-nil, automatically create symlinks in new worktrees via `magit-post-worktree-add-hook'."
+  "When non-nil, automatically create symlinks in new worktrees.
+Hooked via `magit-post-worktree-add-hook'."
   :type 'boolean
   :group 'magit-dash-worktree)
 
@@ -75,8 +76,8 @@ Example:
 
 (defun magit-dash-worktree-main-dir (&optional path)
   "Return the main repository checkout root directory for PATH.
-If PATH is in a linked worktree, follows git's common directory back to the main checkout.
-If PATH is nil, uses `default-directory'."
+If PATH is in a linked worktree, follows git's common directory back to
+the main checkout.  If PATH is nil, uses `default-directory'."
   (let* ((dir (expand-file-name (or path default-directory)))
          (default-directory (file-name-as-directory dir))
          (common-dir (condition-case nil
@@ -145,10 +146,10 @@ Combines `magit-dash-worktree-global-symlinks', matching entries from
 ;;; Symlink execution
 
 (defun magit-dash-worktree-symlink-worktree (worktree-path &optional main-path symlinks)
-  "Create symlinks in WORKTREE-PATH pointing to corresponding entries in MAIN-PATH.
+  "Create symlinks in WORKTREE-PATH pointing to entries in MAIN-PATH.
 If MAIN-PATH is nil, resolves it via `magit-dash-worktree-main-dir'.
 If SYMLINKS is nil, resolves via `magit-dash-worktree-symlinks-for'.
-Returns an alist of ((TARGET . SOURCE) ...) for successfully created or active symlinks."
+Returns an alist of ((TARGET . SOURCE) ...) for created or active symlinks."
   (let* ((wt (expand-file-name worktree-path))
          (main (expand-file-name (or main-path (magit-dash-worktree-main-dir wt))))
          (targets (or symlinks (magit-dash-worktree-symlinks-for (or main wt))))
@@ -181,8 +182,9 @@ Returns an alist of ((TARGET . SOURCE) ...) for successfully created or active s
 
 ;;;###autoload
 (defun magit-dash-worktree-sync-symlinks (&optional path)
-  "Enforce worktree symlinks for the worktree at PATH (default repo at point or current buffer).
-If invoked on a main worktree, syncs symlinks for all linked worktrees of that repository."
+  "Enforce worktree symlinks for the worktree at PATH.
+Defaults to the repo at point or current buffer.  If invoked on a main
+worktree, syncs symlinks for all linked worktrees of that repository."
   (interactive)
   (let* ((target-path (expand-file-name
                        (or path

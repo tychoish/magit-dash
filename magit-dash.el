@@ -64,6 +64,9 @@
 (declare-function magit-worktree-delete "magit-worktree")
 (declare-function magit-stash-clear "magit-stash")
 (declare-function agent-shell-switch-buffer "agent-shell")
+(declare-function agent-shell-new-shell "agent-shell")
+(declare-function agent-shell-queue-buffer-open "agent-shell-queue")
+(declare-function agent-shell-menu-project-buffers "agent-shell-menu")
 (declare-function agent-shell-menu-switch-project-session "agent-shell-menu")
 (declare-function agent-shell-workflow-dispatch-menu "agent-shell-workflow-menu")
 (declare-function magit-dash-gh-ci-open "magit-dash-gh-ci")
@@ -147,9 +150,9 @@ Use `magit-dash-register' to add entries.")
 
 (defun magit-dash--op-start (repo label &optional proc)
   "Start tracking an operation for REPO with LABEL.
-If an operation is already running for REPO, log a message and return nil (guard triggered).
-Otherwise, create a `magit-dash-operation' struct, store it in `magit-dash--active-operations',
-and return the struct."
+If an operation is already running for REPO, log a message and return
+nil (guard triggered).  Otherwise, create a `magit-dash-operation'
+struct, store it in `magit-dash--active-operations', and return it."
   (let* ((path (expand-file-name (magit-dash-repo-path repo)))
          (name (magit-dash-repo-name repo)))
     (if (magit-dash--op-running-p path)
@@ -182,7 +185,8 @@ and return the struct."
       (setq magit-dash--operation-history (seq-take magit-dash--operation-history 50)))))
 
 (defvar magit-dash--guarded-repos nil
-  "List of expanded repo paths currently executing within `magit-dash--guarded-op-run'.")
+  "Expanded repo paths currently executing within
+`magit-dash--guarded-op-run'.")
 
 (defun magit-dash--guarded-op-run (repo label op-fn on-complete)
   "Run OP-FN for REPO with operation guard LABEL.
@@ -223,19 +227,24 @@ Refreshes the dashboard and ensures `magit-dash-mode' is active."
 
 
 
+(defgroup magit-dash nil
+  "Multi-repository dashboard for magit."
+  :group 'magit
+  :prefix "magit-dash-")
+
 (defcustom magit-dash-multi-github-host nil
-  "Default GitHub host used by `magit-dash-register' when `:gh-host' is unspecified.
-When nil, defaults to \"github.com\"."
+  "Default GitHub host used by `magit-dash-register' when `:gh-host'
+is unspecified.  When nil, defaults to \"github.com\"."
   :type '(choice (const :tag "Default (github.com)" nil) string)
   :group 'magit-dash)
 
 (defcustom magit-dash-run-command-in-background nil
-  "When non-nil, `magit-dash-run-command' executes commands in the background by default."
+  "When non-nil, `magit-dash-run-command' runs commands in the background."
   :type 'boolean
   :group 'magit-dash)
 
 (defcustom magit-dash-refresh-fetch t
-  "When non-nil, `magit-dash-refresh' performs a git fetch for eligible repositories.
+  "When non-nil, `magit-dash-refresh' fetches for eligible repositories.
 A repository is eligible if it has fetch or sync configured (e.g. `:auto-fetch',
 `:auto-pull', `:sync-on-refresh', or other sync hooks/steps).
 Fetches are subject to `magit-dash-refresh-fetch-min-interval'."
@@ -260,7 +269,8 @@ Defaults to 3600 seconds (1 hour)."
 ;;;; Hooks and operations
 
 (defconst magit-dash--hook-operations '(:fetch :pull :commit :push :sync)
-  "Fixed vocabulary of operations a `:hooks' or `magit-dash-global-hooks' entry may key on.")
+  "Fixed vocabulary of operations a `:hooks' or `magit-dash-global-hooks'
+entry may key on.")
 
 (defconst magit-dash--hook-slots '(:pre :post :operation)
   "Fixed vocabulary of slots within a single operation's hooks plist.")
@@ -281,7 +291,7 @@ Signal `user-error' when REMOTE-SYNC contains keys outside
          (unless (memq slot magit-dash--remote-sync-slots)
            (user-error "Magit-dash: unknown remote-sync slot %s" slot))))
      (seq-partition remote-sync 2))
-    (when-let ((method (plist-get remote-sync :merge-method)))
+    (when-let* ((method (plist-get remote-sync :merge-method)))
       (unless (memq (if (symbolp method) method (intern method)) '(merge rebase))
         (user-error "Magit-dash: :merge-method must be 'merge or 'rebase, got %S" method)))))
 
@@ -409,12 +419,16 @@ Keyword arguments:
   :remote-sync    plist (:hosts, :branch, :path, :merge-method) declaring
                   remote sync mirrors.
   :sync-on-refresh    non-nil — run full auto-sync pipeline during dashboard
-                      refresh, subject to `magit-dash-refresh-sync-min-interval'.
+                      refresh, subject to
+                      `magit-dash-refresh-sync-min-interval'.
   :auto-sync-on-refresh alias for :sync-on-refresh.
   :refresh-sync       alias for :sync-on-refresh.
-  :fetch-on-refresh   non-nil — mark repository as eligible for fetch on refresh.
-  :gh-account         GitHub account login (e.g. \"myuser\") used for gh CLI commands.
-  :gh-host            GitHub host (defaults to \"github.com\" or `magit-dash-multi-github-host\')."
+  :fetch-on-refresh   non-nil — mark repository eligible for fetch on
+                      refresh.
+  :gh-account         GitHub account login (e.g. \"myuser\") used for
+                      gh CLI commands.
+  :gh-host            GitHub host (defaults to \"github.com\" or
+                      `magit-dash-multi-github-host\')."
   (unless (and name path)
     (user-error "Magit-dash: must specify name (%s) and path (%s)" name path))
   (when auto-sync-command
@@ -856,7 +870,8 @@ not via a thrown error."
 
 (defun magit-dash--fetch-async (repo on-complete)
   "Run git fetch for REPO asynchronously.
-Calls ON-COMPLETE with symbol `ok' on success or `error' and error text on failure."
+Calls ON-COMPLETE with symbol `ok' on success or `error' and error text
+on failure."
   (magit-dash--record-fetch-attempt repo)
   (magit-dash--run-git
    (magit-dash-repo-path repo)
@@ -867,7 +882,8 @@ Calls ON-COMPLETE with symbol `ok' on success or `error' and error text on failu
 
 (defun magit-dash--pull-async (repo on-complete)
   "Run git pull for REPO asynchronously.
-Calls ON-COMPLETE with symbol `ok' on success or `error' and error text on failure."
+Calls ON-COMPLETE with symbol `ok' on success or `error' and error text
+on failure."
   (magit-dash--run-git
    (magit-dash-repo-path repo)
    '("pull")
@@ -887,7 +903,8 @@ Calls ON-COMPLETE with `ok' on success or `error' with message on failure."
 
 (defun magit-dash--push-async (repo on-complete)
   "Run git push for REPO asynchronously.
-Calls ON-COMPLETE with symbol `ok' on success or `error' and error text on failure."
+Calls ON-COMPLETE with symbol `ok' on success or `error' and error text
+on failure."
   (magit-dash--run-git
    (magit-dash-repo-path repo)
    '("push")
@@ -932,8 +949,9 @@ removed outside magit-dash) instead of letting `magit-git-string' signal."
       (string-trim (or (magit-git-string "branch" "--show-current") "")))))
 
 (defun magit-dash--branch-allowed-p (repo)
-  "Return current branch name if allowed by REPO's sync-branches, nil otherwise.
-When sync-branches is nil any branch is allowed and the current branch is returned."
+  "Return current branch name if allowed by REPO's sync-branches, else nil.
+When sync-branches is nil any branch is allowed and the current branch
+is returned."
   (let* ((allowed (magit-dash-repo-sync-branches repo))
          (current (magit-dash--current-branch (magit-dash-repo-path repo))))
     (if (null allowed)
@@ -1338,6 +1356,12 @@ ON-ALL-DONE with an alist of (NAME . STATUS)."
 
 ;;;; Cache management
 
+(defvar magit-dash--repo-last-fetch-attempts (make-hash-table :test #'equal)
+  "Hash table mapping expanded repo path to float-time of last fetch attempt.")
+
+(defvar magit-dash--repo-last-sync-attempts (make-hash-table :test #'equal)
+  "Hash table mapping expanded repo path to float-time of last sync attempt.")
+
 (defun magit-dash-cache-info ()
   "Display cache statistics in the minibuffer."
   (interactive)
@@ -1373,7 +1397,7 @@ ON-ALL-DONE with an alist of (NAME . STATUS)."
   (magit-dash--maybe-refresh))
 
 (defun magit-dash-cache-reset-at-point ()
-  "Clear cache for repository at point, re-collect stats synchronously, and refresh."
+  "Clear cache for repository at point, re-collect stats, and refresh."
   (interactive)
   (when-let* ((repo (magit-dash--repo-at-point)))
     (let* ((path (magit-dash-repo-path repo))
@@ -1385,7 +1409,8 @@ ON-ALL-DONE with an alist of (NAME . STATUS)."
 
 (defun magit-dash-cache-diagnose ()
   "Report cache health for all registered repos.
-Shows a one-line summary message and opens a detail buffer when issues are found."
+Shows a one-line summary message and opens a detail buffer when issues
+are found."
   (interactive)
   (let ((warnings 0)
         (errors 0)
@@ -1614,6 +1639,14 @@ Name and Branch widths are computed dynamically in `magit-dash--build-format'.")
         (not (magit-dash--column-enabled-p col)))
   (magit-dash-refresh))
 
+(defvar magit-dash-show-discovered-submodules t
+  "When non-nil, auto-discovered submodules appear below their parent.")
+
+(defvar magit-dash--submodule-path-set nil
+  "Hash table mapping auto-discovered submodule path → name.
+Rebuilt on each refresh.  Used to detect explicitly-registered repos that
+are also submodules and to derive their parent<mod> display name.")
+
 (defun magit-dash-toggle-discovered-submodules ()
   "Toggle visibility of auto-discovered submodules in the dashboard and refresh."
   (interactive)
@@ -1622,7 +1655,8 @@ Name and Branch widths are computed dynamically in `magit-dash--build-format'.")
   (magit-dash-refresh))
 
 (defvar magit-dash-show-discovered-worktrees t
-  "When non-nil, auto-discovered worktrees appear below their parent in the dashboard.")
+  "When non-nil, auto-discovered worktrees appear below their parent
+in the dashboard.")
 
 (defun magit-dash-toggle-discovered-worktrees ()
   "Toggle visibility of auto-discovered worktrees in the dashboard and refresh."
@@ -1680,7 +1714,8 @@ a single space.  Returns an empty string when everything is clean and synced."
 Shows \"WT\" for worktrees, \"SUBM\" for initialized submodules,
 \"SUBM.EMPTY\" for missing/uninitialized submodules, \"SUBM.TR\" for
 explicitly-registered submodules, \"MISSING\" for un-cloned repos,
-\"REPO+SM\" for repos with discovered submodules, and \"REPO\" for ordinary working-tree repos."
+\"REPO+SM\" for repos with discovered submodules, and \"REPO\" for
+ordinary working-tree repos."
   (let ((path (magit-dash-repo-path repo))
         (submodule (magit-dash-repo-submodule repo)))
     (cond
@@ -1718,16 +1753,19 @@ Returns an empty string when nothing is set."
 
 (defface magit-dash-repo-name-face
   '((t :inherit font-lock-keyword-face))
-  "Face for repository names in the repo dashboard.")
+  "Face for repository names in the repo dashboard."
+  :group 'magit-dash)
 
 (defface magit-dash-repo-branch-face
   '((t :inherit font-lock-string-face))
-  "Face for branch names in the repo dashboard.")
+  "Face for branch names in the repo dashboard."
+  :group 'magit-dash)
 
 (defun magit-dash--build-format (repos)
   "Return the tabulated-list format vector for REPOS using enabled columns.
-Name and Branch columns are elastic: each is wide enough for its longest value.
-When both together exceed the available window space they split it proportionally."
+Name and Branch columns are elastic: each is wide enough for its
+longest value.  When both together exceed the available window space
+they split it proportionally."
   (let* ((raw-name (seq-reduce
                     (lambda (w r)
                       (max w (length (or (and magit-dash--submodule-path-set
@@ -1859,14 +1897,6 @@ These tags are session-local and are not saved to the repo registry.")
   "When non-nil, batch operations act on all repos in the table.
 Disabled by default; toggle with `magit-dash-toggle-batch-all'.")
 
-(defvar magit-dash-show-discovered-submodules t
-  "When non-nil, auto-discovered submodules appear below their parent in the dashboard.")
-
-(defvar magit-dash--submodule-path-set nil
-  "Hash table mapping auto-discovered submodule path → name.
-Rebuilt on each refresh.  Used to detect explicitly-registered repos that
-are also submodules and to derive their parent<mod> display name.")
-
 (defun magit-dash--update-default-directory ()
   "Sync `default-directory' with the repo at point, falling back to `~/'.
 If the repository at point or its underlying directory does not exist,
@@ -1955,7 +1985,7 @@ until `magit-dash--populate-stats-async' updates them."
                   active)))))
 
 (defun magit-dash--update-entry (repo)
-  "Rebuild the dashboard row for REPO from the current cache and re-render the table."
+  "Rebuild the dashboard row for REPO from the current cache and re-render."
   (let ((path (magit-dash-repo-path repo)))
     (setq tabulated-list-entries
           (seq-map (lambda (entry)
@@ -1967,7 +1997,8 @@ until `magit-dash--populate-stats-async' updates them."
 
 (defun magit-dash--populate-stats-async (repos)
   "Asynchronously collect stats for stale or uncached repos in REPOS.
-Emits a status message with repo counts; updates dashboard rows as each finishes."
+Emits a status message with repo counts; updates dashboard rows as
+each finishes."
   (let* ((buf (current-buffer))
          (needs-update
           (seq-filter
@@ -2053,12 +2084,6 @@ registered entry is shown instead."
                                      (gethash (magit-dash-repo-path sm) registered-paths))
                                    (magit-dash-gh--cache-get (magit-dash-repo-path repo) :submodules))))))
                 sorted)))
-
-(defvar magit-dash--repo-last-fetch-attempts (make-hash-table :test #'equal)
-  "Hash table mapping expanded repo path to float-time of last fetch attempt.")
-
-(defvar magit-dash--repo-last-sync-attempts (make-hash-table :test #'equal)
-  "Hash table mapping expanded repo path to float-time of last sync attempt.")
 
 (defun magit-dash--record-fetch-attempt (repo)
   "Record current timestamp as last fetch attempt for REPO."
@@ -2323,7 +2348,7 @@ cached dashboard stats."
     (magit-status-setup-buffer path)))
 
 (defun magit-dash--repo-missing-p (repo)
-  "Return non-nil if REPO is missing (directory does not exist or has no git repository)."
+  "Return non-nil if REPO is missing (no directory, or no git repository)."
   (let ((path (magit-dash-repo-path repo)))
     (or (eq (magit-dash-repo-submodule repo) 'missing)
         (not (file-exists-p path))
@@ -2446,7 +2471,8 @@ PROMPT is the prompt string displayed to the user."
     (and (magit-dash-repo-repo repo) t)))
 
 (defun magit-dash--has-missing-bootstrap-repos-p ()
-  "Return non-nil if batch bootstrap is permitted and targets at least one missing repo with :repo."
+  "Return non-nil if batch bootstrap is permitted and targets at least
+one missing repo with :repo set."
   (and (magit-dash--batch-enabled-p)
        (seq-some (lambda (r)
                    (and (magit-dash-repo-repo r)
@@ -2626,7 +2652,8 @@ Displays a summary message and refreshes the dashboard when all complete."
      (lambda (_) (magit-dash--maybe-refresh)))))
 
 (defun magit-dash-sync-all ()
-  "Run auto operations for marked repos (or all if none marked) asynchronously, then refresh."
+  "Run auto operations for marked repos (or all if none marked), then refresh.
+Operations run asynchronously."
   (interactive)
   (let ((repos (seq-filter #'magit-dash--has-sync-configured-p (magit-dash--effective-repos))))
     (unless repos
@@ -2775,7 +2802,8 @@ Returns an interned symbol, `clear', or nil on quit."
 
 (defun magit-dash-filter-by-tag ()
   "Filter the dashboard by tag using annotated completion.
-Select \"(clear)\" to show all repos; quitting leaves the current filter unchanged."
+Select \"(clear)\" to show all repos; quitting leaves the filter
+unchanged."
   (interactive)
   (when-let* ((tag (magit-dash--read-tag "Filter by tag: "
                                                        :include-clear t)))
@@ -2839,7 +2867,7 @@ Adds to any existing marks rather than replacing them."
 (defun magit-dash-switch-branch ()
   "Switch branch in the repository at point via magit."
   (interactive)
-  (with-magit-from-dashboard (magit-dash--repo-at-point)
+  (magit-dash--with-repo (magit-dash--repo-at-point)
     (call-interactively #'magit-checkout)))
 
 (defun magit-dash-prune-branches ()
@@ -3037,7 +3065,7 @@ Signals `user-error' when `magit-dash-repo-list' is empty."
 ;;;; Mark/select support
 
 (defun magit-dash--update-entry-for (repo)
-  "Regenerate the tabulated-list entry for REPO in place in `tabulated-list-entries'."
+  "Regenerate the tabulated-list entry for REPO in `tabulated-list-entries'."
   (let ((new-entry (magit-dash--build-entry repo))
         (path (magit-dash-repo-path repo)))
     (setq tabulated-list-entries
@@ -3161,7 +3189,7 @@ If REPO is non-nil, restores REPO directly."
 
 ;;;###autoload
 (defun magit-dash-hide-select ()
-  "Select a repository using `annotated-completing-read' to toggle its hidden state.
+  "Select a repository via `annotated-completing-read' to toggle hidden state.
 If the chosen repository is hidden, unhides it.  Otherwise, hides it."
   (interactive)
   (unless magit-dash-repo-list
@@ -3208,8 +3236,10 @@ or when `magit-dash--batch-all' is nil."
   (and (not (magit-dash--has-marks-p)) magit-dash--batch-all))
 
 (defun magit-dash--effective-repos ()
-  "Return marked repos if any are marked; if none are marked and `magit-dash--batch-all' is set, return all visible repos; otherwise return nil.
-Falls back to `magit-dash-repo-list' when not in a dashboard buffer."
+  "Return marked repos if any are marked.
+If none are marked and `magit-dash--batch-all' is set, return all
+visible repos; otherwise return nil.  Falls back to
+`magit-dash-repo-list' when not in a dashboard buffer."
   (let ((all (magit-dash--all-repos)))
     (cond
      (magit-dash--marked-paths
@@ -3275,7 +3305,7 @@ When disabled, only explicitly marked repos are targeted."
      (lambda (_) (magit-dash--maybe-refresh)))))
 
 (defun magit-dash-submodule-update-all ()
-  "Run git submodule update --init --recursive for marked repos, or all visible repos."
+  "Run git submodule update --init --recursive for marked or all visible repos."
   (interactive)
   (let ((repos (magit-dash--effective-repos)))
     (unless repos

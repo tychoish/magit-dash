@@ -264,8 +264,10 @@ Otherwise list recent runs and prompt for a selection.
 
 Creates an artifact directory under plans/ containing:
   run-info.json        — full run metadata
-  run-logs.ghlog       — complete step logs (opens in `magit-dash-gh-actions-log-mode')
-  run-failed-logs.ghlog — failed-step logs (when `magit-dash-gh-actions-include-failed-log')
+  run-logs.ghlog       — complete step logs (opens in
+                         `magit-dash-gh-actions-log-mode')
+  run-failed-logs.ghlog — failed-step logs (when
+                          `magit-dash-gh-actions-include-failed-log')
   index.json           — collection summary"
   (interactive)
   (magit-dash-gh--check-gh)

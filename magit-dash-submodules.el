@@ -294,7 +294,7 @@ committed; repos with other modifications are skipped with a log message.
 Keyword arguments:
   :fetch     Run `git fetch --all' in each repo before committing.
   :pull      Run `git pull --rebase' in each repo before committing.
-  :push      Push each repo after committing; children are pushed before parents.
+  :push      Push each repo after committing; children pushed before parents.
   :dry-run   Log what would be committed without making any changes.
   :recursive Walk up to the topmost parent and process the full submodule tree.
   :on-done   Called with an alist of (name . status) when everything finishes."

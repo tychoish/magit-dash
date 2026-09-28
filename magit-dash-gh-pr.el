@@ -220,7 +220,8 @@ Creates an artifact directory under plans/ containing:
   pr-info.json            — PR metadata and review decision
   pr-review-threads.json  — all review threads with resolved status
   pr-issue-comments.json  — top-level (non-review) comments
-  index.json              — collection summary with per-thread creator/last-commentor"
+  index.json              — collection summary with per-thread
+                            creator/last-commentor"
   (interactive)
   (magit-dash-gh--check-gh)
   (let* ((repo-dir  (magit-dash-gh--repo-dir))
@@ -247,15 +248,18 @@ Keys: :state (\"open\"/\"closed\"), :author, :repo (OWNER/NAME), :org.")
 
 (defface magit-dash-gh-pr-ci-pass-face
   '((t :inherit success))
-  "Face for passing CI status in the PR dashboard.")
+  "Face for passing CI status in the PR dashboard."
+  :group 'magit-dash)
 
 (defface magit-dash-gh-pr-ci-fail-face
   '((t :inherit error))
-  "Face for failing CI status in the PR dashboard.")
+  "Face for failing CI status in the PR dashboard."
+  :group 'magit-dash)
 
 (defface magit-dash-gh-pr-ci-pending-face
   '((t :inherit warning))
-  "Face for pending CI status in the PR dashboard.")
+  "Face for pending CI status in the PR dashboard."
+  :group 'magit-dash)
 
 (defun magit-dash-gh-pr-dashboard--build-format (&optional width)
   "Return the `tabulated-list-format' vector with an elastic Repo column.
