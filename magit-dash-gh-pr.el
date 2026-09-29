@@ -393,6 +393,47 @@ Returns nil when OUTPUT is not a JSON array."
                             "unknown"))))
                    prs))))))
 
+(defun magit-dash-gh-pr-dashboard--merge-ci (buf repo output)
+  "Merge statusCheckRollup values from OUTPUT into REPO's rows in BUF.
+OUTPUT is `gh pr list' JSON with `number' and `statusCheckRollup' fields."
+  (when (buffer-live-p buf)
+    (let ((trimmed (string-trim output)))
+      (when (string-prefix-p "[" trimmed)
+        (when-let* ((rollups (json-parse-string trimmed :array-type 'list :object-type 'alist))
+                    (table (make-hash-table :test #'eql)))
+          (dolist (r rollups)
+            (puthash (map-elt r 'number) (map-elt r 'statusCheckRollup) table))
+          (with-current-buffer buf
+            (setq tabulated-list-entries
+                  (seq-map (lambda (entry)
+                             (let* ((id (car entry))
+                                    (rollup (and (equal (plist-get id :repo) repo)
+                                                 (gethash (plist-get id :number) table))))
+                               (if rollup
+                                   (magit-dash-gh-pr-dashboard--build-entry
+                                    (cons (cons 'statusCheckRollup rollup) (plist-get id :pr))
+                                    repo)
+                                 entry)))
+                           tabulated-list-entries))
+            (tabulated-list-print t)))))))
+
+(defun magit-dash-gh-pr-dashboard--enrich-ci (buf state dir)
+  "Fetch CI status per repo and merge it into BUF's rows for STATE.
+Used for aggregate (cross-repo) views, whose listing endpoint does not
+return `statusCheckRollup'.  DIR is the working directory for `gh'."
+  (when (buffer-live-p buf)
+    (let ((repos (delete-dups
+                  (with-current-buffer buf
+                    (seq-map (lambda (entry) (plist-get (car entry) :repo))
+                              tabulated-list-entries)))))
+      (dolist (repo repos)
+        (magit-dash-gh--run-process
+         (list "pr" "list" "-R" repo "--state" state
+               "--json" "number,statusCheckRollup" "--limit" "200")
+         dir
+         (lambda (output) (magit-dash-gh-pr-dashboard--merge-ci buf repo output))
+         (lambda (_output _code) nil))))))
+
 (defun magit-dash-gh-pr-dashboard-refresh ()
   "Fetch PRs matching current filters and repopulate the PR table."
   (interactive)
@@ -417,7 +458,10 @@ Returns nil when OUTPUT is not a JSON array."
            (tabulated-list-init-header)
            (tabulated-list-print t)
            (message "magit-gh: %d PR(s)"
-                    (length tabulated-list-entries))))))))
+                    (length tabulated-list-entries)))
+         (unless (plist-get filters :repo)
+           (magit-dash-gh-pr-dashboard--enrich-ci
+            buf (or (plist-get filters :state) "open") dir)))))))
 
 (defun magit-dash-gh-pr-dashboard--entry-at-point ()
   "Return the PR entry plist at point or signal `user-error'."
