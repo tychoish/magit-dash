@@ -261,12 +261,24 @@ Keys: :state (\"open\"/\"closed\"), :author, :repo (OWNER/NAME), :org.")
   "Face for pending CI status in the PR dashboard."
   :group 'magit-dash)
 
-(defun magit-dash-gh-pr-dashboard--build-format (&optional width)
+(defun magit-dash-gh-pr-dashboard--build-format (&optional width entries)
   "Return the `tabulated-list-format' vector with an elastic Repo column.
 WIDTH is the available window width; when nil, `window-width' is used.
-Repo column fills leftover space after the fixed columns (75 chars total),
-with a minimum of 12."
-  (let ((repo-width (max 12 (- (or width (window-width)) 75))))
+ENTRIES is the list of tabulated-list entries; when nil,
+`tabulated-list-entries' is used if bound.
+Repo column is capped at the longest repo name + 3 (minimum 4 for header)."
+  (let* ((ents (or entries (and (boundp 'tabulated-list-entries) tabulated-list-entries)))
+         (raw-repo (when ents
+                     (seq-reduce (lambda (w e)
+                                   (max w (length (or (plist-get (car e) :repo)
+                                                      (and (vectorp (cadr e)) (aref (cadr e) 0))
+                                                      ""))))
+                                 ents 0)))
+         (repo-cap (and raw-repo (> raw-repo 0) (max (length "Repo") (+ raw-repo 3))))
+         (avail-repo (max (length "Repo") (- (or width (window-width)) 75)))
+         (repo-width (if repo-cap
+                         (min avail-repo repo-cap)
+                       (max 12 avail-repo))))
     (vector (list "Repo" repo-width t)
             '("PR#" 5 nil)
             '("Title" 38 t)
