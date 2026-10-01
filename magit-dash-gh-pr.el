@@ -466,7 +466,8 @@ return `statusCheckRollup'.  DIR is the working directory for `gh'."
                  (or (magit-dash-gh-pr-dashboard--parse-output output filters) nil))
            (setq tabulated-list-format
                  (magit-dash-gh-pr-dashboard--build-format
-                  (window-width (get-buffer-window buf t))))
+                  (window-width (get-buffer-window buf t))
+                  tabulated-list-entries))
            (tabulated-list-init-header)
            (tabulated-list-print t)
            (message "magit-gh: %d PR(s)"

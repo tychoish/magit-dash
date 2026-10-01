@@ -922,11 +922,11 @@ without real git repos or a live dashboard buffer."
 ;;;; magit-dash--build-format
 
 (ert-deftest magit-dash/build-format-elastic-width ()
-  "Name column width is one wider than the longest repo name."
+  "Name column width is capped at the longest repo name + 3."
   (let* ((r1 (magit-dash-repo--make :name "short" :path "/tmp/r1"))
          (r2 (magit-dash-repo--make :name "a-much-longer-name" :path "/tmp/r2"))
          (fmt (magit-dash--build-format (list r1 r2))))
-    (should (= (1+ (length "a-much-longer-name")) (cadr (aref fmt 0))))))
+    (should (= (+ (length "a-much-longer-name") 3) (cadr (aref fmt 0))))))
 
 (ert-deftest magit-dash/build-format-minimum-width ()
   "Name column is at least as wide as the header label \"Name\"."
@@ -935,9 +935,9 @@ without real git repos or a live dashboard buffer."
     (should (>= (cadr (aref fmt 0)) (length "Name")))))
 
 (ert-deftest magit-dash/build-format-empty-list ()
-  "Empty repo list yields the minimum column width (12)."
+  "Empty repo list yields the minimum column width (header label \"Name\")."
   (let ((fmt (magit-dash--build-format nil)))
-    (should (= 12 (cadr (aref fmt 0))))))
+    (should (= (length "Name") (cadr (aref fmt 0))))))
 
 ;;;; magit-dash--build-entry
 

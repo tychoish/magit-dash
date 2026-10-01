@@ -1763,9 +1763,10 @@ Returns an empty string when nothing is set."
 
 (defun magit-dash--build-format (repos)
   "Return the tabulated-list format vector for REPOS using enabled columns.
-Name and Branch columns are elastic: each is wide enough for its
-longest value.  When both together exceed the available window space
-they split it proportionally."
+Name and Branch columns are elastic: Name is capped at the longest
+display name + 3 (minimum 4 for header), and Branch is wide enough
+for its longest value.  When both together exceed the available window
+space they split it proportionally."
   (let* ((raw-name (seq-reduce
                     (lambda (w r)
                       (max w (length (or (and magit-dash--submodule-path-set
@@ -1790,19 +1791,22 @@ they split it proportionally."
                            acc))
                        magit-dash--column-defs 0))
          (available (max 20 (- (or (ignore-errors (window-width)) 97) fixed-width)))
-         (name-need (max 12 (1+ raw-name)))
+         (name-cap (max (length "Name") (+ raw-name 3)))
+         (name-need name-cap)
          (branch-need (max 8 (1+ raw-branch)))
          (widths (cond
                   ((<= (+ name-need branch-need) available)
                    (list name-need branch-need))
-                  ((<= branch-need (- available 12))
-                   (list (max 12 (- available branch-need)) branch-need))
+                  ((<= branch-need (- available (length "Name")))
+                   (list (min name-cap (max (length "Name") (- available branch-need))) branch-need))
                   ((<= name-need (- available 8))
                    (list name-need (max 8 (- available name-need))))
                   (t
-                   (let ((nw (max 12 (floor (* available
-                                               (/ (float name-need)
-                                                  (+ name-need branch-need)))))))
+                   (let ((nw (min name-cap
+                                  (max (length "Name")
+                                       (floor (* available
+                                                 (/ (float name-need)
+                                                    (+ name-need branch-need))))))))
                      (list nw (max 8 (- available nw)))))))
          (name-width (car widths))
          (branch-width (cadr widths))

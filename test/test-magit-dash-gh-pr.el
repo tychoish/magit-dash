@@ -11,6 +11,7 @@
 (require 'ert)
 (require 'cl-lib)
 (require 'map)
+(require 'magit-dash)
 (require 'magit-dash-gh-pr)
 (require 'magit-dash-gh-actions)
 
@@ -340,5 +341,20 @@
                                (equal (nth 2 call) (expand-file-name "/tmp/myrepo-pr-42"))
                                (equal (nth 3 call) "pr-42")))
                         git-calls)))))
+;;; magit-dash-gh-pr-dashboard--build-format
+
+(ert-deftest magit-dash-gh-pr/build-format-caps-repo-width-with-entries ()
+  "Repo column width is capped at the longest repo name + 3."
+  (let* ((entries '(((:repo "owner/repo-short") ["owner/repo-short" "1" "Title" "pass" "1d" "0" "approved"])
+                    ((:repo "owner/a-much-longer-repository-name") ["owner/a-much-longer-repository-name" "2" "Title" "pass" "1d" "0" "approved"])))
+         (fmt (magit-dash-gh-pr-dashboard--build-format 150 entries)))
+    (should (= (+ (length "owner/a-much-longer-repository-name") 3)
+               (cadr (aref fmt 0))))))
+
+(ert-deftest magit-dash-gh-pr/build-format-fallback-no-entries ()
+  "When no entries exist, Repo column falls back to available window space (min 12)."
+  (let ((fmt (magit-dash-gh-pr-dashboard--build-format 100 nil)))
+    (should (= (- 100 75) (cadr (aref fmt 0))))))
+
 (provide 'test-magit-dash-gh-pr)
 ;;; test-magit-dash-gh-pr.el ends here
