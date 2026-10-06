@@ -2514,8 +2514,7 @@ Runs asynchronously and refreshes the dashboard on completion."
 ;;;###autoload
 (defun magit-dash-bootstrap-marked ()
   "Bootstrap marked missing repositories with an upstream `:repo' configured.
-When `magit-dash--batch-all' is enabled, targets all visible missing
-repositories with `:repo'.
+When nothing is marked, targets all visible missing repositories with `:repo'.
 Runs asynchronously and refreshes the dashboard on completion."
   (interactive)
   (let* ((effective (magit-dash--effective-repos))
@@ -2524,9 +2523,9 @@ Runs asynchronously and refreshes the dashboard on completion."
                                    (magit-dash--repo-missing-p r)))
                             effective)))
     (unless repos
-      (user-error (if magit-dash--batch-all
-                      "No missing repositories with upstream :repo configured to bootstrap"
-                    "No marked missing repositories with upstream :repo configured to bootstrap")))
+      (user-error (if (magit-dash--has-marks-p)
+                      "No marked missing repositories with upstream :repo configured to bootstrap"
+                    "No missing repositories with upstream :repo configured to bootstrap")))
     (message "magit-dash: bootstrapping %d missing repository(ies)..." (length repos))
     (magit-dash--batch-run
      repos
@@ -3235,25 +3234,20 @@ If the chosen repository is hidden, unhides it.  Otherwise, hides it."
 
 (defun magit-dash--batch-all-active-p ()
   "Return non-nil when batch mode is active for all visible repos.
-Returns nil when repositories are marked (since marked repos take precedence)
-or when `magit-dash--batch-all' is nil."
-  (and (not (magit-dash--has-marks-p)) magit-dash--batch-all))
+Returns nil when repositories are marked (since marked repos take precedence)."
+  (not (magit-dash--has-marks-p)))
 
 (defun magit-dash--effective-repos ()
   "Return marked repos if any are marked.
-If none are marked and `magit-dash--batch-all' is set, return all
-visible repos; otherwise return nil.  Falls back to
-`magit-dash-repo-list' when not in a dashboard buffer."
+If none are marked, return all visible repos (batch is all by default).
+Falls back to `magit-dash-repo-list' when not in a dashboard buffer."
   (let ((all (magit-dash--all-repos)))
-    (cond
-     (magit-dash--marked-paths
-      (seq-filter (lambda (r)
-                    (member (magit-dash-repo-path r)
-                            magit-dash--marked-paths))
-                  all))
-     (magit-dash--batch-all
-      all)
-     (t nil))))
+    (if magit-dash--marked-paths
+        (seq-filter (lambda (r)
+                      (member (magit-dash-repo-path r)
+                              magit-dash--marked-paths))
+                    all)
+      all)))
 
 (defun magit-dash--has-marks-p ()
   "Return non-nil when at least one repository is marked."
@@ -3261,8 +3255,8 @@ visible repos; otherwise return nil.  Falls back to
 
 (defun magit-dash--batch-enabled-p ()
   "Return non-nil when batch operations are permitted.
-True when `magit-dash--batch-all' is set or at least one repo is marked."
-  (or magit-dash--batch-all (magit-dash--has-marks-p)))
+True when there are any visible repositories."
+  (and (magit-dash--effective-repos) t))
 
 (defun magit-dash-toggle-batch-all ()
   "Toggle whether batch operations act on all repos or only marked ones.
@@ -3331,6 +3325,13 @@ When disabled, only explicitly marked repos are targeted."
   "Return non-nil when `agent-shell-workflow-dispatch-menu' is available."
   (fboundp 'agent-shell-workflow-dispatch-menu))
 
+(defun magit-dash--batch-group-title (&optional _)
+  "Return the title for the Batch group in `magit-dash-menu'.
+Indicates whether batch operations target all repos or marked repos."
+  (if (magit-dash--has-marks-p) "Batch (marked)" "Batch (all)"))
+
+(defalias 'magit-dash--name-column-title #'magit-dash--batch-group-title)
+
 (transient-define-prefix magit-dash-menu ()
   "Actions for the repository at point in the repo dashboard."
   [["Navigate"
@@ -3392,7 +3393,7 @@ When disabled, only explicitly marked repos are targeted."
      :inapt-if-not magit-dash--repo-at-point-p)
     ("rs"  "Push"            magit-dash-push
      :inapt-if-not magit-dash--repo-at-point-ahead-p)]
-   ["Batch"
+   [:description magit-dash--batch-group-title
     ("SPC" "Toggle mark"     magit-dash-toggle-mark
      :inapt-if-not magit-dash--repo-at-point-p
      :transient t)
@@ -3400,9 +3401,6 @@ When disabled, only explicitly marked repos are targeted."
      :transient t)
     ("mc"  "Clear marks"     magit-dash-unmark-all
      :inapt-if-not magit-dash--has-marks-p
-     :transient t)
-    ("ma"   (lambda () (if (magit-dash--batch-all-active-p) "Batch: all [on]" "Batch: all [off]"))
-     magit-dash-toggle-batch-all
      :transient t)
     ("fa"  "Fetch all"       magit-dash-fetch-all
      :inapt-if-not magit-dash--batch-enabled-p)
@@ -3418,7 +3416,7 @@ When disabled, only explicitly marked repos are targeted."
      :inapt-if-not magit-dash--batch-enabled-p)
     ("su"  "Update submodules" magit-dash-submodule-update-all
      :inapt-if-not magit-dash--batch-enabled-p)
-    ("B"  (lambda () (if magit-dash--batch-all "Bootstrap all" "Bootstrap marked"))
+    ("B"  (lambda () (if (magit-dash--has-marks-p) "Bootstrap marked" "Bootstrap all"))
      magit-dash-bootstrap-marked
      :inapt-if-not magit-dash--has-missing-bootstrap-repos-p)]
    ["Manage"

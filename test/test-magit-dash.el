@@ -2243,6 +2243,14 @@ A conflict (e.g. \"b\" and \"bp\" coexisting) causes transient to raise
     (should unmark-suffix)
     (should (equal "mc" (plist-get unmark-suffix :key)))))
 
+(ert-deftest magit-dash/transient-menu-no-batch-all-toggle ()
+  "`magit-dash-menu' does not have the redundant ma toggle."
+  (let* ((suffixes (test-magit-dash--all-transient-suffixes 'magit-dash-menu))
+         (toggle-suffix (seq-find (lambda (s)
+                                    (eq (plist-get s :command) 'magit-dash-toggle-batch-all))
+                                  suffixes)))
+    (should-not toggle-suffix)))
+
 ;;;; Ephemeral tag tests
 
 (ert-deftest magit-dash/all-tags-for-permanent-only ()
@@ -2944,30 +2952,22 @@ The bug was that add-text-properties returns t, not the modified string."
          (magit-dash-repo-list (list r1 r2)))
     (cl-letf (((symbol-function 'magit-dash--repo-missing-p)
                (lambda (r) (equal (magit-dash-repo-name r) "m1"))))
-      ;; No marks and batch-all nil -> nil
-      (let ((magit-dash--marked-paths nil)
-            (magit-dash--batch-all nil))
-        (should-not (magit-dash--has-missing-bootstrap-repos-p)))
-      ;; batch-all t with missing repo having :repo -> t
-      (let ((magit-dash--marked-paths nil)
-            (magit-dash--batch-all t))
+      ;; No marks targets all repos, so missing repo r1 with :repo matches -> t
+      (let ((magit-dash--marked-paths nil))
         (should (magit-dash--has-missing-bootstrap-repos-p)))
       ;; Marked matching repo -> t
-      (let ((magit-dash--marked-paths '("/tmp/m1"))
-            (magit-dash--batch-all nil))
+      (let ((magit-dash--marked-paths '("/tmp/m1")))
         (should (magit-dash--has-missing-bootstrap-repos-p)))
       ;; Marked non-matching repo -> nil
-      (let ((magit-dash--marked-paths '("/tmp/m2"))
-            (magit-dash--batch-all nil))
+      (let ((magit-dash--marked-paths '("/tmp/m2")))
         (should-not (magit-dash--has-missing-bootstrap-repos-p))))))
 
 (ert-deftest magit-dash/bootstrap-marked-targets-marked-only ()
-  "bootstrap-marked targets only marked missing repositories when batch-all is nil."
+  "bootstrap-marked targets only marked missing repositories when marks are present."
   (let* ((r1 (magit-dash-repo--make :name "m1" :path "/tmp/m1" :repo "/srv/git/m1.git"))
          (r2 (magit-dash-repo--make :name "m2" :path "/tmp/m2" :repo "/srv/git/m2.git"))
          (magit-dash-repo-list (list r1 r2))
          (magit-dash--marked-paths '("/tmp/m1"))
-         (magit-dash--batch-all nil)
          (batch-repos nil))
     (cl-letf (((symbol-function 'magit-dash--repo-missing-p) (lambda (_) t))
               ((symbol-function 'magit-dash--batch-run)
@@ -3065,12 +3065,35 @@ The bug was that add-text-properties returns t, not the modified string."
     ;; Render false when repos are marked
     (should-not (magit-dash--batch-all-active-p))))
 
-(ert-deftest magit-dash/effective-repos-no-marks-batch-off-returns-nil ()
-  "effective-repos returns nil when no repos are marked and batch-all is off."
+(ert-deftest magit-dash/effective-repos-no-marks-returns-all ()
+  "effective-repos returns all visible repos when no repos are marked."
   (let ((magit-dash-repo-list (list (magit-dash-repo--make :name "r1" :path "/tmp/r1")))
-        (magit-dash--marked-paths nil)
-        (magit-dash--batch-all nil))
-    (should-not (magit-dash--effective-repos))))
+        (magit-dash--marked-paths nil))
+    (should (equal (magit-dash--effective-repos) magit-dash-repo-list))))
+
+(ert-deftest magit-dash/build-format-name-column-is-constant ()
+  "The Name column title in `magit-dash--build-format' remains \"Name\"."
+  (let ((magit-dash--marked-paths nil))
+    (should (equal "Name" (car (aref (magit-dash--build-format nil) 0))))
+    (setq magit-dash--marked-paths '("/tmp/r1"))
+    (should (equal "Name" (car (aref (magit-dash--build-format nil) 0))))))
+
+(ert-deftest magit-dash/transient-menu-batch-group-title-indicates-all-or-marked ()
+  "Batch group title indicates \"Batch (all)\" when nothing marked and \"Batch (marked)\" when repos marked."
+  (let ((magit-dash--marked-paths nil))
+    (should (equal "Batch (all)" (magit-dash--batch-group-title)))
+    (should (equal "Batch (all)" (magit-dash--name-column-title)))
+    (setq magit-dash--marked-paths '("/tmp/r1"))
+    (should (equal "Batch (marked)" (magit-dash--batch-group-title)))
+    (should (equal "Batch (marked)" (magit-dash--name-column-title))))
+  (let* ((layout (get 'magit-dash-menu 'transient--layout))
+         (rows (aref layout 2))
+         (row2 (aref (nth 1 rows) 2))
+         (batch-col (seq-find (lambda (col)
+                                (eq (plist-get (aref col 1) :description)
+                                    'magit-dash--batch-group-title))
+                              (if (vectorp row2) (append row2 nil) row2))))
+    (should batch-col)))
 
 (ert-deftest magit-dash/unmark-all-clears-marked-paths ()
   "unmark-all sets `magit-dash--marked-paths' to nil."
