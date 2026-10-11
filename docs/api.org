@@ -291,7 +291,7 @@ In addition to any hooks its parent mode ~tabulated-list-mode~ might have run, t
 
 Key             Binding
 
-TAB		forward-button RET		magit-dash-magit-status SPC		magit-dash-toggle-mark !		magit-dash-magit-dispatch *		magit-dash-unmark-all -		negative-argument 0 .. 9		digit-argument <		beginning-of-buffer >		end-of-buffer ?		magit-dash-menu A		magit-dash-commit-all B		magit-dash-bootstrap-repo C		magit-dash-clone-repo F		magit-dash-fetch-all G		magit-dash-stage-all H		magit-dash-unhide-all L		magit-dash-magit-log-full P		magit-dash-push Q		magit-dash-agent-shell-queue S		magit-dash-sync-all T		magit-dash-toggle-column U		magit-dash-pull-all W		magit-dash-worktree-add X		magit-dash-run-command-background Z		magit-dash-agent-shell-new a		magit-dash-auto-sync b		magit-dash-visit-buffer c		magit-dash-magit-commit d		magit-dash-magit-diff e		magit-dash-find-file f		magit-dash-fetch g		magit-dash-refresh h		magit-dash-hide-repo i		magit-dash-add-tag k		magit-dash-worktree-delete l		magit-dash-magit-log m		magit-dash-menu n		magit-dash-sync o		magit-dash-open-repo p		magit-gh-pr-dash q		quit-window r		magit-dash-hard-refresh s		magit-dash-magit-status t		magit-dash-filter-by-tag u		magit-dash-pull w		magit-dash-open-worktree-dispatch x		magit-dash-run-command y		magit-dash-prune-branches {		tabulated-list-narrow-current-column }		tabulated-list-widen-current-column DEL		scroll-down-command S-SPC		scroll-down-command M-<left>	tabulated-list-previous-column M-<right>	tabulated-list-next-column <backtab>	backward-button <follow-link>	mouse-face <mouse-2>	mouse-select-window
+TAB		forward-button RET		magit-dash-magit-status SPC		magit-dash-toggle-mark !		magit-dash-magit-dispatch *		magit-dash-unmark-all -		negative-argument 0 .. 9		digit-argument <		beginning-of-buffer >		end-of-buffer ?		magit-dash-menu A		magit-dash-commit-all B		magit-dash-bootstrap-repo C		magit-dash-clone-repo F		magit-dash-fetch-all G		magit-dash-stage-all H		magit-dash-unhide-all L		magit-dash-magit-log-full P		magit-dash-push Q		magit-dash-agent-shell-queue R		magit-dash-refresh-repo S		magit-dash-sync-all T		magit-dash-toggle-column U		magit-dash-pull-all W		magit-dash-worktree-add X		magit-dash-run-command-background Z		magit-dash-agent-shell-new a		magit-dash-auto-sync b		magit-dash-visit-buffer c		magit-dash-magit-commit d		magit-dash-magit-diff e		magit-dash-find-file f		magit-dash-fetch g		magit-dash-refresh h		magit-dash-hide-repo i		magit-dash-add-tag k		magit-dash-worktree-delete l		magit-dash-magit-log m		magit-dash-menu n		magit-dash-sync o		magit-dash-open-repo p		magit-gh-pr-dash q		quit-window r		magit-dash-hard-refresh s		magit-dash-magit-status t		magit-dash-filter-by-tag u		magit-dash-pull w		magit-dash-open-worktree-dispatch x		magit-dash-run-command y		magit-dash-prune-branches {		tabulated-list-narrow-current-column }		tabulated-list-widen-current-column DEL		scroll-down-command S-SPC		scroll-down-command M-<left>	tabulated-list-previous-column M-<right>	tabulated-list-next-column <backtab>	backward-button <follow-link>	mouse-face <mouse-2>	mouse-select-window
 
 M-s		magit-dash-toggle-discovered-submodules M-t		magit-dash-toggle-discovered-worktrees
 
@@ -310,6 +310,27 @@ Refresh the dashboard, clearing all per-repo caches and re-fetching. Discovers w
 :END:
 
 Clear all caches and repopulate the dashboard from scratch. Unlike ~magit-dash-refresh~, discards all cached stats so every repo is re-collected asynchronously.
+
+**** [[file:../magit-dash.el][magit-dash-refresh-repo]] :command:
+:PROPERTIES:
+:CUSTOM_ID: magit-dash-refresh-repo
+:END:
+
+Refresh only the repository at point (or marked repositories / tag), updating their dashboard rows in-place without refreshing the entire pane. Resets cached stats, PR counts, and CI status for targeted repos, and resets attempt timestamps to avoid throttling. Aliased to ~magit-dash-refresh-row~.
+
+**** [[file:../magit-dash.el][magit-dash-refresh-marked]] :command:
+:PROPERTIES:
+:CUSTOM_ID: magit-dash-refresh-marked
+:END:
+
+Refresh only marked repositories in the dashboard in-place.
+
+**** [[file:../magit-dash.el][magit-dash-refresh-by-tag]] :command:
+:PROPERTIES:
+:CUSTOM_ID: magit-dash-refresh-by-tag
+:END:
+
+Refresh only repositories matching a selected tag in-place.
 
 **** [[file:../magit-dash.el::2127][magit-dash-open-registered-repo]] :command:
 :PROPERTIES:

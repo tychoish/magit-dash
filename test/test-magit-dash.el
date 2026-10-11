@@ -2201,7 +2201,8 @@ in magit-dash-repo-list, preventing duplicate rows."
       (should (null (magit-dash--has-commands-p)))
       (should (null (magit-dash--repo-at-point-behind-p)))
       (should (null (magit-dash--at-worktree-p)))
-      (should (null (magit-dash--can-add-worktree-p))))))
+      (should (null (magit-dash--can-add-worktree-p)))
+      (should (null (magit-dash--can-refresh-repo-p))))))
 
 (ert-deftest magit-dash/menu-no-key-prefix-conflicts ()
   "No key in the dashboard transient menu is a string prefix of another key.
@@ -3452,3 +3453,108 @@ The bug was that add-text-properties returns t, not the modified string."
                  (funcall on-complete 'ok))))
       (magit-dash-sync-all)
       (should operation-called))))
+
+
+;;;; Single Row and Scoped Refresh tests
+
+(ert-deftest magit-dash/refresh-repo-clears-cache-and-populates-stats ()
+  "Refresh-repo clears cache only for the target repo and repopulates stats."
+  (let* ((r1 (magit-dash-repo--make :name "r1" :path "/tmp/r1"))
+         (r2 (magit-dash-repo--make :name "r2" :path "/tmp/r2"))
+         (magit-dash-repo-list (list r1 r2))
+         (magit-dash-gh--cache (make-hash-table :test #'equal))
+         (magit-dash--repo-last-fetch-attempts (make-hash-table :test #'equal))
+         (magit-dash--repo-last-sync-attempts (make-hash-table :test #'equal))
+         (populated nil))
+    (magit-dash-gh--cache-set "/tmp/r1" :stats '(:branch "main"))
+    (magit-dash-gh--cache-set "/tmp/r1" :pr-counts '(:open 2))
+    (magit-dash-gh--cache-set "/tmp/r1" :ci-status '(:status "success"))
+    (magit-dash-gh--cache-set "/tmp/r2" :stats '(:branch "dev"))
+    (puthash (expand-file-name "/tmp/r1") (float-time) magit-dash--repo-last-fetch-attempts)
+    (puthash (expand-file-name "/tmp/r1") (float-time) magit-dash--repo-last-sync-attempts)
+    (puthash (expand-file-name "/tmp/r2") (float-time) magit-dash--repo-last-fetch-attempts)
+    (cl-letf (((symbol-function 'magit-dash--populate-stats-async)
+               (lambda (repos) (setq populated repos)))
+              ((symbol-function 'magit-dash--refresh-fetch-or-sync-async)
+               (lambda (_repos) nil)))
+      (magit-dash-refresh-repo r1)
+      ;; r1 cache cleared and attempt timestamps removed
+      (should (null (magit-dash-gh--cache-get "/tmp/r1" :stats)))
+      (should (null (magit-dash-gh--cache-get "/tmp/r1" :pr-counts)))
+      (should (null (magit-dash-gh--cache-get "/tmp/r1" :ci-status)))
+      (should (null (gethash (expand-file-name "/tmp/r1") magit-dash--repo-last-fetch-attempts)))
+      (should (null (gethash (expand-file-name "/tmp/r1") magit-dash--repo-last-sync-attempts)))
+      ;; r2 completely untouched
+      (should (equal '(:branch "dev") (magit-dash-gh--cache-get "/tmp/r2" :stats)))
+      (should (gethash (expand-file-name "/tmp/r2") magit-dash--repo-last-fetch-attempts))
+      ;; only r1 was passed to async populate
+      (should (equal (list r1) populated)))))
+
+(ert-deftest magit-dash/refresh-repo-targets-point-when-unmarked ()
+  "Refresh-repo targets repo at point when nothing is marked."
+  (let* ((r1 (magit-dash-repo--make :name "r1" :path "/tmp/r1"))
+         (r2 (magit-dash-repo--make :name "r2" :path "/tmp/r2"))
+         (magit-dash-repo-list (list r1 r2))
+         (magit-dash--marked-paths nil)
+         (refreshed nil))
+    (cl-letf (((symbol-function 'magit-dash--repo-at-point) (lambda () r1))
+              ((symbol-function 'magit-dash--refresh-repos)
+               (lambda (repos _force) (setq refreshed repos))))
+      (magit-dash-refresh-repo)
+      (should (equal (list r1) refreshed)))))
+
+(ert-deftest magit-dash/refresh-repo-targets-marked-when-marks-exist ()
+  "Refresh-repo targets marked repos when marks are present."
+  (let* ((r1 (magit-dash-repo--make :name "r1" :path "/tmp/r1"))
+         (r2 (magit-dash-repo--make :name "r2" :path "/tmp/r2"))
+         (magit-dash-repo-list (list r1 r2))
+         (magit-dash--marked-paths (list "/tmp/r2"))
+         (refreshed nil))
+    (cl-letf (((symbol-function 'magit-dash--refresh-repos)
+               (lambda (repos _force) (setq refreshed repos))))
+      (magit-dash-refresh-repo)
+      (should (equal (list r2) refreshed)))))
+
+(ert-deftest magit-dash/refresh-repo-by-tag ()
+  "Refresh-repo by tag refreshes only repos matching tag."
+  (let* ((r1 (magit-dash-repo--make :name "r1" :path "/tmp/r1" :tags '(work core)))
+         (r2 (magit-dash-repo--make :name "r2" :path "/tmp/r2" :tags '(personal)))
+         (magit-dash-repo-list (list r1 r2))
+         (refreshed nil))
+    (cl-letf (((symbol-function 'magit-dash--refresh-repos)
+               (lambda (repos _force) (setq refreshed repos))))
+      (magit-dash-refresh-repo 'work)
+      (should (equal (list r1) refreshed)))))
+
+(ert-deftest magit-dash/refresh-marked-command ()
+  "magit-dash-refresh-marked errors without marks and refreshes marked repos."
+  (let* ((r1 (magit-dash-repo--make :name "r1" :path "/tmp/r1"))
+         (r2 (magit-dash-repo--make :name "r2" :path "/tmp/r2"))
+         (magit-dash-repo-list (list r1 r2))
+         (magit-dash--marked-paths nil)
+         (refreshed nil))
+    (should-error (magit-dash-refresh-marked) :type 'user-error)
+    (setq magit-dash--marked-paths (list "/tmp/r1"))
+    (cl-letf (((symbol-function 'magit-dash--refresh-repos)
+               (lambda (repos _force) (setq refreshed repos))))
+      (magit-dash-refresh-marked)
+      (should (equal (list r1) refreshed)))))
+
+(ert-deftest magit-dash/keybinding-R-bound-to-refresh-repo ()
+  "Key binding R in `magit-dash-mode-map' is bound to `magit-dash-refresh-repo'."
+  (should (eq (lookup-key magit-dash-mode-map (kbd "R")) #'magit-dash-refresh-repo))
+  (should (fboundp 'magit-dash-refresh-row))
+  (should (eq (symbol-function 'magit-dash-refresh-row) #'magit-dash-refresh-repo)))
+
+(ert-deftest magit-dash/transient-menu-refresh-actions ()
+  "Transient menu includes refresh actions for row, marked, and by-tag."
+  (let* ((suffixes (test-magit-dash--all-transient-suffixes 'magit-dash-menu))
+         (rr (seq-find (lambda (s) (equal "rr" (plist-get s :key))) suffixes))
+         (rm (seq-find (lambda (s) (equal "rm" (plist-get s :key))) suffixes))
+         (rt (seq-find (lambda (s) (equal "rt" (plist-get s :key))) suffixes)))
+    (should rr)
+    (should (eq (plist-get rr :command) 'magit-dash-refresh-repo))
+    (should rm)
+    (should (eq (plist-get rm :command) 'magit-dash-refresh-marked))
+    (should rt)
+    (should (eq (plist-get rt :command) 'magit-dash-refresh-by-tag))))

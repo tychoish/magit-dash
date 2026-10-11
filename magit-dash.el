@@ -1851,6 +1851,7 @@ space they split it proportionally."
     (define-key m (kbd "q")   #'quit-window)
     (define-key m (kbd "Q")   #'magit-dash-agent-shell-queue)
     (define-key m (kbd "r")   #'magit-dash-hard-refresh)
+    (define-key m (kbd "R")   #'magit-dash-refresh-repo)
     (define-key m (kbd "s")   #'magit-dash-magit-status)
     (define-key m (kbd "S")   #'magit-dash-sync-all)
     (define-key m (kbd "t")   #'magit-dash-filter-by-tag)
@@ -2265,6 +2266,126 @@ re-collected asynchronously."
   (clrhash magit-dash--repo-last-fetch-attempts)
   (clrhash magit-dash--repo-last-sync-attempts)
   (magit-dash-refresh))
+
+(defun magit-dash--can-refresh-repo-p ()
+  "Return non-nil when repos can be refreshed (marked repos exist or point on repo)."
+  (or (magit-dash--has-marks-p)
+      (magit-dash--repo-at-point-p)))
+
+(defun magit-dash--refresh-repos (repos &optional force)
+  "Refresh only REPOS, updating their dashboard rows in-place.
+When FORCE is non-nil, resets last fetch and sync attempt timestamps
+for REPOS so automatic fetch/sync is not throttled."
+  (let ((buf (or (get-buffer magit-dash-buffer-name)
+                 (and (derived-mode-p 'magit-dash-mode) (current-buffer)))))
+    (seq-do
+     (lambda (repo)
+       (let* ((path (magit-dash-repo-path repo))
+              (exp-path (expand-file-name path)))
+         (magit-dash-gh--cache-remove path :stats)
+         (magit-dash-gh--cache-remove path :pr-counts)
+         (magit-dash-gh--cache-remove path :ci-status)
+         (when force
+           (remhash exp-path magit-dash--repo-last-fetch-attempts)
+           (remhash exp-path magit-dash--repo-last-sync-attempts))))
+     repos)
+    (if (and buf (buffer-live-p buf))
+        (with-current-buffer buf
+          (magit-dash--populate-stats-async repos)
+          (seq-do
+           (lambda (repo)
+             (when (magit-dash-repo-include-ci repo)
+               (magit-dash-gh-ci-fetch
+                repo
+                (lambda (_)
+                  (when (buffer-live-p buf)
+                    (with-current-buffer buf
+                      (magit-dash--update-entry repo)))))))
+           repos))
+      (magit-dash--populate-stats-async repos))
+    (magit-dash--refresh-fetch-or-sync-async repos)))
+
+;;;###autoload
+(defun magit-dash-refresh-repo (&optional target force)
+  "Refresh only TARGET or repository at point, updating row(s) in-place.
+When TARGET is nil:
+  - If repositories are marked, refreshes all marked repositories.
+  - If called interactively with a prefix argument (\[universal-argument]),
+    prompts for a tag and refreshes all repositories with that tag.
+  - Otherwise, refreshes the repository at point.
+TARGET may also be:
+  - A `magit-dash-repo' struct to refresh that specific repository.
+  - A list of `magit-dash-repo' structs to refresh multiple repositories.
+  - A symbol representing a tag, refreshing all repositories with that tag.
+  - A string (path or name) identifying a repository.
+When FORCE is non-nil (the default), resets in-memory fetch and sync
+attempt timestamps so operations are not skipped."
+  (interactive (list (when current-prefix-arg
+                       (magit-dash--read-tag "Refresh repos with tag: " :require-match t))
+                     t))
+  (let* ((force (if (null force) t force))
+         (repos
+          (cond
+           ((null target)
+            (cond
+             ((magit-dash--has-marks-p)
+              (seq-filter (lambda (r)
+                            (member (magit-dash-repo-path r)
+                                    magit-dash--marked-paths))
+                          (magit-dash--all-repos)))
+             (t
+              (list (magit-dash--repo-at-point)))))
+           ((magit-dash-repo-p target)
+            (list target))
+           ((and (listp target) (seq-every-p #'magit-dash-repo-p target))
+            target)
+           ((symbolp target)
+            (let ((tagged (seq-filter (lambda (r)
+                                        (memq target (magit-dash--all-tags-for r)))
+                                      (magit-dash--all-repos))))
+              (unless tagged
+                (user-error "No repositories with tag '%s'" (symbol-name target)))
+              tagged))
+           ((stringp target)
+            (let ((matched (seq-filter (lambda (r)
+                                         (or (equal (magit-dash-repo-path r) target)
+                                             (equal (magit-dash-repo-name r) target)))
+                                       (magit-dash--all-repos))))
+              (unless matched
+                (user-error "No repository matching '%s'" target))
+              matched))
+           (t
+            (user-error "Invalid target for refresh: %s" target)))))
+    (unless repos
+      (user-error "No repositories to refresh"))
+    (if (= (length repos) 1)
+        (message "magit-dash: refreshing %s…" (magit-dash-repo-name (car repos)))
+      (message "magit-dash: refreshing %d repos…" (length repos)))
+    (magit-dash--refresh-repos repos force)))
+
+;;;###autoload
+(defalias 'magit-dash-refresh-row #'magit-dash-refresh-repo)
+
+;;;###autoload
+(defun magit-dash-refresh-marked ()
+  "Refresh only marked repositories in the dashboard."
+  (interactive)
+  (unless (magit-dash--has-marks-p)
+    (user-error "No repositories marked"))
+  (let ((marked (seq-filter
+                 (lambda (r)
+                   (member (magit-dash-repo-path r) magit-dash--marked-paths))
+                 (magit-dash--all-repos))))
+    (magit-dash-refresh-repo marked t)))
+
+;;;###autoload
+(defun magit-dash-refresh-by-tag (&optional tag)
+  "Refresh all repositories tagged with TAG chosen via annotated completion.
+Updates only rows for matching repositories."
+  (interactive)
+  (let ((tag (or tag (magit-dash--read-tag "Refresh repos with tag: " :require-match t))))
+    (when tag
+      (magit-dash-refresh-repo tag t))))
 
 
 (defun magit-dash--repo-at-point ()
@@ -3392,7 +3513,10 @@ Indicates whether batch operations target all repos or marked repos."
     ("rp"  "Pull"            magit-dash-pull
      :inapt-if-not magit-dash--repo-at-point-p)
     ("rs"  "Push"            magit-dash-push
-     :inapt-if-not magit-dash--repo-at-point-ahead-p)]
+     :inapt-if-not magit-dash--repo-at-point-ahead-p)
+    ("rr"  (lambda () (if (magit-dash--has-marks-p) "Refresh marked" "Refresh row"))
+     magit-dash-refresh-repo
+     :inapt-if-not magit-dash--can-refresh-repo-p)]
    [:description magit-dash--batch-group-title
     ("SPC" "Toggle mark"     magit-dash-toggle-mark
      :inapt-if-not magit-dash--repo-at-point-p
@@ -3418,7 +3542,10 @@ Indicates whether batch operations target all repos or marked repos."
      :inapt-if-not magit-dash--batch-enabled-p)
     ("B"  (lambda () (if (magit-dash--has-marks-p) "Bootstrap marked" "Bootstrap all"))
      magit-dash-bootstrap-marked
-     :inapt-if-not magit-dash--has-missing-bootstrap-repos-p)]
+     :inapt-if-not magit-dash--has-missing-bootstrap-repos-p)
+    ("rm" "Refresh marked"   magit-dash-refresh-marked
+     :inapt-if-not magit-dash--has-marks-p)
+    ("rt" "Refresh by tag"   magit-dash-refresh-by-tag)]
    ["Manage"
     ("ac"  "Auto-commit"     magit-dash-commit
      :inapt-if-not magit-dash--has-auto-commit-p)
