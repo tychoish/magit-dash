@@ -384,7 +384,7 @@ children are committed and pushed before their parents record the new hashes."
      :inapt-if-not (lambda ()
                      (and (derived-mode-p 'magit-dash-mode)
                           (tabulated-list-get-id))))
-    ("B" "Bump all registered repos" magit-dash-bump-submodules-all)]])
+    ("a" "Bump all registered repos" magit-dash-bump-submodules-all)]])
 
 (provide 'magit-dash-submodules)
 ;;; magit-dash-submodules.el ends here

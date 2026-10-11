@@ -3456,7 +3456,7 @@ Indicates whether batch operations target all repos or marked repos."
 (transient-define-prefix magit-dash-menu ()
   "Actions for the repository at point in the repo dashboard."
   [["Navigate"
-    ("b"   "Visit buffer"    magit-dash-visit-buffer
+    ("vb"  "Visit buffer"    magit-dash-visit-buffer
      :inapt-if-not magit-dash--repo-at-point-p)
     ("ff"  "Find file"       magit-dash-find-file
      :inapt-if-not magit-dash--repo-at-point-p)
@@ -3540,7 +3540,7 @@ Indicates whether batch operations target all repos or marked repos."
      :inapt-if-not magit-dash--batch-enabled-p)
     ("su"  "Update submodules" magit-dash-submodule-update-all
      :inapt-if-not magit-dash--batch-enabled-p)
-    ("B"  (lambda () (if (magit-dash--has-marks-p) "Bootstrap marked" "Bootstrap all"))
+    ("ba"  (lambda () (if (magit-dash--has-marks-p) "Bootstrap marked" "Bootstrap all"))
      magit-dash-bootstrap-marked
      :inapt-if-not magit-dash--has-missing-bootstrap-repos-p)
     ("rm" "Refresh marked"   magit-dash-refresh-marked
@@ -3596,8 +3596,8 @@ Indicates whether batch operations target all repos or marked repos."
                         "Branch basename [off]"))
      magit-dash-toggle-branch-basename
      :transient t)
-    ("C-t" "Toggle column"   magit-dash-toggle-column)
-    ("M-s" "Toggle submodules" magit-dash-toggle-discovered-submodules)
+    ("tc"  "Toggle column"   magit-dash-toggle-column)
+    ("ts"  "Toggle submodules" magit-dash-toggle-discovered-submodules)
     ("gg"  "Refresh"         magit-dash-refresh)
     ("q"   "Quit"            quit-window)]])
 
