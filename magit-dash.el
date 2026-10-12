@@ -274,7 +274,14 @@ Defaults to 3600 seconds (1 hour)."
   :group 'magit-dash)
 
 (defcustom magit-dash-max-concurrent-network-jobs 2
-  "Maximum number of concurrent network jobs (CI fetch, git fetch/sync)."
+  "Maximum number of concurrent network jobs (git fetch/sync)."
+  :type 'integer
+  :group 'magit-dash)
+
+(defcustom magit-dash-max-concurrent-ci-jobs
+  (max 2 (round (* 1.5 (if (fboundp 'num-processors) (num-processors) 4))))
+  "Maximum number of concurrent GitHub CI status fetch jobs.
+Defaults to 1.5x the number of CPU cores."
   :type 'integer
   :group 'magit-dash)
 

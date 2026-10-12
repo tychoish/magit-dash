@@ -31,6 +31,7 @@
 (require 'magit-dash-gh-actions)
 
 (defvar magit-dash-max-concurrent-network-jobs)
+(defvar magit-dash-max-concurrent-ci-jobs)
 (defvar magit-dash-queue-yield-delay)
 (defvar magit-dash-buffer-name)
 (declare-function magit-dash-repo-path "magit-dash")
@@ -154,7 +155,7 @@ Caches the result as :ci-status in the shared magit-dash-gh cache."
 ;;;###autoload
 (defun magit-dash-gh-ci-fetch-batch (repos &rest args)
   "Fetch CI status for REPOS using `gen-run-async' with bounded concurrency.
-Concurrency is bounded by `magit-dash-max-concurrent-network-jobs'.
+Concurrency is bounded by `magit-dash-max-concurrent-ci-jobs'.
 ARGS may contain an optional positional ON-DONE callback or keyword arguments:
   :on-done FUNCTION
   :on-repo-done FUNCTION
@@ -166,8 +167,10 @@ Returns a cancellation handle."
          (on-done (or (plist-get args :on-done) on-done))
          (on-repo-done (plist-get args :on-repo-done))
          (limit (or (plist-get args :concurrency)
-                    (bound-and-true-p magit-dash-max-concurrent-network-jobs)
-                    2))
+                    (bound-and-true-p magit-dash-max-concurrent-ci-jobs)
+                    (max 2 (round (* 1.5 (if (fboundp 'num-processors)
+                                             (num-processors)
+                                           4))))))
          (yield (or (plist-get args :delay)
                     (bound-and-true-p magit-dash-queue-yield-delay)
                     0.0))

@@ -3638,7 +3638,7 @@ The bug was that add-text-properties returns t, not the modified string."
         (should done-called)))))
 
 (ert-deftest magit-dash/gh-ci-fetch-batch-concurrency ()
-  "Test that `magit-dash-gh-ci-fetch-batch' filters and uses network concurrency."
+  "Test that `magit-dash-gh-ci-fetch-batch' filters and uses CI concurrency."
   (let* ((r1 (magit-dash-repo--make :name "r1" :path "/fake/r1" :include-ci t))
          (r2 (magit-dash-repo--make :name "r2" :path "/fake/r2" :include-ci nil))
          (passed-items nil)
@@ -3650,7 +3650,14 @@ The bug was that add-text-properties returns t, not the modified string."
                  (lambda (&optional _) nil))))
       (magit-dash-gh-ci-fetch-batch (list r1 r2))
       (should (equal passed-items (list r1)))
-      (should (= passed-concurrency magit-dash-max-concurrent-network-jobs)))))
+      (should (= passed-concurrency magit-dash-max-concurrent-ci-jobs)))))
+
+(ert-deftest magit-dash/ci-concurrency-default-calculation ()
+  "Test that `magit-dash-max-concurrent-ci-jobs' defaults to 1.5x CPU cores (min 2)."
+  (should (>= magit-dash-max-concurrent-ci-jobs 2))
+  (when (fboundp 'num-processors)
+    (should (= magit-dash-max-concurrent-ci-jobs
+               (max 2 (round (* 1.5 (num-processors))))))))
 
 (ert-deftest magit-dash/refresh-fetch-or-sync-async-concurrency ()
   "Test that `magit-dash--refresh-fetch-or-sync-async' uses network concurrency."
