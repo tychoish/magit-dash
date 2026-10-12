@@ -100,7 +100,7 @@ Returns nil when RUNS is nil or empty."
 
 (defun magit-dash-gh-ci--format-status (ci-status)
   "Format CI-STATUS plist as a short propertized string for the dashboard column.
-Returns a shadow \\"—\\" when CI-STATUS is nil."
+Returns a shadow \"—\" when CI-STATUS is nil."
   (if (null ci-status)
       (propertize "—" 'face 'shadow)
     (let ((conclusion (plist-get ci-status :conclusion))
