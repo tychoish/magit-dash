@@ -3,7 +3,7 @@
 ;; Author: sam kleinman
 ;; Maintainer: tychoish
 ;; Version: 0.1
-;; Package-Requires: ((emacs "29.1") (magit "4.0") (projectile "2.0") (transient "0.4") (annotated-completing-read "0.1") (sprite "0.1"))
+;; Package-Requires: ((emacs "29.1") (magit "4.0") (projectile "2.0") (transient "0.4") (annotated-completing-read "0.1") (sprite "0.1") (gen "0.1"))
 ;; Keywords: vc, tools, magit, github
 ;; URL: https://github.com/tychoish/dot-emacs
 
@@ -36,6 +36,7 @@
 (require 'transient)
 (require 'savehist)
 (require 'magit)
+(require 'gen)
 
 (require 'annotated-completing-read)
 (require 'sprite)
@@ -71,6 +72,7 @@
 (declare-function agent-shell-workflow-dispatch-menu "agent-shell-workflow-menu")
 (declare-function magit-dash-gh-ci-open "magit-dash-gh-ci")
 (declare-function magit-dash-gh-ci-fetch "magit-dash-gh-ci")
+(declare-function magit-dash-gh-ci-fetch-batch "magit-dash-gh-ci")
 (declare-function magit-dash-gh-workflow-run "magit-dash-gh-actions")
 (declare-function magit-gh-pr-dash "magit-dash-gh-pr")
 (declare-function magit-dash-gh-pr-views-menu "magit-dash-gh-pr")
@@ -265,6 +267,30 @@ Defaults to 3600 seconds (1 hour)."
   :group 'magit-dash)
 
 (declare-function magit-dash-register-sync-timer "magit-dash-timer")
+
+(defcustom magit-dash-max-concurrent-jobs 4
+  "Maximum number of concurrent local Git or subprocess jobs in dashboard refresh."
+  :type 'integer
+  :group 'magit-dash)
+
+(defcustom magit-dash-max-concurrent-network-jobs 2
+  "Maximum number of concurrent network jobs (CI fetch, git fetch/sync)."
+  :type 'integer
+  :group 'magit-dash)
+
+(defcustom magit-dash-queue-yield-delay 0.0
+  "Delay in seconds between job dequeues in cooperative async runner."
+  :type 'float
+  :group 'magit-dash)
+
+(defvar magit-dash--refresh-cancel-handle nil
+  "Cancellation handle function for active `gen-run-async' refresh runners.")
+
+(defun magit-dash--cancel-refresh-jobs ()
+  "Cancel all in-flight refresh jobs."
+  (when (functionp magit-dash--refresh-cancel-handle)
+    (ignore-errors (funcall magit-dash--refresh-cancel-handle :cancel)))
+  (setq magit-dash--refresh-cancel-handle nil))
 
 ;;;; Hooks and operations
 
@@ -1575,21 +1601,60 @@ Missing/uninitialized submodules are marked with :submodule \\='missing."
               :submodule (if missing-p 'missing t))))))
       (seq-remove #'null))))
 
-(defun magit-dash--discover-submodules ()
-  "Populate the unified cache with submodules for all registered main repos."
-  (thread-last
-    magit-dash-repo-list
-    (seq-remove (lambda (repo) (or (magit-dash-repo-worktree repo) (magit-dash-repo-submodule repo))))
-    (seq-do
-     (lambda (repo)
-       (let* ((path (magit-dash-repo-path repo))
-              (lines (ignore-errors
-                       (let ((default-directory path))
-                         (process-lines magit-git-executable
-                                        "submodule" "status")))))
-         (magit-dash-gh--cache-set path
-	  :submodules (when lines
-			(magit-dash--parse-submodules path lines))))))))
+(defun magit-dash--rebuild-submodule-path-set ()
+  "Rebuild `magit-dash--submodule-path-set' from cache."
+  (setq magit-dash--submodule-path-set
+        (let ((paths (make-hash-table :test #'equal)))
+          (seq-do (lambda (repo)
+                    (seq-do (lambda (sm)
+                              (puthash (magit-dash-repo-path sm) (magit-dash-repo-name sm) paths))
+                            (or (magit-dash-gh--cache-get (magit-dash-repo-path repo) :submodules) '())))
+                  magit-dash-repo-list)
+          paths)))
+
+(defun magit-dash--discover-submodules (&optional callback)
+  "Populate the unified cache with submodules for all registered main repos.
+Executes `git submodule status' asynchronously via `magit-dash--run-git'
+throttled by `gen-run-async' with `magit-dash-max-concurrent-jobs'.
+When CALLBACK is non-nil, call it when discovery finishes.
+Returns a cancellation handle."
+  (let ((repos (thread-last
+                 magit-dash-repo-list
+                 (seq-remove (lambda (repo)
+                               (or (magit-dash-repo-worktree repo)
+                                   (magit-dash-repo-submodule repo))))
+                 (seq-filter (lambda (repo)
+                               (file-directory-p (magit-dash-repo-path repo)))))))
+    (if (null repos)
+        (progn
+          (when callback (funcall callback))
+          (lambda (&rest _) nil))
+      (gen-run-async
+       (lambda (repo done)
+         (let ((path (magit-dash-repo-path repo)))
+           (magit-dash--run-git
+            path '("submodule" "status")
+            (lambda (output)
+              (let* ((lines (and output (split-string output "
+" t)))
+                     (submodules (when lines
+                                   (magit-dash--parse-submodules path lines))))
+                (magit-dash-gh--cache-set path :submodules submodules)
+                (when (and magit-dash--submodule-path-set submodules)
+                  (seq-do (lambda (sm)
+                            (puthash (magit-dash-repo-path sm)
+                                     (magit-dash-repo-name sm)
+                                     magit-dash--submodule-path-set))
+                          submodules)))
+              (funcall done))
+            (lambda (_output _code)
+              (funcall done)))))
+       repos
+       :concurrency magit-dash-max-concurrent-jobs
+       :delay magit-dash-queue-yield-delay
+       :on-done callback))))
+
+(defalias 'magit-dash--discover-submodules-async #'magit-dash--discover-submodules)
 
 
 ;;;; Column configuration
@@ -1920,7 +1985,8 @@ set `default-directory' to the parent directory where the repository should be."
   (setq tabulated-list-sort-key nil)
   (tabulated-list-init-header)
   (setq-local default-directory (file-name-as-directory (expand-file-name "~/")))
-  (add-hook 'post-command-hook #'magit-dash--update-default-directory nil t))
+  (add-hook 'post-command-hook #'magit-dash--update-default-directory nil t)
+  (add-hook 'kill-buffer-hook #'magit-dash--cancel-refresh-jobs nil t))
 
 (defun magit-dash--build-entry (repo)
   "Return a `tabulated-list-entries' entry for REPO using enabled columns.
@@ -2000,10 +2066,12 @@ until `magit-dash--populate-stats-async' updates them."
                    tabulated-list-entries))
     (tabulated-list-print t)))
 
-(defun magit-dash--populate-stats-async (repos)
+(defun magit-dash--populate-stats-async (repos &optional on-done)
   "Asynchronously collect stats for stale or uncached repos in REPOS.
-Emits a status message with repo counts; updates dashboard rows as
-each finishes."
+Uses `gen-run-async' with bounded concurrency and cooperative timer yields.
+Emits a status message with repo counts; updates dashboard rows as each finishes.
+When ON-DONE is non-nil, call it when all stats collections finish.
+Returns a cancellation handle."
   (let* ((buf (current-buffer))
          (needs-update
           (seq-filter
@@ -2019,10 +2087,13 @@ each finishes."
          (stale (length needs-update))
          (done (list 0)))
     (if (= stale 0)
-        (message "magit-dash: %d repos (all cached)" total)
+        (progn
+          (message "magit-dash: %d repos (all cached)" total)
+          (when on-done (funcall on-done))
+          (lambda (&rest _) nil))
       (message "magit-dash: %d repos, loading %d…" total stale)
-      (seq-do
-       (lambda (repo)
+      (gen-run-async
+       (lambda (repo done-cb)
          (magit-dash--collect-stats-async
           repo
           (lambda (_stats)
@@ -2032,14 +2103,11 @@ each finishes."
                 (magit-dash--update-entry repo)))
             (when (= (car done) stale)
               (message "magit-dash: %d repos, %d updated" total stale))
-            (when (magit-dash-repo-include-ci repo)
-              (magit-dash-gh-ci-fetch
-               repo
-               (lambda (_ci-status)
-                 (when (buffer-live-p buf)
-                   (with-current-buffer buf
-                     (magit-dash--update-entry repo)))))))))
-       needs-update))))
+            (funcall done-cb))))
+       needs-update
+       :concurrency magit-dash-max-concurrent-jobs
+       :delay magit-dash-queue-yield-delay
+       :on-done on-done))))
 
 (defun magit-dash--repo-type-rank (repo)
   "Return a sort rank for REPO based on its git context type.
@@ -2151,117 +2219,129 @@ and has fetch or sync configured."
        (file-directory-p (magit-dash-repo-path repo))
        (magit-dash-repo-sync-on-refresh repo)))
 
-(defun magit-dash--refresh-fetch-or-sync-async (repos)
+(defun magit-dash--refresh-fetch-or-sync-async (repos &optional on-done)
   "Run automatic sync or fetch for eligible repos in REPOS during refresh.
+Bounded by `magit-dash-max-concurrent-network-jobs' and yielded cooperatively.
 Honors `magit-dash-refresh-fetch', `magit-dash-refresh-fetch-min-interval',
-`magit-dash-refresh-sync-min-interval', and per-repo `:sync-on-refresh'."
-  (let ((buf (get-buffer magit-dash-buffer-name)))
-    (seq-do
-     (lambda (repo)
-       (cond
-        ((and (magit-dash--refresh-sync-eligible-p repo)
-              (magit-dash--repo-sync-interval-elapsed-p repo))
-         (magit-dash--record-sync-attempt repo)
-         (magit-dash--auto-sync-async
-          repo
-          (lambda (_status &optional _text)
-            (magit-dash--collect-stats-async
-             repo
-             (lambda (_stats)
-               (when (and buf (buffer-live-p buf))
-                 (with-current-buffer buf
-                   (magit-dash--update-entry repo)))))
-            (when (magit-dash-repo-include-ci repo)
-              (magit-dash-gh-ci-fetch
+`magit-dash-refresh-sync-min-interval', and per-repo `:sync-on-refresh'.
+Returns a cancellation handle."
+  (let* ((buf (get-buffer magit-dash-buffer-name))
+         (eligible-repos
+          (seq-filter
+           (lambda (repo)
+             (or (and (magit-dash--refresh-sync-eligible-p repo)
+                      (magit-dash--repo-sync-interval-elapsed-p repo))
+                 (and magit-dash-refresh-fetch
+                      (magit-dash--refresh-fetch-eligible-p repo)
+                      (magit-dash--repo-fetch-interval-elapsed-p repo))))
+           repos)))
+    (if (null eligible-repos)
+        (progn
+          (when on-done (funcall on-done))
+          (lambda (&rest _) nil))
+      (gen-run-async
+       (lambda (repo done)
+         (cond
+          ((and (magit-dash--refresh-sync-eligible-p repo)
+                (magit-dash--repo-sync-interval-elapsed-p repo))
+           (magit-dash--record-sync-attempt repo)
+           (magit-dash--auto-sync-async
+            repo
+            (lambda (_status &optional _text)
+              (magit-dash--collect-stats-async
                repo
-               (lambda (_ci)
+               (lambda (_stats)
                  (when (and buf (buffer-live-p buf))
                    (with-current-buffer buf
-                     (magit-dash--update-entry repo)))))))))
-        ((and magit-dash-refresh-fetch
-              (magit-dash--refresh-fetch-eligible-p repo)
-              (magit-dash--repo-fetch-interval-elapsed-p repo))
-         (magit-dash--record-fetch-attempt repo)
-         (magit-dash--guarded-op-run
-          repo "fetch"
-          (lambda (r cb)
-            (magit-dash--run-operation r :fetch cb))
-          (lambda (_status &optional _text)
-            (magit-dash--collect-stats-async
-             repo
-             (lambda (_stats)
-               (when (and buf (buffer-live-p buf))
-                 (with-current-buffer buf
-                   (magit-dash--update-entry repo)))))
-            (when (magit-dash-repo-include-ci repo)
-              (magit-dash-gh-ci-fetch
+                     (magit-dash--update-entry repo)))))
+              (when (magit-dash-repo-include-ci repo)
+                (magit-dash-gh-ci-fetch
+                 repo
+                 (lambda (_ci)
+                   (when (and buf (buffer-live-p buf))
+                     (with-current-buffer buf
+                       (magit-dash--update-entry repo))))))
+              (funcall done))))
+          ((and magit-dash-refresh-fetch
+                (magit-dash--refresh-fetch-eligible-p repo)
+                (magit-dash--repo-fetch-interval-elapsed-p repo))
+           (magit-dash--record-fetch-attempt repo)
+           (magit-dash--guarded-op-run
+            repo "fetch"
+            (lambda (r cb)
+              (magit-dash--run-operation r :fetch cb))
+            (lambda (_status &optional _text)
+              (magit-dash--collect-stats-async
                repo
-               (lambda (_ci)
+               (lambda (_stats)
                  (when (and buf (buffer-live-p buf))
                    (with-current-buffer buf
-                     (magit-dash--update-entry repo)))))))))))
-     repos)))
+                     (magit-dash--update-entry repo)))))
+              (when (magit-dash-repo-include-ci repo)
+                (magit-dash-gh-ci-fetch
+                 repo
+                 (lambda (_ci)
+                   (when (and buf (buffer-live-p buf))
+                     (with-current-buffer buf
+                       (magit-dash--update-entry repo))))))
+              (funcall done))))
+          (t
+           (funcall done))))
+       eligible-repos
+       :concurrency magit-dash-max-concurrent-network-jobs
+       :delay magit-dash-queue-yield-delay
+       :on-done on-done))))
 
 (defun magit-dash-refresh ()
   "Refresh the dashboard, clearing all per-repo caches and re-fetching.
-Discovers worktrees and submodules synchronously, renders the table with
-the last known state, then clears :stats, :pr-counts, and :ci-status for
-every repo and re-fetches all three in the background, updating each row
-as data arrives.  Also triggers background fetch or full-sync for eligible
-repositories subject to interval thresholds."
+Discovers worktrees synchronously and submodules asynchronously.
+Renders the table immediately with cached state, then cancels any pending
+refresh jobs before launching throttled stats, CI, and fetch/sync pipelines
+via `gen-run-async'."
   (interactive)
+  (magit-dash--cancel-refresh-jobs)
   (magit-dash--discover-worktrees)
-  (magit-dash--discover-submodules)
-  (setq magit-dash--submodule-path-set
-        (let ((paths (make-hash-table :test #'equal)))
-          (seq-do (lambda (repo)
-                    (seq-do (lambda (sm)
-                              (puthash (magit-dash-repo-path sm) (magit-dash-repo-name sm) paths))
-                            (or (magit-dash-gh--cache-get (magit-dash-repo-path repo) :submodules) '())))
-                  magit-dash-repo-list)
-          paths))
-  (let* ((visible-base
-          (seq-filter
-           (lambda (r)
-             (and (not (member (magit-dash-repo-path r) magit-dash--hidden-paths))
-                  (if magit-dash--tag-filter
-                      (memq magit-dash--tag-filter
-                            (magit-dash--all-tags-for r))
-                    t)))
-           magit-dash-repo-list))
-         (repos (seq-filter
-                 (lambda (r)
-                   (not (member (magit-dash-repo-path r) magit-dash--hidden-paths)))
-                 (magit-dash--sorted-repos visible-base))))
-    (setq tabulated-list-format (magit-dash--build-format repos))
-    (tabulated-list-init-header)
-    (setq tabulated-list-entries (seq-map #'magit-dash--build-entry repos))
-    (tabulated-list-print t)
-    (seq-do (lambda (repo)
-              (let ((path (magit-dash-repo-path repo)))
-                (magit-dash-gh--cache-remove path :stats)
-                (magit-dash-gh--cache-remove path :pr-counts)
-                (magit-dash-gh--cache-remove path :ci-status)))
-            repos)
-    (magit-dash--populate-stats-async repos)
-    (let ((buf (current-buffer)))
-      (seq-do
-       (lambda (repo)
-         (when (magit-dash-repo-include-ci repo)
-           (magit-dash-gh-ci-fetch
-            repo
-            (lambda (_)
-              (when (buffer-live-p buf)
-                (with-current-buffer buf
-                  (magit-dash--update-entry repo)))))))
-       repos))
-    (magit-dash--refresh-fetch-or-sync-async repos)))
+  (let ((subm-handle (magit-dash--discover-submodules)))
+    (magit-dash--rebuild-submodule-path-set)
+    (let* ((visible-base
+            (seq-filter
+             (lambda (r)
+               (and (not (member (magit-dash-repo-path r) magit-dash--hidden-paths))
+                    (if magit-dash--tag-filter
+                        (memq magit-dash--tag-filter
+                              (magit-dash--all-tags-for r))
+                      t)))
+             magit-dash-repo-list))
+           (repos (seq-filter
+                   (lambda (r)
+                     (not (member (magit-dash-repo-path r) magit-dash--hidden-paths)))
+                   (magit-dash--sorted-repos visible-base))))
+      (setq tabulated-list-format (magit-dash--build-format repos))
+      (tabulated-list-init-header)
+      (setq tabulated-list-entries (seq-map #'magit-dash--build-entry repos))
+      (tabulated-list-print t)
+      (seq-do (lambda (repo)
+                (let ((path (magit-dash-repo-path repo)))
+                  (magit-dash-gh--cache-remove path :stats)
+                  (magit-dash-gh--cache-remove path :pr-counts)
+                  (magit-dash-gh--cache-remove path :ci-status)))
+              repos)
+      (let ((stats-handle (magit-dash--populate-stats-async repos))
+            (ci-handle (magit-dash-gh-ci-fetch-batch repos))
+            (sync-handle (magit-dash--refresh-fetch-or-sync-async repos)))
+        (setq magit-dash--refresh-cancel-handle
+              (lambda (&optional action)
+                (when (functionp subm-handle) (funcall subm-handle action))
+                (when (functionp stats-handle) (funcall stats-handle action))
+                (when (functionp ci-handle) (funcall ci-handle action))
+                (when (functionp sync-handle) (funcall sync-handle action))))))))
 
 (defun magit-dash-hard-refresh ()
   "Clear all caches and repopulate the dashboard from scratch.
 Unlike `magit-dash-refresh', discards all cached stats so every repo is
 re-collected asynchronously."
   (interactive)
+  (magit-dash--cancel-refresh-jobs)
   (clrhash magit-dash-gh--cache)
   (clrhash magit-dash--repo-last-fetch-attempts)
   (clrhash magit-dash--repo-last-sync-attempts)
@@ -2289,21 +2369,14 @@ for REPOS so automatic fetch/sync is not throttled."
            (remhash exp-path magit-dash--repo-last-fetch-attempts)
            (remhash exp-path magit-dash--repo-last-sync-attempts))))
      repos)
-    (if (and buf (buffer-live-p buf))
-        (with-current-buffer buf
-          (magit-dash--populate-stats-async repos)
-          (seq-do
-           (lambda (repo)
-             (when (magit-dash-repo-include-ci repo)
-               (magit-dash-gh-ci-fetch
-                repo
-                (lambda (_)
-                  (when (buffer-live-p buf)
-                    (with-current-buffer buf
-                      (magit-dash--update-entry repo)))))))
-           repos))
-      (magit-dash--populate-stats-async repos))
-    (magit-dash--refresh-fetch-or-sync-async repos)))
+    (let ((stats-handle (magit-dash--populate-stats-async repos))
+          (ci-handle (when (and buf (buffer-live-p buf))
+                       (magit-dash-gh-ci-fetch-batch repos)))
+          (sync-handle (magit-dash--refresh-fetch-or-sync-async repos)))
+      (lambda (&optional action)
+        (when (functionp stats-handle) (funcall stats-handle action))
+        (when (functionp ci-handle) (funcall ci-handle action))
+        (when (functionp sync-handle) (funcall sync-handle action))))))
 
 ;;;###autoload
 (defun magit-dash-refresh-repo (&optional target force)
@@ -3657,6 +3730,7 @@ Indicates whether batch operations target all repos or marked repos."
 (defun magit-dash-stop-operations ()
   "Stop and cancel all currently running magit-dash operations."
   (interactive)
+  (magit-dash--cancel-refresh-jobs)
   (let ((count 0))
     (maphash
      (lambda (_path op)
@@ -3686,10 +3760,13 @@ Indicates whether batch operations target all repos or marked repos."
 
 (defun magit-dash--quit-window-advice (orig-fn &optional kill window)
   "Around advice for `quit-window': delete split window in dashboard buffers.
+Also cancels in-flight async refresh jobs when quitting `magit-dash-mode'.
 ORIG-FN is the original `quit-window' function.  KILL and WINDOW are
 passed through to ORIG-FN.
 Only applies in `magit-dash-mode' and `magit-dash-gh-pr-dashboard-mode'.
 Falls through otherwise."
+  (when (derived-mode-p 'magit-dash-mode)
+    (magit-dash--cancel-refresh-jobs))
   (if (or kill (one-window-p)
           (not (derived-mode-p 'magit-dash-mode
                                'magit-dash-gh-pr-dashboard-mode)))

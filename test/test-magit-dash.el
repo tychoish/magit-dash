@@ -3558,3 +3558,140 @@ The bug was that add-text-properties returns t, not the modified string."
     (should (eq (plist-get rm :command) 'magit-dash-refresh-marked))
     (should rt)
     (should (eq (plist-get rt :command) 'magit-dash-refresh-by-tag))))
+
+;;; Gen async refresh and cooperative throttling tests
+
+(ert-deftest magit-dash/discover-submodules-async ()
+  "Test that `magit-dash--discover-submodules' uses `gen-run-async'."
+  (let* ((r1 (magit-dash-repo--make :name "r1" :path "/fake/r1"))
+         (r2 (magit-dash-repo--make :name "r2" :path "/fake/r2"))
+         (magit-dash-repo-list (list r1 r2))
+         (gen-called nil)
+         (gen-concurrency nil)
+         (done-called nil))
+    (cl-letf (((symbol-function 'file-directory-p) (lambda (_) t))
+              ((symbol-function 'gen-run-async)
+               (lambda (_worker items &rest plist)
+                 (setq gen-called items
+                       gen-concurrency (plist-get plist :concurrency))
+                 (when-let* ((cb (plist-get plist :on-done)))
+                   (funcall cb))
+                 (lambda (&optional _) nil))))
+      (magit-dash--discover-submodules (lambda () (setq done-called t)))
+      (should (equal gen-called (list r1 r2)))
+      (should (= gen-concurrency magit-dash-max-concurrent-jobs))
+      (should done-called))))
+
+(ert-deftest magit-dash/rebuild-submodule-path-set ()
+  "Test that `magit-dash--rebuild-submodule-path-set' populates path set from cache."
+  (let* ((r1 (magit-dash-repo--make :name "main" :path "/fake/main"))
+         (sm (magit-dash-repo--make :name "subm" :path "/fake/main/subm" :submodule t))
+         (magit-dash-repo-list (list r1))
+         (magit-dash-gh--cache (make-hash-table :test #'equal)))
+    (magit-dash-gh--cache-set "/fake/main" :submodules (list sm))
+    (magit-dash--rebuild-submodule-path-set)
+    (should (hash-table-p magit-dash--submodule-path-set))
+    (should (equal (gethash "/fake/main/subm" magit-dash--submodule-path-set) "subm"))))
+
+(ert-deftest magit-dash/populate-stats-async-concurrency ()
+  "Test that `magit-dash--populate-stats-async' uses bounded concurrency."
+  (let* ((r1 (magit-dash-repo--make :name "r1" :path "/fake/r1"))
+         (r2 (magit-dash-repo--make :name "r2" :path "/fake/r2"))
+         (magit-dash-repo-list (list r1 r2))
+         (passed-concurrency nil)
+         (passed-delay nil)
+         (done-called nil))
+    (cl-letf (((symbol-function 'magit-dash-gh--cache-get) (lambda (&rest _) nil))
+              ((symbol-function 'magit-dash--head-hash) (lambda (_) "head"))
+              ((symbol-function 'gen-run-async)
+               (lambda (_worker _items &rest plist)
+                 (setq passed-concurrency (plist-get plist :concurrency)
+                       passed-delay (plist-get plist :delay))
+                 (when-let* ((cb (plist-get plist :on-done)))
+                   (funcall cb))
+                 (lambda (&optional _) nil))))
+      (let ((handle (magit-dash--populate-stats-async (list r1 r2) (lambda () (setq done-called t)))))
+        (should (functionp handle))
+        (should (= passed-concurrency magit-dash-max-concurrent-jobs))
+        (should (equal passed-delay magit-dash-queue-yield-delay))
+        (should done-called)))))
+
+(ert-deftest magit-dash/gh-ci-fetch-batch-concurrency ()
+  "Test that `magit-dash-gh-ci-fetch-batch' filters and uses network concurrency."
+  (let* ((r1 (magit-dash-repo--make :name "r1" :path "/fake/r1" :include-ci t))
+         (r2 (magit-dash-repo--make :name "r2" :path "/fake/r2" :include-ci nil))
+         (passed-items nil)
+         (passed-concurrency nil))
+    (cl-letf (((symbol-function 'gen-run-async)
+               (lambda (_worker items &rest plist)
+                 (setq passed-items items
+                       passed-concurrency (plist-get plist :concurrency))
+                 (lambda (&optional _) nil))))
+      (magit-dash-gh-ci-fetch-batch (list r1 r2))
+      (should (equal passed-items (list r1)))
+      (should (= passed-concurrency magit-dash-max-concurrent-network-jobs)))))
+
+(ert-deftest magit-dash/refresh-fetch-or-sync-async-concurrency ()
+  "Test that `magit-dash--refresh-fetch-or-sync-async' uses network concurrency."
+  (let* ((r1 (magit-dash-repo--make :name "r1" :path "/fake/r1" :sync-on-refresh t))
+         (passed-items nil)
+         (passed-concurrency nil))
+    (cl-letf (((symbol-function 'file-directory-p) (lambda (_) t))
+              ((symbol-function 'magit-dash--refresh-sync-eligible-p) (lambda (_) t))
+              ((symbol-function 'magit-dash--repo-sync-interval-elapsed-p) (lambda (_) t))
+              ((symbol-function 'gen-run-async)
+               (lambda (_worker items &rest plist)
+                 (setq passed-items items
+                       passed-concurrency (plist-get plist :concurrency))
+                 (lambda (&optional _) nil))))
+      (magit-dash--refresh-fetch-or-sync-async (list r1))
+      (should (equal passed-items (list r1)))
+      (should (= passed-concurrency magit-dash-max-concurrent-network-jobs)))))
+
+(ert-deftest magit-dash/cancel-refresh-jobs ()
+  "Test that `magit-dash--cancel-refresh-jobs' invokes handle with :cancel and resets."
+  (let* ((cancelled nil)
+         (magit-dash--refresh-cancel-handle
+          (lambda (&optional action)
+            (setq cancelled action))))
+    (magit-dash--cancel-refresh-jobs)
+    (should (eq cancelled :cancel))
+    (should (null magit-dash--refresh-cancel-handle))))
+
+(ert-deftest magit-dash/stop-operations-cancels-refresh ()
+  "Test that `magit-dash-stop-operations' cancels in-flight refresh jobs."
+  (let* ((refresh-cancelled nil)
+         (magit-dash--active-operations (make-hash-table :test #'equal))
+         (magit-dash--refresh-cancel-handle
+          (lambda (&optional action)
+            (when (eq action :cancel)
+              (setq refresh-cancelled t)))))
+    (magit-dash-stop-operations)
+    (should refresh-cancelled)
+    (should (null magit-dash--refresh-cancel-handle))))
+
+(ert-deftest magit-dash/quit-window-cancels-refresh ()
+  "Test that `magit-dash--quit-window-advice' cancels refresh in `magit-dash-mode'."
+  (let* ((cancelled nil)
+         (magit-dash--refresh-cancel-handle
+          (lambda (&optional action)
+            (when (eq action :cancel)
+              (setq cancelled t)))))
+    (with-temp-buffer
+      (magit-dash-mode)
+      (cl-letf (((symbol-function 'delete-window) #'ignore))
+        (magit-dash--quit-window-advice (lambda (&rest _) nil))))
+    (should cancelled)))
+
+(ert-deftest magit-dash/refresh-cancels-previous-jobs ()
+  "Test that `magit-dash-refresh' cancels previous refresh jobs."
+  (magit-dash-test--with-refresh-stubs
+   (let* ((cancelled nil)
+          (magit-dash--refresh-cancel-handle
+           (lambda (&optional action)
+             (when (eq action :cancel)
+               (setq cancelled t))))
+          (magit-dash-repo-list nil))
+     (cl-letf (((symbol-function 'magit-dash-gh-ci-fetch-batch) (lambda (&rest _) nil)))
+       (magit-dash-refresh)
+       (should cancelled)))))

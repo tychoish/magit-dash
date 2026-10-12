@@ -3,7 +3,7 @@
 ;; Author: tycho garen
 ;; Maintainer: tychoish
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "29.1") (magit "4.0"))
+;; Package-Requires: ((emacs "29.1") (magit "4.0") (gen "0.1"))
 ;; Keywords: vc, tools, magit, github, ci
 ;; URL: https://github.com/tychoish/dot-emacs
 
@@ -26,14 +26,19 @@
 (declare-function magit-dash-repo-clone-url "magit-dash")
 
 (require 'map)
+(require 'gen)
 (require 'magit-dash-gh)
 (require 'magit-dash-gh-actions)
 
+(defvar magit-dash-max-concurrent-network-jobs)
+(defvar magit-dash-queue-yield-delay)
+(defvar magit-dash-buffer-name)
 (declare-function magit-dash-repo-path "magit-dash")
 (declare-function magit-dash-repo-name "magit-dash")
 (declare-function magit-dash-repo-branch "magit-dash")
 (declare-function magit-dash-repo-include-ci "magit-dash")
 (declare-function magit-dash--current-branch "magit-dash")
+(declare-function magit-dash--update-entry "magit-dash")
 (declare-function agent-shell-insert "agent-shell")
 (declare-function agent-shell-buffers "agent-shell")
 (declare-function agent-shell-get-config "agent-shell")
@@ -95,7 +100,7 @@ Returns nil when RUNS is nil or empty."
 
 (defun magit-dash-gh-ci--format-status (ci-status)
   "Format CI-STATUS plist as a short propertized string for the dashboard column.
-Returns a shadow \"—\" when CI-STATUS is nil."
+Returns a shadow \\"—\\" when CI-STATUS is nil."
   (if (null ci-status)
       (propertize "—" 'face 'shadow)
     (let ((conclusion (plist-get ci-status :conclusion))
@@ -145,6 +150,50 @@ Caches the result as :ci-status in the shared magit-dash-gh cache."
              (funcall callback ci-status)))
          (lambda (_ _)
            (funcall callback nil)))))))
+
+;;;###autoload
+(defun magit-dash-gh-ci-fetch-batch (repos &rest args)
+  "Fetch CI status for REPOS using `gen-run-async' with bounded concurrency.
+Concurrency is bounded by `magit-dash-max-concurrent-network-jobs'.
+ARGS may contain an optional positional ON-DONE callback or keyword arguments:
+  :on-done FUNCTION
+  :on-repo-done FUNCTION
+  :concurrency INTEGER
+  :delay FLOAT
+Returns a cancellation handle."
+  (let* ((on-done (when (and (car args) (not (keywordp (car args))))
+                    (pop args)))
+         (on-done (or (plist-get args :on-done) on-done))
+         (on-repo-done (plist-get args :on-repo-done))
+         (limit (or (plist-get args :concurrency)
+                    (bound-and-true-p magit-dash-max-concurrent-network-jobs)
+                    2))
+         (yield (or (plist-get args :delay)
+                    (bound-and-true-p magit-dash-queue-yield-delay)
+                    0.0))
+         (ci-repos (seq-filter #'magit-dash-repo-include-ci repos))
+         (buf (or (get-buffer (or (bound-and-true-p magit-dash-buffer-name) "*magit-dash*"))
+                  (current-buffer))))
+    (if (null ci-repos)
+        (progn
+          (when on-done (funcall on-done))
+          (lambda (&rest _) nil))
+      (gen-run-async
+       (lambda (repo done)
+         (magit-dash-gh-ci-fetch
+          repo
+          (lambda (ci-status)
+            (when (and buf (buffer-live-p buf))
+              (with-current-buffer buf
+                (when (fboundp 'magit-dash--update-entry)
+                  (magit-dash--update-entry repo))))
+            (when on-repo-done
+              (funcall on-repo-done repo ci-status))
+            (funcall done))))
+       ci-repos
+       :concurrency limit
+       :delay yield
+       :on-done on-done))))
 
 ;;; Public commands
 

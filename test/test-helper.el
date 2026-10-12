@@ -10,8 +10,11 @@
 
 (let* ((test-file (or load-file-name buffer-file-name))
        (test-dir (file-name-directory test-file))
-       (root (file-name-directory (directory-file-name test-dir))))
-  (add-to-list 'load-path root))
+       (root (file-name-directory (directory-file-name test-dir)))
+       (gen-dir (expand-file-name "../gen.el" root)))
+  (add-to-list 'load-path root)
+  (when (file-directory-p gen-dir)
+    (add-to-list 'load-path gen-dir)))
 
 (provide 'test-helper)
 ;;; test-helper.el ends here
