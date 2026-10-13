@@ -290,6 +290,53 @@ Defaults to 1.5x the number of CPU cores."
   :type 'float
   :group 'magit-dash)
 
+(defcustom magit-dash-worktree-name-format "%s@"
+  "Format string for worktree repository names in the Name column.
+Receives the base repository name as a single argument.
+Common values include \"%s@\", \"%s:w\", or \"%s\"."
+  :type 'string
+  :group 'magit-dash)
+
+(defface magit-dash-status-pr-face
+  '((t :inherit font-lock-constant-face :weight bold))
+  "Face for PR badge in repository dashboard status column."
+  :group 'magit-dash)
+
+(defcustom magit-dash-status-pr-badge "PR"
+  "String for PR indicator badge in the Status column.
+Common values are \"PR\" or \"⑂\"."
+  :type 'string
+  :group 'magit-dash)
+
+(defcustom magit-dash-fetch-pull-submodules-repos '("emacs<conf>" "^emacs.*<conf>$")
+  "List of repository names or regexes that should automatically update submodules on fetch."
+  :type '(repeat string)
+  :group 'magit-dash)
+
+(defun magit-dash--repo-pull-submodules-on-fetch-p (repo)
+  "Return non-nil if REPO should automatically update submodules when fetched."
+  (let ((name (magit-dash-repo-name repo)))
+    (or (seq-some (lambda (pattern)
+                    (or (equal pattern name)
+                        (string-match-p pattern name)))
+                  magit-dash-fetch-pull-submodules-repos)
+        (let ((hooks (magit-dash-repo-hooks repo)))
+          (and hooks
+               (member 'pull-submodules
+                       (append (plist-get (plist-get hooks :fetch) :post)
+                               (plist-get (plist-get hooks :fetch) :pre))))))))
+
+(defun magit-dash--repo-is-pr-p (repo stats)
+  "Return non-nil if REPO or its current branch represents a pull request."
+  (let ((branch (or (plist-get stats :branch) (magit-dash-repo-branch repo) ""))
+        (path (magit-dash-repo-path repo)))
+    (or (plist-get stats :is-pr)
+        (magit-dash-gh--cache-get path :is-pr)
+        (string-match-p "\\(?:^\\|/\\)pr-[0-9]+" branch)
+        (string-match-p "^pull/[0-9]+" branch)
+        (and (magit-dash-repo-worktree repo)
+             (string-match-p "-pr-[0-9]+" (file-name-nondirectory (directory-file-name path)))))))
+
 (defvar magit-dash--refresh-cancel-handle nil
   "Cancellation handle function for active `gen-run-async' refresh runners.")
 
@@ -725,6 +772,33 @@ Returns nil when TIMESTAMP-STRING is empty (no commits yet)."
   (unless (string-empty-p timestamp-string)
     (- (float-time) (string-to-number timestamp-string))))
 
+(defun magit-dash--classify-porcelain-status (repo-path porcelain-lines)
+  "Classify PORCELAIN-LINES for REPO-PATH into plist of dirty flags.
+Returns (:uncommitted BOOL :untracked BOOL :submodule-dirty BOOL)."
+  (let ((uncommitted nil)
+        (untracked nil)
+        (submodule-dirty nil))
+    (dolist (line porcelain-lines)
+      (unless (string-empty-p line)
+        (if (string-prefix-p "??" line)
+            (setq untracked t)
+          (let* ((rel-path (string-trim (substring line 2)))
+                 (rel-path (if (string-match "-> \\(.*\\)$" rel-path)
+                               (match-string 1 rel-path)
+                             rel-path))
+                 (abs-path (expand-file-name rel-path repo-path))
+                 (is-subm (or (and magit-dash--submodule-path-set
+                                   (gethash abs-path magit-dash--submodule-path-set))
+                              (let ((sms (magit-dash-gh--cache-get repo-path :submodules)))
+                                (seq-some (lambda (sm) (equal (magit-dash-repo-path sm) abs-path)) sms))
+                              (file-exists-p (expand-file-name ".git" abs-path)))))
+            (if is-subm
+                (setq submodule-dirty t)
+              (setq uncommitted t))))))
+    (list :uncommitted uncommitted
+          :untracked untracked
+          :submodule-dirty submodule-dirty)))
+
 (defun magit-dash--collect-stats (repo)
   "Synchronously collect git stats for REPO and store them in the cache.
 Returns a plist with keys :branch :remote-origin :behind :ahead :dirty
@@ -740,6 +814,7 @@ Returns a plist with keys :branch :remote-origin :behind :ahead :dirty
                  (or (ignore-errors (magit-git-string "rev-list" "--count" "@{u}..HEAD"))
                      "0")))
          (porcelain-lines (magit-git-lines "status" "--porcelain"))
+         (classified (magit-dash--classify-porcelain-status path porcelain-lines))
          (dirty (not (null porcelain-lines)))
          (uncommitted-files (when dirty porcelain-lines))
          (recent-log (mapconcat #'identity
@@ -751,6 +826,9 @@ Returns a plist with keys :branch :remote-origin :behind :ahead :dirty
                       :behind behind
                       :ahead ahead
                       :dirty dirty
+                      :uncommitted (plist-get classified :uncommitted)
+                      :untracked (plist-get classified :untracked)
+                      :submodule-dirty (plist-get classified :submodule-dirty)
                       :uncommitted-files uncommitted-files
                       :fetch-age (magit-dash--fetch-age path)
                       :updated-age (magit-dash--commit-timestamp-to-age commit-ts)
@@ -787,6 +865,7 @@ accumulating their outputs before assembling the stats plist."
                        (porcelain (or (nth 4 outputs) ""))
                        (porcelain-lines (seq-remove #'string-empty-p
                                                     (split-string porcelain "\n")))
+                       (classified (magit-dash--classify-porcelain-status path porcelain-lines))
                        (dirty (not (null porcelain-lines)))
                        (uncommitted-files (when dirty porcelain-lines))
                        (recent-log (string-trim (or (nth 5 outputs) "")))
@@ -796,6 +875,9 @@ accumulating their outputs before assembling the stats plist."
                                     :behind behind
                                     :ahead ahead
                                     :dirty dirty
+                                    :uncommitted (plist-get classified :uncommitted)
+                                    :untracked (plist-get classified :untracked)
+                                    :submodule-dirty (plist-get classified :submodule-dirty)
                                     :uncommitted-files uncommitted-files
                                     :fetch-age (magit-dash--fetch-age path)
                                     :updated-age (magit-dash--commit-timestamp-to-age commit-ts)
@@ -904,12 +986,21 @@ not via a thrown error."
 (defun magit-dash--fetch-async (repo on-complete)
   "Run git fetch for REPO asynchronously.
 Calls ON-COMPLETE with symbol `ok' on success or `error' and error text
-on failure."
+on failure. When `magit-dash--repo-pull-submodules-on-fetch-p' is non-nil,
+also pulls/updates submodules on successful fetch."
   (magit-dash--record-fetch-attempt repo)
   (magit-dash--run-git
    (magit-dash-repo-path repo)
    '("fetch")
-   (lambda (_) (funcall on-complete 'ok))
+   (lambda (_)
+     (if (magit-dash--repo-pull-submodules-on-fetch-p repo)
+         (magit-dash--run-git
+          (magit-dash-repo-path repo)
+          '("submodule" "update" "--init" "--recursive")
+          (lambda (_) (funcall on-complete 'ok))
+          (lambda (output code)
+            (funcall on-complete 'error (format "submodule update exit %d: %s" code output))))
+       (funcall on-complete 'ok)))
    (lambda (output code)
      (funcall on-complete 'error (format "exit %d: %s" code output)))))
 
@@ -1667,18 +1758,19 @@ Returns a cancellation handle."
 ;;;; Column configuration
 
 (defvar magit-dash-columns
-  '((name . t) (branch . t) (fetched . t) (updated . nil) (ci . t) (status . t) (worktree . t) (sync . t) (cached . nil) (upstream . nil))
+  '((org . nil) (name . t) (branch . t) (fetched . t) (updated . nil) (ci . t) (status . t) (worktree . t) (sync . t) (cached . nil) (upstream . nil))
   "Alist of (COLUMN-SYMBOL . ENABLED) for the repository dashboard.
 Persisted across sessions via `savehist-additional-variables'.")
 
 (add-to-list 'savehist-additional-variables 'magit-dash-columns)
 
 (defconst magit-dash--all-columns
-  '(name branch fetched updated ci status worktree sync cached upstream)
+  '(org name branch fetched updated ci status worktree sync cached upstream)
   "All available dashboard columns in display order.")
 
 (defconst magit-dash--column-defs
-  '((fetched  . ("Fetched"  8 nil))
+  '((org      . ("Org"      12 nil))
+    (fetched  . ("Fetched"  8 nil))
     (updated  . ("Updated"  8 nil))
     (status   . ("Status"   8 nil))
     (worktree . ("Type"     8 nil))
@@ -1768,18 +1860,42 @@ See `magit-dash-render-branch-name-as-basename'."
    ((< seconds 86400) (format "%dh" (round (/ seconds 3600))))
    (t (format "%dd" (round (/ seconds 86400))))))
 
-(defun magit-dash--format-status (ahead behind dirty)
-  "Format AHEAD, BEHIND, and DIRTY into a compact status indicator.
+(defun magit-dash--format-status (ahead behind dirty &optional untracked submodule-dirty is-pr)
+  "Format AHEAD, BEHIND, and dirty states into a compact status indicator.
 Each non-zero/non-nil value contributes a segment; segments are joined with
-a single space.  Returns an empty string when everything is clean and synced."
+a single space.  Returns an empty string when everything is clean and synced.
+DIRTY may be non-nil for uncommitted changes, or UNTRACKED and SUBMODULE-DIRTY
+can distinguish untracked files (\"?\") and submodule updates (\"S\").
+IS-PR when non-nil adds `magit-dash-status-pr-badge' (\"PR\")."
   (let ((parts nil))
     (when (> ahead 0)
       (push (propertize (format "↑%d" ahead) 'face 'warning) parts))
     (when (> behind 0)
       (push (propertize (format "↓%d" behind) 'face 'font-lock-comment-face) parts))
-    (when dirty
+    (when (or (and (not untracked) (not submodule-dirty) (eq dirty t))
+              (and (plistp dirty) (plist-get dirty :uncommitted))
+              (and (not (plistp dirty)) dirty))
       (push (propertize "!" 'face 'error) parts))
+    (when (or untracked (and (plistp dirty) (plist-get dirty :untracked)))
+      (push (propertize "?" 'face 'warning) parts))
+    (when (or submodule-dirty (and (plistp dirty) (plist-get dirty :submodule-dirty)))
+      (push (propertize "S" 'face 'font-lock-builtin-face) parts))
+    (when is-pr
+      (push (propertize magit-dash-status-pr-badge 'face 'magit-dash-status-pr-face) parts))
     (mapconcat #'identity (nreverse parts) " ")))
+
+(defun magit-dash--format-worktree-name (repo)
+  "Format REPO name for display when REPO is a worktree."
+  (let* ((name (magit-dash-repo-name repo))
+         (branch (magit-dash-repo-branch repo))
+         (base (cond
+                ((and branch (not (string-empty-p branch))
+                      (string-suffix-p (concat "@" branch) name))
+                 (substring name 0 (- (length name) (1+ (length branch)))))
+                ((string-match "\\(.*\\)@[^@]+" name)
+                 (match-string 1 name))
+                (t name))))
+    (format magit-dash-worktree-name-format base)))
 
 (defun magit-dash--format-worktree (repo)
   "Format the type indicator for REPO.
@@ -1927,6 +2043,7 @@ space they split it proportionally."
     (define-key m (kbd "s")   #'magit-dash-magit-status)
     (define-key m (kbd "S")   #'magit-dash-sync-all)
     (define-key m (kbd "t")   #'magit-dash-filter-by-tag)
+    (define-key m (kbd "/")   #'magit-dash-hide-select)
     (define-key m (kbd "T")   #'magit-dash-toggle-column)
     (define-key m (kbd "u")   #'magit-dash-pull)
     (define-key m (kbd "U")   #'magit-dash-pull-all)
@@ -2016,8 +2133,7 @@ until `magit-dash--populate-stats-async' updates them."
                                         ((and (magit-dash-repo-worktree repo)
                                               (magit-dash-repo-branch repo)
                                               (not (string-empty-p (magit-dash-repo-branch repo))))
-                                         (string-replace (magit-dash-repo-branch repo) "<B>"
-                                                          (magit-dash-repo-name repo)))
+                                         (magit-dash--format-worktree-name repo))
                                         (t (magit-dash-repo-name repo))))
                               (base-face (if is-marked
                                             '(bold magit-dash-repo-name-face)
@@ -2026,6 +2142,13 @@ until `magit-dash--populate-stats-async' updates them."
                                              (list '(:strike-through t) base-face)
                                            base-face)))
                          (propertize display 'face final-face)))
+                      ('org
+                       (let* ((slug (or (magit-dash-repo-upstream-repo repo)
+                                        (magit-dash-repo-account repo)
+                                        ""))
+                              (pair (when (string-match "\\`\\([^/]+\\)/" slug)
+                                      (match-string 1 slug))))
+                         (or pair (magit-dash-repo-account repo) "")))
                       ('branch
                        (propertize (magit-dash--display-branch-name
                                     (let ((b (plist-get stats :branch)))
@@ -2038,10 +2161,20 @@ until `magit-dash--populate-stats-async' updates them."
                       ('updated
                        (magit-dash--format-age (plist-get stats :updated-age)))
                       ('status
-                       (magit-dash--format-status
-                        (or (plist-get stats :ahead) 0)
-                        (or (plist-get stats :behind) 0)
-                        (plist-get stats :dirty)))
+                       (let ((uncommitted (plist-get stats :uncommitted))
+                             (untracked (plist-get stats :untracked))
+                             (sm-dirty (plist-get stats :submodule-dirty))
+                             (dirty (plist-get stats :dirty))
+                             (is-pr (magit-dash--repo-is-pr-p repo stats)))
+                         (magit-dash--format-status
+                          (or (plist-get stats :ahead) 0)
+                          (or (plist-get stats :behind) 0)
+                          (if (or uncommitted untracked sm-dirty)
+                              uncommitted
+                            dirty)
+                          untracked
+                          sm-dirty
+                          is-pr)))
                       ('worktree
                        (magit-dash--format-worktree repo))
                       ('sync
@@ -3570,9 +3703,9 @@ Indicates whether batch operations target all repos or marked repos."
      :inapt-if-not magit-dash--agent-shell-workflow-available-p)]
    ["Cache"
     ("ci"  "Info"      magit-dash-cache-info)
-    ("chr" "Reset"     magit-dash-cache-reset-at-point
+    ("cr"  "Reset"     magit-dash-cache-reset-at-point
      :inapt-if-not magit-dash--repo-at-point-p)
-    ("cha" "Reset all"       magit-dash-cache-reset-all)]]
+    ("ce"  "Reset all"       magit-dash-cache-reset-all)]]
   [["Repository"
     ("!"   "Magit dispatch"  magit-dash-magit-dispatch
      :inapt-if-not magit-dash--repo-at-point-p)

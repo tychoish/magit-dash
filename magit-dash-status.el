@@ -774,7 +774,7 @@ Calls CALLBACK with list of PR plists."
    ("p" "PR dashboard"                 magit-gh-pr-dash)
    ("o" "Open / switch repository"     magit-dash-open-repo)]
   ["Actions"
-   ("!" "Prune merged branches"        magit-dash-gh-prune-merged-branches)
+   ("y" "Prune merged branches"        magit-dash-gh-prune-merged-branches)
    ("l" "Fetch CI logs"                magit-dash-gh-actions-fetch)
    ("c" "Fetch PR comments"            magit-dash-gh-pr-fetch)
    ("w" "Trigger workflow run"         magit-dash-gh-workflow-run)

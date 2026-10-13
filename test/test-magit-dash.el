@@ -1144,8 +1144,8 @@ without real git repos or a live dashboard buffer."
            (vec (cadr entry)))
       (should (equal "owner/myrepo" (plist-get id :repo)))
       (should (= 42 (plist-get id :number)))
-      (should (equal "owner/myrepo" (aref vec 0)))
-      (should (equal "42" (aref vec 1))))))
+      (should (equal "myrepo" (aref vec 0)))
+      (should (equal "42" (aref vec 2))))))
 
 (ert-deftest magit-dash/parse-output-search-mode ()
   "Search mode extracts repo name from the `repository' field."
@@ -1171,7 +1171,7 @@ without real git repos or a live dashboard buffer."
 ;;;; magit-dash-gh-pr-dashboard--build-entry (column structure)
 
 (ert-deftest magit-dash/build-entry-columns ()
-  "build-entry produces a 7-element vector matching the column format."
+  "build-entry produces vector matching the column format with WT and separated Org/Repo."
   (let* ((pr '((number . 10)
                (title . "My PR")
                (updatedAt . "2024-06-01T12:00:00Z")
@@ -1182,14 +1182,29 @@ without real git repos or a live dashboard buffer."
          (entry (magit-dash-gh-pr-dashboard--build-entry pr "myorg/myrepo"))
          (id (car entry))
          (vec (cadr entry)))
-    (should (= 7 (length vec)))
-    (should (equal "myorg/myrepo" (aref vec 0)))
-    (should (equal "10" (aref vec 1)))
-    (should (equal "My PR" (aref vec 2)))
-    (should (equal "pass" (substring-no-properties (aref vec 3))))
-    (should (equal "approved" (substring-no-properties (aref vec 6))))
+    (should (= 8 (length vec)))
+    (should (equal "myrepo" (aref vec 0)))
+    (should (equal "10" (aref vec 2)))
+    (should (equal "My PR" (aref vec 3)))
+    (should (equal "pass" (substring-no-properties (aref vec 4))))
+    (should (equal "approved" (substring-no-properties (aref vec 7))))
     (should (equal 10 (plist-get id :number)))
-    (should (equal "myorg/myrepo" (plist-get id :repo)))))
+    (should (equal "myorg/myrepo" (plist-get id :repo))))
+  ;; With Org column enabled:
+  (let* ((magit-dash-gh-pr-show-org t)
+         (pr '((number . 10)
+               (title . "My PR")
+               (updatedAt . "2024-06-01T12:00:00Z")
+               (comments . 2)
+               (reviewDecision . "APPROVED")
+               (statusCheckRollup . ((state . "SUCCESS")))
+               (url . "https://example.com/10")))
+         (entry (magit-dash-gh-pr-dashboard--build-entry pr "myorg/myrepo"))
+         (vec (cadr entry)))
+    (should (= 9 (length vec)))
+    (should (equal "myorg" (aref vec 0)))
+    (should (equal "myrepo" (aref vec 1)))
+    (should (equal "10" (aref vec 3)))))
 
 (ert-deftest magit-dash/build-entry-truncates-long-title ()
   "Titles longer than 36 chars are truncated with an ellipsis."
@@ -1934,8 +1949,7 @@ they are not consulted even when their own auto-* flags are set."
         (should (equal "live-branch" (substring-no-properties branch-cell)))))))
 
 (ert-deftest magit-dash/build-entry-name-replaces-branch-with-placeholder ()
-  "build-entry's Name column shows <B> in place of the branch for worktree rows,
-since the Branch column already displays it."
+  "build-entry's Name column formats clean worktree name without <B> placeholder."
   (let ((magit-dash-columns
          '((name . t) (branch . t) (fetched . nil) (ci . nil) (status . nil)
            (worktree . nil) (sync . nil) (cached . nil)))
@@ -1948,7 +1962,47 @@ since the Branch column already displays it."
                                         :worktree t :branch "feature-1"))
              (entry (magit-dash--build-entry repo))
              (name-cell (aref (cadr entry) 0)))
-        (should (equal "main@<B>" (substring-no-properties name-cell)))))))
+        (should (equal "main@" (substring-no-properties name-cell)))))))
+
+(ert-deftest magit-dash/format-worktree-name-custom-format ()
+  "Worktree name formatting respects `magit-dash-worktree-name-format'."
+  (let ((repo (magit-dash-repo--make :name "myrepo@feature" :path "/tmp/wt"
+                                    :worktree t :branch "feature")))
+    (let ((magit-dash-worktree-name-format "%s@"))
+      (should (equal "myrepo@" (magit-dash--format-worktree-name repo))))
+    (let ((magit-dash-worktree-name-format "%s:w"))
+      (should (equal "myrepo:w" (magit-dash--format-worktree-name repo))))
+    (let ((magit-dash-worktree-name-format "%s"))
+      (should (equal "myrepo" (magit-dash--format-worktree-name repo))))))
+
+(ert-deftest magit-dash/classify-porcelain-status ()
+  "Classify porcelain status into uncommitted, untracked, and submodule dirty flags."
+  (let ((magit-dash--submodule-path-set (make-hash-table :test #'equal))
+        (magit-dash-gh--cache (make-hash-table :test #'equal)))
+    (puthash "/tmp/repo/submodule-dir" "submodule-dir" magit-dash--submodule-path-set)
+    (let ((res (magit-dash--classify-porcelain-status "/tmp/repo" '("?? newfile.txt"))))
+      (should (plist-get res :untracked))
+      (should-not (plist-get res :uncommitted))
+      (should-not (plist-get res :submodule-dirty)))
+    (let ((res (magit-dash--classify-porcelain-status "/tmp/repo" '(" M src/foo.el"))))
+      (should-not (plist-get res :untracked))
+      (should (plist-get res :uncommitted))
+      (should-not (plist-get res :submodule-dirty)))
+    (let ((res (magit-dash--classify-porcelain-status "/tmp/repo" '(" M submodule-dir"))))
+      (should-not (plist-get res :untracked))
+      (should-not (plist-get res :uncommitted))
+      (should (plist-get res :submodule-dirty)))
+    (let ((res (magit-dash--classify-porcelain-status "/tmp/repo" '("?? file.txt" " M src/foo.el" " M submodule-dir"))))
+      (should (plist-get res :untracked))
+      (should (plist-get res :uncommitted))
+      (should (plist-get res :submodule-dirty)))))
+
+(ert-deftest magit-dash/format-status-granular ()
+  "Format status properly displays !, ?, and S for granular states."
+  (should (equal "?" (substring-no-properties (magit-dash--format-status 0 0 nil t nil))))
+  (should (equal "S" (substring-no-properties (magit-dash--format-status 0 0 nil nil t))))
+  (should (equal "! ? S" (substring-no-properties (magit-dash--format-status 0 0 t t t))))
+  (should (equal "↑1 ↓2 ! ? S" (substring-no-properties (magit-dash--format-status 1 2 t t t)))))
 
 (ert-deftest magit-dash/build-entry-name-unchanged-for-non-worktree ()
   "build-entry's Name column is untouched for a plain (non-worktree) repo."
@@ -2335,6 +2389,57 @@ A conflict (e.g. \"b\" and \"bp\" coexisting) causes transient to raise
     (cl-letf (((symbol-function 'tabulated-list-get-id) (lambda () nil))
               ((symbol-function 'derived-mode-p) (lambda (&rest _) t)))
       (should (null (magit-dash--has-auto-sync-p))))))
+
+
+;;; PR badge and submodule auto-pull tests
+
+(ert-deftest magit-dash/repo-is-pr-detection ()
+  "Detect PR status via branch name, cache, or worktree."
+  (let ((magit-dash-gh--cache (make-hash-table :test #'equal)))
+    ;; 1. Branch named pr-12
+    (let ((repo (magit-dash-repo--make :name "r1" :path "/tmp/r1" :branch "pr-12")))
+      (should (magit-dash--repo-is-pr-p repo nil)))
+    ;; 2. Branch named pull/42
+    (let ((repo (magit-dash-repo--make :name "r2" :path "/tmp/r2" :branch "pull/42")))
+      (should (magit-dash--repo-is-pr-p repo nil)))
+    ;; 3. Worktree path with -pr-99
+    (let ((repo (magit-dash-repo--make :name "repo-pr-99" :path "/tmp/repo-pr-99" :worktree t)))
+      (should (magit-dash--repo-is-pr-p repo nil)))
+    ;; 4. Plain branch
+    (let ((repo (magit-dash-repo--make :name "r3" :path "/tmp/r3" :branch "main")))
+      (should-not (magit-dash--repo-is-pr-p repo nil)))
+    ;; 5. Cache flag
+    (let ((repo (magit-dash-repo--make :name "r4" :path "/tmp/r4" :branch "feat")))
+      (magit-dash-gh--cache-set "/tmp/r4" :is-pr t)
+      (should (magit-dash--repo-is-pr-p repo nil)))))
+
+(ert-deftest magit-dash/format-status-with-pr-badge ()
+  "Status indicator includes PR badge when is-pr is non-nil."
+  (let ((magit-dash-status-pr-badge "PR"))
+    (should (equal "PR" (substring-no-properties (magit-dash--format-status 0 0 nil nil nil t))))
+    (should (equal "↑1 ! PR" (substring-no-properties (magit-dash--format-status 1 0 t nil nil t))))))
+
+(ert-deftest magit-dash/submodule-pull-on-fetch-emacs-conf ()
+  "Repo emacs<conf> is matched for submodule pull on fetch."
+  (let ((repo1 (magit-dash-repo--make :name "emacs<conf>" :path "/tmp/emacs-conf"))
+        (repo2 (magit-dash-repo--make :name "ordinary-repo" :path "/tmp/ordinary")))
+    (should (magit-dash--repo-pull-submodules-on-fetch-p repo1))
+    (should-not (magit-dash--repo-pull-submodules-on-fetch-p repo2))))
+
+
+(ert-deftest magit-dash/org-column-enabled ()
+  "When org column is enabled, build-entry extracts the org/owner."
+  (let ((magit-dash-columns
+         '((org . t) (name . t) (branch . nil) (fetched . nil) (status . nil) (worktree . nil)))
+        (magit-dash--worktree-map (make-hash-table :test #'equal)))
+    (cl-letf (((symbol-function 'magit-dash--get-stats-fast)
+               (lambda (_) (list :branch "main"))))
+      (let* ((repo (magit-dash-repo--make :name "myrepo" :path "/tmp/myrepo" :repo "myorg/myrepo"))
+             (entry (magit-dash--build-entry repo))
+             (vec (cadr entry)))
+        (should (= 2 (length vec)))
+        (should (equal "myorg" (aref vec 0)))
+        (should (equal "myrepo" (substring-no-properties (aref vec 1))))))))
 
 (provide 'test-magit-dash)
 
@@ -3723,3 +3828,34 @@ The bug was that add-text-properties returns t, not the modified string."
      (cl-letf (((symbol-function 'magit-dash-gh-ci-fetch-batch) (lambda (&rest _) nil)))
        (magit-dash-refresh)
        (should cancelled)))))
+
+(ert-deftest magit-dash/transient-menus-selector-conventions ()
+  "Ensure all transient menu selectors are 1 or 2 lowercase letters or symbols."
+  (let ((prefixes '(magit-dash-menu
+                    magit-dash-gh-pr-dashboard-menu
+                    magit-dash-gh-pr-views-menu
+                    magit-dash-gh-menu
+                    magit-dash-status-ci-menu
+                    magit-dash-status-pr-menu
+                    magit-dash-dispatch
+                    magit-dash-bump-submodules-menu))
+        (violations nil))
+    (cl-labels ((walk (elem)
+                  (cond
+                   ((vectorp elem)
+                    (seq-mapcat #'walk elem))
+                   ((and (listp elem) (memq (car elem) '(transient-suffix transient-switch transient-argument)))
+                    (list (plist-get (cdr elem) :key)))
+                   ((listp elem)
+                    (seq-mapcat #'walk elem))
+                   (t nil))))
+      (dolist (p prefixes)
+        (when-let* ((layout (get p 'transient--layout)))
+          (dolist (k (walk layout))
+            (unless (or (string-match-p "^[a-z]\\{1,2\\}$" k)
+                        (string-match-p "^-[a-z]\\{1,2\\}$" k)
+                        (string-match-p "^[-/=_.!]$" k)
+                        (string-match-p "^C-[a-z]$" k)
+                        (member k '("RET" "SPC")))
+              (push (list p k) violations))))))
+    (should (null violations))))

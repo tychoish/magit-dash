@@ -241,6 +241,90 @@ Creates an artifact directory under plans/ containing:
 
 ;;;; PR dashboard mode
 
+(defvar magit-dash-gh-pr-columns
+  '((org . nil) (repo . t) (worktree . t) (pr . t) (title . t) (ci . t) (age . t) (comments . t) (review . t))
+  "Alist of (COLUMN-SYMBOL . ENABLED) for the PR dashboard.
+Persisted across sessions via `savehist-additional-variables'.")
+
+(add-to-list 'savehist-additional-variables 'magit-dash-gh-pr-columns)
+
+(defconst magit-dash-gh-pr--all-columns
+  '(org repo worktree pr title ci age comments review)
+  "All available PR dashboard columns in display order.")
+
+(defconst magit-dash-gh-pr--column-defs
+  '((org      . ("Org"     10 t))
+    (repo     . ("Repo"    16 t))
+    (worktree . ("WT"      3  t))
+    (pr       . ("PR#"     5  nil))
+    (title    . ("Title"   38 t))
+    (ci       . ("CI"      8  t))
+    (age      . ("Age"     6  nil))
+    (comments . ("Cmts"    4  nil))
+    (review   . ("Review"  14 t)))
+  "Alist of COLUMN-SYMBOL to default (LABEL WIDTH SORTABLE) for PR columns.
+Org and Repo widths are computed dynamically in `magit-dash-gh-pr-dashboard--build-format'.")
+
+(defcustom magit-dash-gh-pr-show-org nil
+  "When non-nil, display a separate Org column in the PR dashboard.
+Kept in sync with `magit-dash-gh-pr-columns'."
+  :type 'boolean
+  :group 'magit-dash
+  :set (lambda (sym val)
+         (set-default sym val)
+         (when (boundp 'magit-dash-gh-pr-columns)
+           (setf (alist-get 'org magit-dash-gh-pr-columns) (and val t)))))
+
+(defun magit-dash-gh-pr--column-enabled-p (col)
+  "Return non-nil when column COL is enabled in `magit-dash-gh-pr-columns'."
+  (if (eq col 'org)
+      (or (and (boundp 'magit-dash-gh-pr-show-org) magit-dash-gh-pr-show-org)
+          (cdr (assq 'org magit-dash-gh-pr-columns)))
+    (if-let* ((entry (assq col magit-dash-gh-pr-columns)))
+        (cdr entry)
+      nil)))
+
+(defun magit-dash-gh-pr--active-columns ()
+  "Return PR column symbols that are currently enabled, in display order."
+  (seq-filter #'magit-dash-gh-pr--column-enabled-p
+              magit-dash-gh-pr--all-columns))
+
+(defun magit-dash-gh-pr-toggle-column (col)
+  "Toggle visibility of column COL in the PR dashboard and refresh."
+  (interactive
+   (list (intern (completing-read "Toggle PR column: "
+                                  (seq-map #'symbol-name
+                                           magit-dash-gh-pr--all-columns)
+                                  nil t))))
+  (let ((new-val (not (magit-dash-gh-pr--column-enabled-p col))))
+    (setf (alist-get col magit-dash-gh-pr-columns) new-val)
+    (when (eq col 'org)
+      (setq magit-dash-gh-pr-show-org new-val)))
+  (when (derived-mode-p 'magit-dash-gh-pr-dashboard-mode)
+    (setq tabulated-list-format (magit-dash-gh-pr-dashboard--build-format))
+    (tabulated-list-init-header)
+    (when tabulated-list-entries
+      (setq tabulated-list-entries
+            (seq-map (lambda (entry)
+                       (let ((id (car entry)))
+                         (magit-dash-gh-pr-dashboard--build-entry
+                          (plist-get id :pr)
+                          (plist-get id :repo))))
+                     tabulated-list-entries))
+      (tabulated-list-print t))
+    (magit-dash-gh-pr-dashboard-refresh)))
+
+(defun magit-dash-gh-pr-toggle-org ()
+  "Toggle visibility of the Org column in the PR dashboard."
+  (interactive)
+  (magit-dash-gh-pr-toggle-column 'org))
+
+(defun magit-dash-gh-pr--split-slug (slug)
+  "Split SLUG (owner/repo or repo) into cons (OWNER . REPO)."
+  (if (and slug (string-match "\\`\\([^/]+\\)/\\([^/]+\\)\\'" slug))
+      (cons (match-string 1 slug) (match-string 2 slug))
+    (cons "" (or slug ""))))
+
 (defvar-local magit-dash-gh-pr-dashboard--filters
   (list :state "open" :author "@me" :repo nil :org nil)
   "Current PR dashboard filters plist.
@@ -262,44 +346,65 @@ Keys: :state (\"open\"/\"closed\"), :author, :repo (OWNER/NAME), :org.")
   :group 'magit-dash)
 
 (defun magit-dash-gh-pr-dashboard--build-format (&optional width entries)
-  "Return the `tabulated-list-format' vector with an elastic Repo column.
-WIDTH is the available window width; when nil, `window-width' is used.
-ENTRIES is the list of tabulated-list entries; when nil,
-`tabulated-list-entries' is used if bound.
-Repo column is capped at the longest repo name + 3 (minimum 4 for header)."
+  "Return the `tabulated-list-format' vector with elastic columns using active columns.
+WIDTH is available window width; when nil, `window-width' is used.
+ENTRIES is the list of tabulated-list entries."
   (let* ((ents (or entries (and (boundp 'tabulated-list-entries) tabulated-list-entries)))
+         (active (magit-dash-gh-pr--active-columns))
+         (show-org (magit-dash-gh-pr--column-enabled-p 'org))
          (raw-repo (when ents
                      (seq-reduce (lambda (w e)
-                                   (max w (length (or (plist-get (car e) :repo)
-                                                      (and (vectorp (cadr e)) (aref (cadr e) 0))
-                                                      ""))))
+                                   (let* ((slug (or (plist-get (car e) :repo) ""))
+                                          (pair (magit-dash-gh-pr--split-slug slug))
+                                          (name (if show-org (cdr pair) (if (string-empty-p (cdr pair)) (car pair) (cdr pair)))))
+                                     (max w (length name))))
                                  ents 0)))
+         (raw-org (when (and show-org ents)
+                    (seq-reduce (lambda (w e)
+                                  (let* ((slug (or (plist-get (car e) :repo) ""))
+                                         (pair (magit-dash-gh-pr--split-slug slug)))
+                                    (max w (length (car pair)))))
+                                ents 0)))
+         (org-width (if show-org (max 6 (+ (or raw-org 3) 2)) 0))
+         (fixed-width (seq-reduce
+                       (lambda (acc col)
+                         (if (and (not (eq col 'repo))
+                                  (not (eq col 'org)))
+                             (+ acc (cadr (alist-get col magit-dash-gh-pr--column-defs)))
+                           acc))
+                       active 0))
+         (avail-repo (max (length "Repo")
+                          (- (or width (window-width)) (+ fixed-width org-width 2))))
          (repo-cap (and raw-repo (> raw-repo 0) (max (length "Repo") (+ raw-repo 3))))
-         (avail-repo (max (length "Repo") (- (or width (window-width)) 75)))
          (repo-width (if repo-cap
                          (min avail-repo repo-cap)
                        (max 12 avail-repo))))
-    (vector (list "Repo" repo-width t)
-            '("PR#" 5 nil)
-            '("Title" 38 t)
-            '("CI" 8 t)
-            '("Age" 6 nil)
-            '("Cmts" 4 nil)
-            '("Review" 14 t))))
+    (apply #'vector
+           (seq-map (lambda (col)
+                      (pcase col
+                        ('org  `("Org"  ,org-width  t))
+                        ('repo `("Repo" ,repo-width t))
+                        (_     (alist-get col magit-dash-gh-pr--column-defs))))
+                    active))))
 
 (defvar magit-dash-gh-pr-dashboard-mode-map
   (let ((m (make-sparse-keymap)))
     (define-key m (kbd "RET") #'magit-dash-gh-pr-dashboard-open-browser)
     (define-key m (kbd "w")   #'magit-dash-gh-pr-dashboard-open-worktree)
     (define-key m (kbd "W")   #'magit-dash-gh-pr-dashboard-open-worktree)
+    (define-key m (kbd "d")   #'magit-dash-gh-pr-dashboard-open-dired)
+    (define-key m (kbd "O")   #'magit-dash-gh-pr-toggle-org)
+    (define-key m (kbd "T")   #'magit-dash-gh-pr-toggle-column)
+    (define-key m (kbd "v")   #'magit-dash-gh-pr-dashboard-switch-view)
     (define-key m (kbd "g")   #'magit-dash-gh-pr-dashboard-refresh)
     (define-key m (kbd "r")   #'magit-dash-gh-pr-dashboard-refresh)
     (define-key m (kbd "f")   #'magit-dash-gh-pr-dashboard-set-filter)
+    (define-key m (kbd "/")   #'magit-dash-gh-pr-dashboard-set-filter)
     (define-key m (kbd "F")   #'magit-dash-gh-pr-dashboard-clear-filters)
     (define-key m (kbd "c")   #'magit-dash-gh-pr-dashboard-fetch-ci)
+    (define-key m (kbd "q")   #'magit-dash-gh-pr-dashboard-quit)
     (define-key m (kbd "m")   #'magit-dash-gh-pr-dashboard-menu)
     (define-key m (kbd "?")   #'magit-dash-gh-pr-dashboard-menu)
-    (define-key m (kbd "q")   #'quit-window)
     m)
   "Keymap for `magit-dash-gh-pr-dashboard-mode'.")
 (define-derived-mode magit-dash-gh-pr-dashboard-mode tabulated-list-mode "PRs"
@@ -309,6 +414,53 @@ Repo column is capped at the longest repo name + 3 (minimum 4 for header)."
   (tabulated-list-init-header)
   (setq-local magit-dash-gh-pr-dashboard--filters
               (list :state "open" :author nil :repo nil :org nil)))
+
+(defun magit-dash-gh-pr--parse-status-rollup (rollup)
+  "Calculate overall CI state from GitHub ROLLUP check runs or contexts.
+ROLLUP may be a list of check runs/contexts, a vector, or an alist with `state'.
+Returns \"SUCCESS\", \"FAILURE\", \"PENDING\", \"ERROR\", or nil."
+  (cond
+   ((null rollup) nil)
+   ;; Single object fallback with `state' (alist, plist, or hash-table)
+   ((and (consp rollup) (consp (car rollup)) (symbolp (caar rollup))
+         (or (assq 'state rollup) (assq :state rollup)))
+    (upcase (format "%s" (or (alist-get 'state rollup) (alist-get :state rollup)))))
+   ((and (listp rollup) (keywordp (car-safe rollup)) (plist-get rollup :state))
+    (upcase (format "%s" (plist-get rollup :state))))
+   (t
+    (let ((items (if (vectorp rollup) (append rollup nil) rollup)))
+      (if (null items)
+          nil
+        (let ((has-failure nil)
+              (has-pending nil)
+              (has-success nil))
+          (dolist (item items)
+            (when (or (consp item) (hash-table-p item))
+              (let* ((state (when-let* ((s (or (map-elt item 'state) (map-elt item :state))))
+                              (upcase (format "%s" s))))
+                     (status (when-let* ((s (or (map-elt item 'status) (map-elt item :status))))
+                               (upcase (format "%s" s))))
+                     (conclusion (when-let* ((c (or (map-elt item 'conclusion) (map-elt item :conclusion))))
+                                   (upcase (format "%s" c)))))
+                (cond
+                 ;; Direct failure conclusion or error/failure state
+                 ((or (member conclusion '("FAILURE" "TIMED_OUT" "STARTUP_FAILURE" "ACTION_REQUIRED" "CANCELLED"))
+                      (member state '("FAILURE" "ERROR")))
+                  (setq has-failure t))
+                 ;; In-progress / pending status or state
+                 ((or (member status '("IN_PROGRESS" "QUEUED" "WAITING" "PENDING" "REQUESTED"))
+                      (equal state "PENDING")
+                      (and (not (equal status "COMPLETED")) (or (null conclusion) (string-empty-p conclusion))))
+                  (setq has-pending t))
+                 ;; Completed success
+                 ((or (member conclusion '("SUCCESS" "NEUTRAL" "SKIPPED"))
+                      (equal state "SUCCESS"))
+                  (setq has-success t))))))
+          (cond
+           (has-failure "FAILURE")
+           (has-pending "PENDING")
+           (has-success "SUCCESS")
+           (t nil))))))))
 
 (defun magit-dash-gh-pr-dashboard--format-ci (rollup-state)
   "Format CI ROLLUP-STATE string for display."
@@ -353,7 +505,8 @@ Otherwise uses `gh search prs' for cross-repo listing."
   (let* ((state (or (plist-get filters :state) "open"))
          (repo (plist-get filters :repo))
          (author (plist-get filters :author))
-         (org (plist-get filters :org)))
+         (org (plist-get filters :org))
+         (review-requested (plist-get filters :review-requested)))
     (if repo
         (append
          (list "pr" "list" "-R" repo "--state" state
@@ -368,6 +521,8 @@ Otherwise uses `gh search prs' for cross-repo listing."
              "number,title,state,repository,author,updatedAt,commentsCount,isDraft,url")
        (when author
          (list "--author" author))
+       (when review-requested
+         (list "--review-requested" review-requested))
        (when org
          (list "--owner" org))))))
 
@@ -375,19 +530,39 @@ Otherwise uses `gh search prs' for cross-repo listing."
   "Maximum display width for PR title column.")
 
 (defun magit-dash-gh-pr-dashboard--build-entry (pr repo-name)
-  "Return a `tabulated-list-entries' entry for PR alist in REPO-NAME."
-  (let ((number (map-elt pr 'number)))
-    (list (list :number number :repo repo-name :pr pr)
-          (vector
-           repo-name
-           (number-to-string number)
-           (truncate-string-to-width
-            (or (map-elt pr 'title) "") magit-dash-gh-pr-dashboard--title-width nil nil "…")
-           (magit-dash-gh-pr-dashboard--format-ci
-            (map-elt (map-elt pr 'statusCheckRollup) 'state))
-           (or (magit-dash-gh-pr-dashboard--format-age (map-elt pr 'updatedAt)) "?")
-           (number-to-string (magit-dash-gh-pr-dashboard--comments-count pr))
-           (magit-dash-gh-pr-dashboard--format-review (map-elt pr 'reviewDecision))))))
+  "Return a `tabulated-list-entries' entry for PR alist in REPO-NAME using active columns."
+  (let* ((number (map-elt pr 'number))
+         (entry-id (list :number number :repo repo-name :pr pr))
+         (pair (magit-dash-gh-pr--split-slug repo-name))
+         (org-str (car pair))
+         (short-repo (if (string-empty-p (cdr pair)) (car pair) (cdr pair)))
+         (active (magit-dash-gh-pr--active-columns)))
+    (list entry-id
+          (apply #'vector
+                 (seq-map
+                  (lambda (col)
+                    (pcase col
+                      ('org org-str)
+                      ('repo short-repo)
+                      ('worktree
+                       (if (magit-dash-gh-pr-dashboard--worktree-exists-p entry-id)
+                           (propertize "✓" 'face 'success)
+                         (propertize "·" 'face 'shadow)))
+                      ('pr (number-to-string number))
+                      ('title
+                       (truncate-string-to-width
+                        (or (map-elt pr 'title) "")
+                        magit-dash-gh-pr-dashboard--title-width nil nil "…"))
+                      ('ci
+                       (magit-dash-gh-pr-dashboard--format-ci
+                        (magit-dash-gh-pr--parse-status-rollup (map-elt pr 'statusCheckRollup))))
+                      ('age
+                       (or (magit-dash-gh-pr-dashboard--format-age (map-elt pr 'updatedAt)) "?"))
+                      ('comments
+                       (number-to-string (magit-dash-gh-pr-dashboard--comments-count pr)))
+                      ('review
+                       (magit-dash-gh-pr-dashboard--format-review (map-elt pr 'reviewDecision)))))
+                  active)))))
 
 (defun magit-dash-gh-pr-dashboard--parse-output (output filters)
   "Parse gh JSON OUTPUT into tabulated list entries using FILTERS for context.
@@ -430,21 +605,43 @@ OUTPUT is `gh pr list' JSON with `number' and `statusCheckRollup' fields."
             (tabulated-list-print t)))))))
 
 (defun magit-dash-gh-pr-dashboard--enrich-ci (buf state dir)
-  "Fetch CI status per repo and merge it into BUF's rows for STATE.
+  "Fetch CI status per repo and merge it into BUF's rows for STATE using `gen-run-async'.
 Used for aggregate (cross-repo) views, whose listing endpoint does not
 return `statusCheckRollup'.  DIR is the working directory for `gh'."
   (when (buffer-live-p buf)
-    (let ((repos (delete-dups
-                  (with-current-buffer buf
-                    (seq-map (lambda (entry) (plist-get (car entry) :repo))
-                              tabulated-list-entries)))))
-      (dolist (repo repos)
-        (magit-dash-gh--run-process
-         (list "pr" "list" "-R" repo "--state" state
-               "--json" "number,statusCheckRollup" "--limit" "200")
-         dir
-         (lambda (output) (magit-dash-gh-pr-dashboard--merge-ci buf repo output))
-         (lambda (_output _code) nil))))))
+    (let* ((repos (delete-dups
+                   (with-current-buffer buf
+                     (seq-remove #'null
+                                 (seq-map (lambda (entry) (plist-get (car entry) :repo))
+                                          tabulated-list-entries)))))
+           (limit (or (bound-and-true-p magit-dash-max-concurrent-ci-jobs)
+                      (max 2 (round (* 1.5 (if (fboundp 'num-processors)
+                                               (num-processors)
+                                             4)))))))
+      (if (fboundp 'gen-run-async)
+          (gen-run-async
+           (lambda (repo done)
+             (if (not (buffer-live-p buf))
+                 (funcall done)
+               (magit-dash-gh--run-process
+                (list "pr" "list" "-R" repo "--state" state
+                      "--json" "number,statusCheckRollup" "--limit" "200")
+                dir
+                (lambda (output)
+                  (magit-dash-gh-pr-dashboard--merge-ci buf repo output)
+                  (funcall done))
+                (lambda (_output _code)
+                  (funcall done)))))
+           repos
+           :concurrency limit
+           :delay (or (bound-and-true-p magit-dash-queue-yield-delay) 0.0))
+        (dolist (repo repos)
+          (magit-dash-gh--run-process
+           (list "pr" "list" "-R" repo "--state" state
+                 "--json" "number,statusCheckRollup" "--limit" "200")
+           dir
+           (lambda (output) (magit-dash-gh-pr-dashboard--merge-ci buf repo output))
+           (lambda (_output _code) nil)))))))
 
 (defun magit-dash-gh-pr-dashboard-refresh ()
   "Fetch PRs matching current filters and repopulate the PR table."
@@ -454,8 +651,6 @@ return `statusCheckRollup'.  DIR is the working directory for `gh'."
          (buf (current-buffer))
          (dir (or (ignore-errors (magit-dash-gh--repo-dir))
                   (expand-file-name "~"))))
-    (setq tabulated-list-entries nil)
-    (tabulated-list-print t)
     (message "magit-gh: fetching PRs...")
     (magit-dash-gh--run-process
      args dir
@@ -513,6 +708,71 @@ return `statusCheckRollup'.  DIR is the working directory for `gh'."
           (plist-put (copy-sequence current) key new-val))
     (magit-dash-gh-pr-dashboard-refresh)))
 
+(defvar magit-dash-gh-pr-view-history nil
+  "History list for `magit-dash-gh-pr-dashboard-switch-view'.")
+
+(defun magit-dash-gh-pr-dashboard-switch-view (&optional view-key)
+  "Switch the PR dashboard to a preset view (VIEW-KEY).
+Interactively prompts with available PR views."
+  (interactive)
+  (let* ((candidates
+          '(("all"          . "All open PRs (aggregated across tracked repos)")
+            ("my-prs"       . "Authored by me (@me)")
+            ("needs-review" . "Review requested (@me)")
+            ("repo"         . "Filtered by repository…")
+            ("closed"       . "Closed / Merged pull requests")))
+         (choice (or view-key
+                     (if (fboundp 'acr-completing-read)
+                         (acr-completing-read
+                          "Switch PR view: "
+                          (mapcar #'car candidates)
+                          :annotation-fn (lambda (k) (concat "  " (alist-get k candidates nil nil #'equal)))
+                          :history 'magit-dash-gh-pr-view-history)
+                       (completing-read
+                        "Switch PR view: "
+                        (mapcar (lambda (c) (format "%-14s %s" (car c) (cdr c))) candidates)
+                        nil t)))))
+    (let ((key (if (string-match "\\`\\([^ ]+\\)" choice)
+                   (match-string 1 choice)
+                 choice)))
+      (pcase key
+        ("all"
+         (setq magit-dash-gh-pr-dashboard--filters
+               (list :state "open" :author nil :repo nil :org nil)))
+        ("my-prs"
+         (setq magit-dash-gh-pr-dashboard--filters
+               (list :state "open" :author "@me" :repo nil :org nil)))
+        ("needs-review"
+         (setq magit-dash-gh-pr-dashboard--filters
+               (list :state "open" :author nil :repo nil :org nil :review-requested "@me")))
+        ("repo"
+         (let* ((repo-list (when (boundp 'magit-dash-repo-list)
+                             (seq-filter #'magit-dash-repo-upstream-repo magit-dash-repo-list)))
+                (choices (if repo-list
+                             (mapcar #'magit-dash-repo-upstream-repo repo-list)
+                           nil))
+                (selected (if choices
+                              (completing-read "Select repository: " choices nil t)
+                            (read-string "Repository (OWNER/NAME): "))))
+           (setq magit-dash-gh-pr-dashboard--filters
+                 (list :state "open" :author nil :repo selected :org nil))))
+        ("closed"
+         (setq magit-dash-gh-pr-dashboard--filters
+               (list :state "closed" :author nil :repo nil :org nil))))
+      (magit-dash-gh-pr-dashboard-refresh))))
+
+(defun magit-dash-gh-pr-dashboard-quit ()
+  "Quit the PR dashboard.
+Deletes the window (restoring window layout if split beneath) and buries the buffer."
+  (interactive)
+  (let ((buf (current-buffer))
+        (win (selected-window)))
+    (if (> (length (window-list)) 1)
+        (progn
+          (bury-buffer buf)
+          (delete-window win))
+      (bury-buffer buf))))
+
 (defun magit-dash-gh-pr-dashboard-clear-filters ()
   "Reset all dashboard filters to their defaults (open PRs) and refresh."
   (interactive)
@@ -524,16 +784,29 @@ return `statusCheckRollup'.  DIR is the working directory for `gh'."
   "Buffer name for the pull request dashboard.")
 
 ;;;###autoload
-(defun magit-gh-pr-dash ()
+(defun magit-gh-pr-dash (&optional repo)
   "Open the GitHub pull request dashboard buffer.
-Aggregates all open PRs by default across repositories."
+When opened from a repository dashboard window, splits the window beneath.
+Aggregates all open PRs by default across repositories, or for REPO when provided."
   (interactive)
   (magit-dash-gh--check-gh)
-  (let ((buf (get-buffer-create magit-dash-gh-pr-buffer-name)))
+  (let* ((orig-buf (current-buffer))
+         (orig-win (selected-window))
+         (from-dash (or (derived-mode-p 'magit-dash-mode)
+                        (string= (buffer-name orig-buf) (or (bound-and-true-p magit-dash-buffer-name) "*magit-dash-repos*"))))
+         (buf (get-buffer-create magit-dash-gh-pr-buffer-name)))
     (with-current-buffer buf
       (magit-dash-gh-pr-dashboard-mode)
+      (when repo
+        (setq magit-dash-gh-pr-dashboard--filters
+              (plist-put (copy-sequence magit-dash-gh-pr-dashboard--filters) :repo repo)))
       (magit-dash-gh-pr-dashboard-refresh))
-    (pop-to-buffer buf)))
+    (if (and from-dash (window-live-p orig-win))
+        (let ((pr-win (or (get-buffer-window buf)
+                          (split-window orig-win (max 10 (/ (window-total-height orig-win) 2)) 'below))))
+          (set-window-buffer pr-win buf)
+          (select-window pr-win))
+      (pop-to-buffer buf))))
 
 ;;;###autoload
 (defalias 'magit-dash-gh-pr-dashboard-open #'magit-gh-pr-dash)
@@ -596,6 +869,35 @@ Signals `user-error' when no GitHub repository can be determined."
   (magit-dash-gh-pr-dashboard--open-with-filters
    (list :state "open" :author "@me"
          :repo (magit-dash-gh-pr-dashboard--current-repo-slug) :org nil)))
+
+(defun magit-dash-gh-pr-dashboard--worktree-path (entry)
+  "Return existing or projected worktree path for PR ENTRY."
+  (let* ((pr-num (plist-get entry :number))
+         (repo (plist-get entry :repo))
+         (local-path (magit-dash-gh-pr-dashboard--find-local-path repo)))
+    (when local-path
+      (let* ((repo-dir (expand-file-name local-path))
+             (repo-base (file-name-nondirectory (directory-file-name repo-dir))))
+        (expand-file-name (format "%s-pr-%d" repo-base pr-num)
+                          (file-name-directory (directory-file-name repo-dir)))))))
+
+(defun magit-dash-gh-pr-dashboard--worktree-exists-p (entry)
+  "Return non-nil if a local worktree directory exists for PR ENTRY."
+  (when-let* ((wt-dir (magit-dash-gh-pr-dashboard--worktree-path entry)))
+    (file-directory-p wt-dir)))
+
+(defun magit-dash-gh-pr-dashboard-open-dired (&optional entry)
+  "Open Dired in the worktree for the pull request at point (or ENTRY).
+If the worktree does not exist yet, creates it first."
+  (interactive)
+  (let* ((entry (or entry (magit-dash-gh-pr-dashboard--entry-at-point)))
+         (wt-dir (magit-dash-gh-pr-dashboard--worktree-path entry)))
+    (if (and wt-dir (file-directory-p wt-dir))
+        (dired wt-dir)
+      (magit-dash-gh-pr-dashboard-open-worktree entry)
+      (when-let* ((dir (magit-dash-gh-pr-dashboard--worktree-path entry)))
+        (when (file-directory-p dir)
+          (dired dir))))))
 
 (defun magit-dash-gh-pr-dashboard--find-local-path (repo-slug)
   "Return a local checkout path for REPO-SLUG (owner/name), or nil.
@@ -661,16 +963,21 @@ its magit status buffer."
 (transient-define-prefix magit-dash-gh-pr-dashboard-menu ()
   "Actions for the PR dashboard."
   [["Pull Request"
-    ("RET" "Open in browser"       magit-dash-gh-pr-dashboard-open-browser)
-    ("w"   "Open worktree for PR"  magit-dash-gh-pr-dashboard-open-worktree)]
+    ("b"   "Open in browser"       magit-dash-gh-pr-dashboard-open-browser)]
+   ["Worktree"
+    ("w"   "Open Magit in worktree" magit-dash-gh-pr-dashboard-open-worktree)
+    ("d"   "Open Dired in worktree" magit-dash-gh-pr-dashboard-open-dired)]
    ["CI"
     ("ci"  "Fetch CI logs"         magit-dash-gh-pr-dashboard-fetch-ci)]
-   ["Filter"
+   ["View & Filter"
+    ("v"   "Switch view…"          magit-dash-gh-pr-dashboard-switch-view)
+    ("tc"  "Toggle column…"        magit-dash-gh-pr-toggle-column)
+    ("to"  "Toggle Org column"     magit-dash-gh-pr-toggle-org)
     ("fs"  "Set filter…"           magit-dash-gh-pr-dashboard-set-filter)
     ("fc"  "Clear all filters"     magit-dash-gh-pr-dashboard-clear-filters)]
    ["Dashboard"
     ("g"   "Refresh"               magit-dash-gh-pr-dashboard-refresh)
-    ("q"   "Quit"                  quit-window)]])
+    ("q"   "Quit"                  magit-dash-gh-pr-dashboard-quit)]])
 
 ;;;###autoload (autoload 'magit-dash-gh-pr-views-menu "magit-dash-gh-pr" nil t)
 (transient-define-prefix magit-dash-gh-pr-views-menu ()

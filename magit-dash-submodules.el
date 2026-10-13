@@ -375,8 +375,8 @@ children are committed and pushed before their parents record the new hashes."
   :value '("--push")
   [["Options"
     ("-f" "Fetch remotes before committing" "--fetch")
-    ("-p" "Pull (--rebase) before committing" "--pull")
-    ("-P" "Push after committing (default on)" "--push")
+    ("-u" "Pull (--rebase) before committing" "--pull")
+    ("-p" "Push after committing (default on)" "--push")
     ("-n" "Dry run: log without making changes" "--dry-run")
     ("-r" "Recursive: walk up to topmost parent" "--recursive")]
    ["Actions"
