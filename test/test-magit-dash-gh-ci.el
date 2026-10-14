@@ -122,3 +122,32 @@ passes nil explicitly to exercise the disabled case."
 
 (provide 'test-magit-dash-gh-ci)
 ;;; test-magit-dash-gh-ci.el ends here
+
+(ert-deftest magit-dash-gh-ci/parse-runs-failure-in-any-workflow-wins ()
+  (let ((ci (magit-dash-gh-ci--parse-runs
+             '(((headSha . "a") (status . "completed") (conclusion . "success")
+                (databaseId . 1) (url . "u1"))
+               ((headSha . "a") (status . "completed") (conclusion . "failure")
+                (databaseId . 2) (url . "u2"))
+               ((headSha . "old") (status . "completed") (conclusion . "failure")
+                (databaseId . 3) (url . "u3"))))))
+    (should (equal "failure" (plist-get ci :conclusion)))
+    (should (equal 2 (plist-get ci :run-id)))
+    (should (equal 2 (plist-get ci :total)))))
+
+(ert-deftest magit-dash-gh-ci/parse-runs-ignores-older-commits ()
+  (let ((ci (magit-dash-gh-ci--parse-runs
+             '(((headSha . "a") (status . "completed") (conclusion . "success")
+                (databaseId . 1))
+               ((headSha . "old") (status . "completed") (conclusion . "failure")
+                (databaseId . 3))))))
+    (should (equal "success" (plist-get ci :conclusion)))))
+
+(ert-deftest magit-dash-gh-ci/parse-runs-pending-when-any-running ()
+  (let ((ci (magit-dash-gh-ci--parse-runs
+             '(((headSha . "a") (status . "completed") (conclusion . "success")
+                (databaseId . 1))
+               ((headSha . "a") (status . "in_progress") (conclusion . "")
+                (databaseId . 2))))))
+    (should (equal "in_progress" (plist-get ci :status)))
+    (should-not (plist-get ci :conclusion))))

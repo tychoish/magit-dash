@@ -76,26 +76,43 @@
 
 (defun magit-dash-gh-ci--parse-runs (runs)
   "Return a CI status plist summarising RUNS (list of alists from gh run list).
-Returns nil when RUNS is nil or empty."
+Only runs for the newest commit (by `headSha') are considered, since a commit
+triggers several workflows and the newest run alone may be a passing one while
+another workflow failed.  The overall :conclusion is \"failure\" if any such
+run failed, else :status is \"in_progress\" if any is still running, else the
+newest run's result.  :run-id and :url point at the first failing run when
+there is one.  Returns nil when RUNS is nil or empty."
   (when runs
-    (let* ((latest (car runs))
-           (conclusion (map-elt latest 'conclusion))
-           (status (map-elt latest 'status))
-           (run-id (map-elt latest 'databaseId))
-           (url (map-elt latest 'url))
+    (let* ((sha (map-elt (car runs) 'headSha))
+           (current (if sha
+                        (seq-filter (lambda (r) (equal sha (map-elt r 'headSha)))
+                                    runs)
+                      (list (car runs))))
+           (failed (seq-find (lambda (r)
+                               (magit-dash-gh-ci--failure-p (map-elt r 'conclusion)))
+                             current))
+           (pending (seq-find (lambda (r)
+                                (member (map-elt r 'status)
+                                        '("in_progress" "queued" "waiting" "pending")))
+                              current))
+           (latest (or failed pending (car current)))
            (pass (seq-count (lambda (r)
                               (equal "success" (map-elt r 'conclusion)))
-                            runs))
+                            current))
            (fail (seq-count (lambda (r)
                               (magit-dash-gh-ci--failure-p (map-elt r 'conclusion)))
-                            runs)))
-      (list :conclusion conclusion
-            :status status
+                            current)))
+      (list :conclusion (cond (failed (map-elt failed 'conclusion))
+                              (pending nil)
+                              (t (map-elt latest 'conclusion)))
+            :status (cond (failed "completed")
+                          (pending (map-elt pending 'status))
+                          (t (map-elt latest 'status)))
             :pass pass
             :fail fail
-            :total (length runs)
-            :run-id run-id
-            :url url))))
+            :total (length current)
+            :run-id (map-elt latest 'databaseId)
+            :url (map-elt latest 'url)))))
 
 ;;; Display
 
@@ -137,8 +154,8 @@ Caches the result as :ci-status in the shared magit-dash-gh cache."
         (magit-dash-gh--run-process
          (list "run" "list"
                "--branch" branch
-               "--limit" "5"
-               "--json" "databaseId,name,status,conclusion,url,workflowName")
+               "--limit" "20"
+               "--json" "databaseId,name,status,conclusion,url,workflowName,headSha")
          path
          (lambda (output)
            (let* ((runs (condition-case nil
