@@ -2058,57 +2058,120 @@ space they split it proportionally."
 
 (defvar magit-dash-mode-map
   (let ((m (make-sparse-keymap)))
+    ;; Navigation & primary inspection (single key)
     (define-key m (kbd "RET") #'magit-dash-magit-status)
     (define-key m (kbd "SPC") #'magit-dash-toggle-mark)
-    (define-key m (kbd "a")   #'magit-dash-auto-sync)
-    (define-key m (kbd "A")   #'magit-dash-commit-all)
-    (define-key m (kbd "b")   #'magit-dash-visit-buffer)
-    (define-key m (kbd "B")   #'magit-dash-switch-branch)
-    (define-key m (kbd "c")   #'magit-dash-magit-commit)
-    (define-key m (kbd "C")   #'magit-dash-commit)
     (define-key m (kbd "d")   #'magit-dash-magit-diff)
     (define-key m (kbd "e")   #'magit-dash-find-file)
-    (define-key m (kbd "f")   #'magit-dash-fetch)
-    (define-key m (kbd "F")   #'magit-dash-fetch-all)
-    (define-key m (kbd "g")   #'magit-dash-refresh)
-    (define-key m (kbd "G")   #'magit-dash-stage-all)
+    (define-key m (kbd "o")   #'magit-dash-open-repo)
+    (define-key m (kbd "q")   #'quit-window)
+    (define-key m (kbd "?")   #'magit-dash-menu)
+    (define-key m (kbd "!")   #'magit-dash-magit-dispatch)
+    (define-key m (kbd "/")   #'magit-dash-hide-select)
+    (define-key m (kbd "y")   #'magit-dash-prune-branches)
+
+    ;; Refresh operations
+    (define-key m (kbd "r")     #'magit-dash-refresh-repo)
+    (define-key m (kbd "R")     #'magit-dash-refresh-repo)
+    (define-key m (kbd "g")     #'magit-dash-refresh)
+    (define-key m (kbd "M-r")   #'magit-dash-hard-refresh)
+    (define-key m (kbd "C-c r") #'magit-dash-hard-refresh)
+
+    ;; Mark & menu operations
+    (define-key m (kbd "*")   #'magit-dash-unmark-all)
+    (define-key m (kbd "m m") #'magit-dash-menu)
+    (define-key m (kbd "m ?") #'magit-dash-menu)
+    (define-key m (kbd "m t") #'magit-dash-mark-by-tag)
+    (define-key m (kbd "m c") #'magit-dash-unmark-all)
+
+    ;; Fetch prefix: f
+    (define-key m (kbd "f f") #'magit-dash-fetch)
+    (define-key m (kbd "f r") #'magit-dash-fetch)
+    (define-key m (kbd "f a") #'magit-dash-fetch-all)
+
+    ;; Pull prefix: u
+    (define-key m (kbd "u u") #'magit-dash-pull)
+    (define-key m (kbd "u r") #'magit-dash-pull)
+    (define-key m (kbd "u a") #'magit-dash-pull-all)
+
+    ;; Push & PR prefix: p
+    (define-key m (kbd "p p") #'magit-dash-push)
+    (define-key m (kbd "p a") #'magit-dash-push-all)
+    (define-key m (kbd "p r") #'magit-dash-gh-pr-views-menu)
+    (define-key m (kbd "p d") #'magit-gh-pr-dash)
+
+    ;; Commit prefix: c
+    (define-key m (kbd "c c") #'magit-dash-magit-commit)
+    (define-key m (kbd "c a") #'magit-dash-commit-all)
+    (define-key m (kbd "c o") #'magit-dash-commit)
+
+    ;; Sync & Stage prefix: s
+    (define-key m (kbd "s s") #'magit-dash-sync)
+    (define-key m (kbd "s a") #'magit-dash-sync-all)
+    (define-key m (kbd "s t") #'magit-dash-stage-all)
+    (define-key m (kbd "s m") #'magit-dash-stage-all-all)
+
+    ;; Branch & Buffer & Bootstrap prefix: b
+    (define-key m (kbd "b b") #'magit-dash-visit-buffer)
+    (define-key m (kbd "b s") #'magit-dash-switch-branch)
+    (define-key m (kbd "b r") #'magit-dash-bootstrap-repo)
+    (define-key m (kbd "b c") #'magit-dash-clone-repo)
+
+    ;; Log prefix: l
+    (define-key m (kbd "l l") #'magit-dash-magit-log)
+    (define-key m (kbd "l f") #'magit-dash-magit-log-full)
+    (define-key m (kbd "l a") #'magit-dash-magit-log-full)
+
+    ;; Worktree prefix: w
+    (define-key m (kbd "w w") #'magit-dash-open-worktree-dispatch)
+    (define-key m (kbd "w d") #'magit-dash-open-worktree-dispatch)
+    (define-key m (kbd "w a") #'magit-dash-worktree-add)
+    (define-key m (kbd "w k") #'magit-dash-worktree-delete)
+    (define-key m (kbd "w s") #'magit-dash-worktree-sync-symlinks)
+    (define-key m (kbd "w t") #'magit-dash-toggle-discovered-worktrees)
+
+    ;; Agent Shell & Autosync prefix: a
+    (define-key m (kbd "a a") #'magit-dash-auto-sync)
+    (define-key m (kbd "a s") #'magit-dash-auto-sync)
+    (define-key m (kbd "a o") #'magit-dash-agent-shell)
+    (define-key m (kbd "a n") #'magit-dash-agent-shell-new)
+    (define-key m (kbd "a q") #'magit-dash-agent-shell-queue)
+    (define-key m (kbd "a w") #'magit-dash-agent-shell-workflow)
+
+    ;; Tag & Toggle prefix: t
+    (define-key m (kbd "t t") #'magit-dash-filter-by-tag)
+    (define-key m (kbd "t a") #'magit-dash-add-tag)
+    (define-key m (kbd "t c") #'magit-dash-toggle-column)
+    (define-key m (kbd "t s") #'magit-dash-toggle-discovered-submodules)
+    (define-key m (kbd "t w") #'magit-dash-toggle-discovered-worktrees)
+
+    ;; Hide prefix: h (preserved as-is)
     (define-key m (kbd "h r") #'magit-dash-hide-repo)
     (define-key m (kbd "h c") #'magit-dash-unhide-all)
     (define-key m (kbd "h u") #'magit-dash-unhide-repo)
     (define-key m (kbd "h s") #'magit-dash-hide-select)
-    (define-key m (kbd "i")   #'magit-dash-add-tag)
-    (define-key m (kbd "k")   #'magit-dash-worktree-delete)
-    (define-key m (kbd "l")   #'magit-dash-magit-log)
-    (define-key m (kbd "L")   #'magit-dash-magit-log-full)
-    (define-key m (kbd "m")   #'magit-dash-menu)
-    (define-key m (kbd "n")   #'magit-dash-sync)
-    (define-key m (kbd "o")   #'magit-dash-open-repo)
-    (define-key m (kbd "p")   #'magit-dash-gh-pr-views-menu)
-    (define-key m (kbd "P")   #'magit-dash-push)
-    (define-key m (kbd "q")   #'quit-window)
-    (define-key m (kbd "Q")   #'magit-dash-agent-shell-queue)
-    (define-key m (kbd "r")   #'magit-dash-hard-refresh)
-    (define-key m (kbd "R")   #'magit-dash-refresh-repo)
-    (define-key m (kbd "s")   #'magit-dash-magit-status)
-    (define-key m (kbd "S")   #'magit-dash-sync-all)
-    (define-key m (kbd "t")   #'magit-dash-filter-by-tag)
-    (define-key m (kbd "/")   #'magit-dash-hide-select)
-    (define-key m (kbd "T")   #'magit-dash-toggle-column)
-    (define-key m (kbd "u")   #'magit-dash-pull)
-    (define-key m (kbd "U")   #'magit-dash-pull-all)
-    (define-key m (kbd "w")   #'magit-dash-open-worktree-dispatch)
-    (define-key m (kbd "W")   #'magit-dash-worktree-add)
+
+    ;; Execute prefix: x (preserved as-is)
     (define-key m (kbd "x c") #'magit-dash-run-command)
     (define-key m (kbd "x b") #'magit-dash-run-command-background)
-    (define-key m (kbd "B")   #'magit-dash-bootstrap-repo)
-    (define-key m (kbd "C")   #'magit-dash-clone-repo)
-    (define-key m (kbd "y")   #'magit-dash-prune-branches)
+
+    ;; Legacy single/capital aliases preserved for muscle memory
+    (define-key m (kbd "G")   #'magit-dash-stage-all)
+    (define-key m (kbd "F")   #'magit-dash-fetch-all)
+    (define-key m (kbd "U")   #'magit-dash-pull-all)
+    (define-key m (kbd "P")   #'magit-dash-push)
+    (define-key m (kbd "S")   #'magit-dash-sync-all)
+    (define-key m (kbd "A")   #'magit-dash-commit-all)
+    (define-key m (kbd "L")   #'magit-dash-magit-log-full)
+    (define-key m (kbd "T")   #'magit-dash-toggle-column)
+    (define-key m (kbd "W")   #'magit-dash-worktree-add)
+    (define-key m (kbd "Q")   #'magit-dash-agent-shell-queue)
     (define-key m (kbd "Z")   #'magit-dash-agent-shell-new)
-
-    (define-key m (kbd "*")   #'magit-dash-unmark-all)
-    (define-key m (kbd "!")   #'magit-dash-magit-dispatch)
-    (define-key m (kbd "?")   #'magit-dash-menu)
-
+    (define-key m (kbd "B")   #'magit-dash-switch-branch)
+    (define-key m (kbd "C")   #'magit-dash-commit)
+    (define-key m (kbd "n")   #'magit-dash-sync)
+    (define-key m (kbd "i")   #'magit-dash-add-tag)
+    (define-key m (kbd "k")   #'magit-dash-worktree-delete)
     (define-key m (kbd "M-s") #'magit-dash-toggle-discovered-submodules)
     (define-key m (kbd "M-t") #'magit-dash-toggle-discovered-worktrees)
     m)
@@ -3392,6 +3455,16 @@ Signals `user-error' when the current row is not a worktree."
   "Open the `agent-shell' queue buffer."
   (interactive)
   (call-interactively #'agent-shell-queue-buffer-open))
+
+(defun magit-dash-agent-shell-workflow ()
+  "Invoke workflow selection for the repository at point."
+  (interactive)
+  (magit-dash--with-repo (magit-dash--repo-at-point)
+    (cond
+     ((fboundp 'agent-shell-workflow-select)
+      (call-interactively #'agent-shell-workflow-select))
+     ((fboundp 'agent-shell-workflow-dispatch-menu)
+      (call-interactively #'agent-shell-workflow-dispatch-menu)))))
 (defun magit-dash-gh-ci-fetch-at-point ()
   "Fetch CI status for the repository at point and refresh its dashboard row."
   (interactive)
@@ -3771,8 +3844,9 @@ When disabled, only explicitly marked repos are targeted."
 	      (default-directory (file-name-as-directory (magit-dash-repo-path repo))))
     (and (boundp 'agent-shell-menu-project-buffers) (agent-shell-menu-project-buffers) t)))
 (defun magit-dash--agent-shell-workflow-available-p ()
-  "Return non-nil when `agent-shell-workflow-dispatch-menu' is available."
-  (fboundp 'agent-shell-workflow-dispatch-menu))
+  "Return non-nil when workflow selection is available."
+  (or (fboundp 'agent-shell-workflow-select)
+      (fboundp 'agent-shell-workflow-dispatch-menu)))
 
 (defun magit-dash--batch-group-title (&optional _)
   "Return the title for the Batch group in `magit-dash-menu'.
@@ -3814,7 +3888,7 @@ Indicates whether batch operations target all repos or marked repos."
      :inapt-if-not magit-dash--agent-shell-project-buffers-p)
     ("an"  "New"            magit-dash-agent-shell-new)
     ("aq"  "Queue"          magit-dash-agent-shell-queue)
-    ("ap"  "Workflows" agent-shell-workflow-dispatch-menu
+    ("ap"  "Workflows" magit-dash-agent-shell-workflow
      :inapt-if-not magit-dash--agent-shell-workflow-available-p)]
    ["Cache"
     ("ci"  "Info"      magit-dash-cache-info)

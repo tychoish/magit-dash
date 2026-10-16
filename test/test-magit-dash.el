@@ -2305,6 +2305,28 @@ A conflict (e.g. \"b\" and \"bp\" coexisting) causes transient to raise
                                   suffixes)))
     (should-not toggle-suffix)))
 
+(ert-deftest magit-dash/transient-menu-agent-shell-workflow-direct ()
+  "`magit-dash-menu' binds 'ap' directly to `magit-dash-agent-shell-workflow'."
+  (let* ((suffixes (test-magit-dash--all-transient-suffixes 'magit-dash-menu))
+         (ap-suffix (seq-find (lambda (s)
+                                (equal "ap" (plist-get s :key)))
+                              suffixes)))
+    (should ap-suffix)
+    (should (eq (plist-get ap-suffix :command) 'magit-dash-agent-shell-workflow))))
+
+(ert-deftest magit-dash/agent-shell-workflow-calls-select ()
+  "`magit-dash-agent-shell-workflow' invokes `agent-shell-workflow-select' in repo at point."
+  (let ((repo (magit-dash-repo--make :name "test" :path "/tmp/test-repo"))
+        called-in-dir)
+    (cl-letf (((symbol-function 'magit-dash--repo-at-point) (lambda () repo))
+              ((symbol-function 'agent-shell-workflow-select)
+               (lambda ()
+                 (interactive)
+                 (setq called-in-dir default-directory))))
+      (magit-dash-agent-shell-workflow)
+      (should (equal (file-name-as-directory called-in-dir)
+                     (file-name-as-directory "/tmp/test-repo"))))))
+
 ;;;; Ephemeral tag tests
 
 (ert-deftest magit-dash/all-tags-for-permanent-only ()
@@ -3666,10 +3688,66 @@ The bug was that add-text-properties returns t, not the modified string."
       (should (equal (list r1) refreshed)))))
 
 (ert-deftest magit-dash/keybinding-R-bound-to-refresh-repo ()
-  "Key binding R in `magit-dash-mode-map' is bound to `magit-dash-refresh-repo'."
+  "Key bindings r and R in `magit-dash-mode-map' are bound to `magit-dash-refresh-repo'."
+  (should (eq (lookup-key magit-dash-mode-map (kbd "r")) #'magit-dash-refresh-repo))
   (should (eq (lookup-key magit-dash-mode-map (kbd "R")) #'magit-dash-refresh-repo))
   (should (fboundp 'magit-dash-refresh-row))
   (should (eq (symbol-function 'magit-dash-refresh-row) #'magit-dash-refresh-repo)))
+
+(ert-deftest magit-dash/keymap-rationalized-combinations ()
+  "Test rationalized key combinations in `magit-dash-mode-map'."
+  (let ((m magit-dash-mode-map))
+    ;; Refresh
+    (should (eq (lookup-key m (kbd "r")) #'magit-dash-refresh-repo))
+    (should (eq (lookup-key m (kbd "R")) #'magit-dash-refresh-repo))
+    (should (eq (lookup-key m (kbd "g")) #'magit-dash-refresh))
+    (should (eq (lookup-key m (kbd "M-r")) #'magit-dash-hard-refresh))
+    ;; Fetch
+    (should (eq (lookup-key m (kbd "f f")) #'magit-dash-fetch))
+    (should (eq (lookup-key m (kbd "f a")) #'magit-dash-fetch-all))
+    ;; Pull
+    (should (eq (lookup-key m (kbd "u u")) #'magit-dash-pull))
+    (should (eq (lookup-key m (kbd "u a")) #'magit-dash-pull-all))
+    ;; Push & PR
+    (should (eq (lookup-key m (kbd "p p")) #'magit-dash-push))
+    (should (eq (lookup-key m (kbd "p a")) #'magit-dash-push-all))
+    (should (eq (lookup-key m (kbd "p r")) #'magit-dash-gh-pr-views-menu))
+    ;; Commit
+    (should (eq (lookup-key m (kbd "c c")) #'magit-dash-magit-commit))
+    (should (eq (lookup-key m (kbd "c a")) #'magit-dash-commit-all))
+    (should (eq (lookup-key m (kbd "c o")) #'magit-dash-commit))
+    ;; Sync & Stage
+    (should (eq (lookup-key m (kbd "s s")) #'magit-dash-sync))
+    (should (eq (lookup-key m (kbd "s a")) #'magit-dash-sync-all))
+    (should (eq (lookup-key m (kbd "s t")) #'magit-dash-stage-all))
+    (should (eq (lookup-key m (kbd "s m")) #'magit-dash-stage-all-all))
+    ;; Branch & Buffer & Bootstrap
+    (should (eq (lookup-key m (kbd "b b")) #'magit-dash-visit-buffer))
+    (should (eq (lookup-key m (kbd "b s")) #'magit-dash-switch-branch))
+    (should (eq (lookup-key m (kbd "b r")) #'magit-dash-bootstrap-repo))
+    (should (eq (lookup-key m (kbd "b c")) #'magit-dash-clone-repo))
+    ;; Log
+    (should (eq (lookup-key m (kbd "l l")) #'magit-dash-magit-log))
+    (should (eq (lookup-key m (kbd "l f")) #'magit-dash-magit-log-full))
+    ;; Worktree
+    (should (eq (lookup-key m (kbd "w w")) #'magit-dash-open-worktree-dispatch))
+    (should (eq (lookup-key m (kbd "w a")) #'magit-dash-worktree-add))
+    (should (eq (lookup-key m (kbd "w k")) #'magit-dash-worktree-delete))
+    ;; Agent shell
+    (should (eq (lookup-key m (kbd "a a")) #'magit-dash-auto-sync))
+    (should (eq (lookup-key m (kbd "a o")) #'magit-dash-agent-shell))
+    (should (eq (lookup-key m (kbd "a n")) #'magit-dash-agent-shell-new))
+    (should (eq (lookup-key m (kbd "a q")) #'magit-dash-agent-shell-queue))
+    ;; Tag & Toggle
+    (should (eq (lookup-key m (kbd "t t")) #'magit-dash-filter-by-tag))
+    (should (eq (lookup-key m (kbd "t a")) #'magit-dash-add-tag))
+    (should (eq (lookup-key m (kbd "t c")) #'magit-dash-toggle-column))
+    ;; Mark & Menu
+    (should (eq (lookup-key m (kbd "*")) #'magit-dash-unmark-all))
+    (should (eq (lookup-key m (kbd "m t")) #'magit-dash-mark-by-tag))
+    (should (eq (lookup-key m (kbd "m c")) #'magit-dash-unmark-all))
+    (should (eq (lookup-key m (kbd "m m")) #'magit-dash-menu))
+    (should (eq (lookup-key m (kbd "?")) #'magit-dash-menu))))
 
 (ert-deftest magit-dash/transient-menu-refresh-actions ()
   "Transient menu includes refresh actions for row, marked, and by-tag."
