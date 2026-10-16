@@ -1726,6 +1726,76 @@ they are not consulted even when their own auto-* flags are set."
       (magit-dash-agent-shell-queue))
     (should called)))
 
+(ert-deftest magit-dash/agent-shell-new-prompts-session-before-create ()
+  "agent-shell-new prompts for agent and session before creating shell."
+  (let ((order nil)
+        (start-args nil))
+    (cl-letf* (((symbol-function 'magit-dash--repo-at-point)
+               (lambda () (magit-dash-repo--make :name "r" :path "/tmp/r")))
+              ((symbol-function 'agent-shell-select-config)
+               (lambda (&rest _)
+                 (push :select-agent order)
+                 'mock-config))
+              ((symbol-function 'completing-read)
+               (lambda (prompt _choices &rest _)
+                 (push (list :prompt-session prompt) order)
+                 "New session"))
+              ((symbol-function 'agent-shell--start)
+               (lambda (&rest args)
+                 (push :start order)
+                 (setq start-args args)
+                 'mock-buf)))
+      (magit-dash-agent-shell-new)
+      (should (equal (nreverse order)
+                     '(:select-agent (:prompt-session "Session (default New session): ") :start)))
+      (should (eq (plist-get start-args :session-strategy) 'new))
+      (should (eq (plist-get start-args :new-session) t))
+      (should (eq (plist-get start-args :config) 'mock-config)))))
+
+(ert-deftest magit-dash/agent-shell-new-load-previous-strategy ()
+  "agent-shell-new selects 'prompt strategy when 'Load previous session' is chosen."
+  (let ((start-args nil))
+    (cl-letf* (((symbol-function 'magit-dash--repo-at-point)
+               (lambda () (magit-dash-repo--make :name "r" :path "/tmp/r")))
+              ((symbol-function 'agent-shell-select-config)
+               (lambda (&rest _) 'mock-config))
+              ((symbol-function 'completing-read)
+               (lambda (&rest _) "Load previous session"))
+              ((symbol-function 'agent-shell--start)
+               (lambda (&rest args)
+                 (setq start-args args)
+                 'mock-buf)))
+      (magit-dash-agent-shell-new)
+      (should (eq (plist-get start-args :session-strategy) 'prompt))
+      (should (eq (plist-get start-args :new-session) nil)))))
+
+(ert-deftest magit-dash/agent-shell-project-buffers-p-checks-functions ()
+  "`magit-dash--agent-shell-project-buffers-p' delegates to available project buffer fns."
+  (require 'agent-shell-workflow nil t)
+  (require 'agent-shell-menu nil t)
+  (let ((repo (magit-dash-repo--make :name "r" :path "/tmp/r")))
+    ;; Menu project buffers returns non-nil
+    (cl-letf* (((symbol-function 'magit-dash--repo-at-point) (lambda () repo))
+               ((symbol-function 'agent-shell-menu-project-buffers)
+                (lambda () '("menu-buf")))
+               ((symbol-function 'agent-shell-workflow--project-buffers)
+                (lambda (_) nil)))
+      (should (magit-dash--agent-shell-project-buffers-p)))
+    ;; Falls back to agent-shell-workflow--project-buffers
+    (cl-letf* (((symbol-function 'magit-dash--repo-at-point) (lambda () repo))
+               ((symbol-function 'agent-shell-menu-project-buffers)
+                (lambda () nil))
+               ((symbol-function 'agent-shell-workflow--project-buffers)
+                (lambda (_) '("wf-buf"))))
+      (should (magit-dash--agent-shell-project-buffers-p)))
+    ;; Neither returns buffers
+    (cl-letf* (((symbol-function 'magit-dash--repo-at-point) (lambda () repo))
+               ((symbol-function 'agent-shell-menu-project-buffers)
+                (lambda () nil))
+               ((symbol-function 'agent-shell-workflow--project-buffers)
+                (lambda (_) nil)))
+      (should-not (magit-dash--agent-shell-project-buffers-p)))))
+
 ;;;; magit-dash--parse-worktrees
 
 (defconst magit-dash-test--worktree-output
@@ -4163,3 +4233,89 @@ The bug was that add-text-properties returns t, not the modified string."
           (should (member r1 refreshed-repos))
           (should (member r2 refreshed-repos)))
       (kill-buffer dash-buf))))
+
+;;;; which-key integration and prefix naming
+
+(defvar which-key-replacement-alist)
+(defvar which-key-mode)
+
+(ert-deftest magit-dash/keymap-prefix-names-defined ()
+  "Prefix keys in `magit-dash-mode-map' have descriptive group names via `keymap-set'."
+  (let ((m magit-dash-mode-map))
+    (should (equal "fetch" (cadr (assoc ?f (cdr m)))))
+    (should (equal "pull" (cadr (assoc ?u (cdr m)))))
+    (should (equal "push/pr" (cadr (assoc ?p (cdr m)))))
+    (should (equal "commit" (cadr (assoc ?c (cdr m)))))
+    (should (equal "sync/stage" (cadr (assoc ?s (cdr m)))))
+    (should (equal "branch/buffer" (cadr (assoc ?b (cdr m)))))
+    (should (equal "log" (cadr (assoc ?l (cdr m)))))
+    (should (equal "worktree" (cadr (assoc ?w (cdr m)))))
+    (should (equal "agent/autosync" (cadr (assoc ?a (cdr m)))))
+    (should (equal "tag/toggle" (cadr (assoc ?t (cdr m)))))
+    (should (equal "mark/menu" (cadr (assoc ?m (cdr m)))))
+    (should (equal "hide" (cadr (assoc ?h (cdr m)))))
+    (should (equal "command" (cadr (assoc ?x (cdr m)))))))
+
+(ert-deftest magit-dash/which-key-register-replacements-md ()
+  "Test which-key replacement rules when configured with default 'md abbreviation."
+  (let ((which-key-replacement-alist nil)
+        (magit-dash-which-key-abbreviate-commands 'md))
+    (magit-dash--which-key-register-replacements)
+    (let ((rules (alist-get 'magit-dash-mode which-key-replacement-alist)))
+      (should rules)
+      (should (assoc (cons nil "\\`magit-dash-agent-shell-queue\\'") rules))
+      (should (equal (cdr (assoc (cons nil "\\`magit-dash-agent-shell-queue\\'") rules))
+                     '(nil . "asq")))
+      (should (equal (cdr (assoc (cons nil "\\`magit-dash-agent-shell\\'") rules))
+                     '(nil . "as")))
+      (should (equal (cdr (assoc (cons nil "\\`magit-dash-\\(.*\\)") rules))
+                     '(nil . "md-\\1"))))))
+
+(ert-deftest magit-dash/which-key-register-replacements-strip ()
+  "Test which-key replacement rules when configured with 'strip."
+  (let ((which-key-replacement-alist nil)
+        (magit-dash-which-key-abbreviate-commands 'strip))
+    (magit-dash--which-key-register-replacements)
+    (let ((rules (alist-get 'magit-dash-mode which-key-replacement-alist)))
+      (should rules)
+      (should (equal (cdr (assoc (cons nil "\\`magit-dash-\\(.*\\)") rules))
+                     '(nil . "\\1"))))))
+
+(ert-deftest magit-dash/which-key-register-replacements-disabled ()
+  "Test that which-key replacements are not registered when disabled."
+  (let ((which-key-replacement-alist nil)
+        (magit-dash-which-key-abbreviate-commands nil))
+    (magit-dash--which-key-register-replacements)
+    (should-not which-key-replacement-alist)))
+
+(ert-deftest magit-dash/which-key-sync-timer-adjusts-delay ()
+  "Test `magit-dash--which-key-sync-timer' calls `which-key--start-timer' with mode delay."
+  (let ((timer-calls nil)
+        (which-key-mode t)
+        (magit-dash-which-key-idle-delay 0.05))
+    (cl-letf (((symbol-function 'which-key--start-timer)
+               (lambda (&optional delay) (push delay timer-calls))))
+      (with-temp-buffer
+        (set-window-buffer (selected-window) (current-buffer))
+        (magit-dash-mode)
+        ;; magit-dash-mode enters setup which calls which-key--start-timer with 0.05
+        (should (equal timer-calls '(0.05)))
+        ;; Switching window to a non-magit-dash buffer restores default (nil argument)
+        (with-temp-buffer
+          (set-window-buffer (selected-window) (current-buffer))
+          (magit-dash--which-key-sync-timer)
+          (should (equal timer-calls '(nil 0.05))))))))
+
+(ert-deftest magit-dash/which-key-setup-registers-and-adds-hook ()
+  "Test `magit-dash--which-key-setup' runs without error and hooks window change."
+  (let ((which-key-replacement-alist nil)
+        (which-key-mode t)
+        (magit-dash-which-key-idle-delay 0.05)
+        (window-selection-change-functions nil)
+        (timer-started nil))
+    (cl-letf (((symbol-function 'which-key--start-timer)
+               (lambda (&optional delay) (setq timer-started delay))))
+      (with-temp-buffer
+        (magit-dash-mode)
+        (should (memq 'magit-dash--which-key-sync-timer window-selection-change-functions))
+        (should (alist-get 'magit-dash-mode which-key-replacement-alist))))))

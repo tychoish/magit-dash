@@ -66,6 +66,10 @@
 (declare-function magit-stash-clear "magit-stash")
 (declare-function agent-shell-switch-buffer "agent-shell")
 (declare-function agent-shell-new-shell "agent-shell")
+(declare-function agent-shell--start "agent-shell")
+(declare-function agent-shell-select-config "agent-shell")
+(declare-function agent-shell--auto-preferred-config "agent-shell")
+(declare-function agent-shell-workflow--project-buffers "agent-shell-workflow")
 (declare-function agent-shell-queue-buffer-open "agent-shell-queue")
 (declare-function agent-shell-menu-project-buffers "agent-shell-menu")
 (declare-function agent-shell-menu-switch-project-session "agent-shell-menu")
@@ -312,6 +316,28 @@ Common values are \"PR\" or \"⑂\"."
   "List of repository names or regexes that should automatically update submodules on fetch."
   :type '(repeat string)
   :group 'magit-dash)
+
+(defcustom magit-dash-which-key-idle-delay 0.05
+  "Idle delay in seconds for `which-key' in `magit-dash-mode' buffers.
+When non-nil and `which-key-mode' is active, `which-key' is started
+with this delay while in `magit-dash-mode'.  A small non-zero value like
+0.01 or 0.05 is recommended over 0.0 to prevent timer contention.
+Set to nil to leave `which-key-idle-delay' untouched."
+  :type '(choice (number :tag "Seconds") (const :tag "Disabled" nil))
+  :group 'magit-dash)
+
+(defcustom magit-dash-which-key-abbreviate-commands 'md
+  "How to abbreviate command names in `which-key' for `magit-dash-mode'.
+When set to `md' (or t), `magit-dash-' becomes `md-',
+`magit-dash-agent-shell-' becomes `as-', and
+`magit-dash-agent-shell-queue' becomes `asq'.
+When set to `strip', `magit-dash-' is removed completely.
+When nil, no replacements are registered."
+  :type '(choice (const :tag "Abbreviate as md- / as- / asq-" md)
+                 (const :tag "Strip magit-dash- prefix completely" strip)
+                 (const :tag "Disabled" nil))
+  :group 'magit-dash)
+
 
 (defun magit-dash--repo-pull-submodules-on-fetch-p (repo)
   "Return non-nil if REPO should automatically update submodules when fetched."
@@ -2068,106 +2094,119 @@ space they split it proportionally."
 (defvar magit-dash-mode-map
   (let ((m (make-sparse-keymap)))
     ;; Navigation & primary inspection (single key)
-    (define-key m (kbd "RET") #'magit-dash-magit-status)
-    (define-key m (kbd "SPC") #'magit-dash-toggle-mark)
-    (define-key m (kbd "d")   #'magit-dash-magit-diff)
-    (define-key m (kbd "e")   #'magit-dash-find-file)
-    (define-key m (kbd "o")   #'magit-dash-open-repo)
-    (define-key m (kbd "q")   #'quit-window)
-    (define-key m (kbd "?")   #'magit-dash-menu)
-    (define-key m (kbd "!")   #'magit-dash-magit-dispatch)
-    (define-key m (kbd "/")   #'magit-dash-hide-select)
-    (define-key m (kbd "y")   #'magit-dash-prune-branches)
+    (keymap-set m "RET" #'magit-dash-magit-status)
+    (keymap-set m "SPC" #'magit-dash-toggle-mark)
+    (keymap-set m "d"   #'magit-dash-magit-diff)
+    (keymap-set m "e"   #'magit-dash-find-file)
+    (keymap-set m "o"   #'magit-dash-open-repo)
+    (keymap-set m "q"   #'quit-window)
+    (keymap-set m "?"   #'magit-dash-menu)
+    (keymap-set m "!"   #'magit-dash-magit-dispatch)
+    (keymap-set m "/"   #'magit-dash-hide-select)
+    (keymap-set m "y"   #'magit-dash-prune-branches)
 
     ;; Refresh operations
-    (define-key m (kbd "r")     #'magit-dash-refresh-repo)
-    (define-key m (kbd "g")     #'magit-dash-refresh)
-    (define-key m (kbd "M-r")   #'magit-dash-hard-refresh)
+    (keymap-set m "r"   #'magit-dash-refresh-repo)
+    (keymap-set m "g"   #'magit-dash-refresh)
+    (keymap-set m "M-r" #'magit-dash-hard-refresh)
 
     ;; Mark & menu operations
-    (define-key m (kbd "*")   #'magit-dash-unmark-all)
-    (define-key m (kbd "m m") #'magit-dash-menu)
-    (define-key m (kbd "m ?") #'magit-dash-menu)
-    (define-key m (kbd "m t") #'magit-dash-mark-by-tag)
-    (define-key m (kbd "m c") #'magit-dash-unmark-all)
+    (keymap-set m "*"   #'magit-dash-unmark-all)
+    (keymap-set m "m"   (cons "mark/menu" (make-sparse-keymap)))
+    (keymap-set m "m m" #'magit-dash-menu)
+    (keymap-set m "m ?" #'magit-dash-menu)
+    (keymap-set m "m t" #'magit-dash-mark-by-tag)
+    (keymap-set m "m c" #'magit-dash-unmark-all)
 
     ;; Fetch prefix: f
-    (define-key m (kbd "f f") #'magit-dash-fetch)
-    (define-key m (kbd "f r") #'magit-dash-fetch)
-    (define-key m (kbd "f a") #'magit-dash-fetch-all)
+    (keymap-set m "f"   (cons "fetch" (make-sparse-keymap)))
+    (keymap-set m "f f" #'magit-dash-fetch)
+    (keymap-set m "f r" #'magit-dash-fetch)
+    (keymap-set m "f a" #'magit-dash-fetch-all)
 
     ;; Pull prefix: u
-    (define-key m (kbd "u u") #'magit-dash-pull)
-    (define-key m (kbd "u r") #'magit-dash-pull)
-    (define-key m (kbd "u a") #'magit-dash-pull-all)
+    (keymap-set m "u"   (cons "pull" (make-sparse-keymap)))
+    (keymap-set m "u u" #'magit-dash-pull)
+    (keymap-set m "u r" #'magit-dash-pull)
+    (keymap-set m "u a" #'magit-dash-pull-all)
 
     ;; Push & PR prefix: p
-    (define-key m (kbd "p p") #'magit-dash-push)
-    (define-key m (kbd "p a") #'magit-dash-push-all)
-    (define-key m (kbd "p r") #'magit-dash-gh-pr-views-menu)
-    (define-key m (kbd "p d") #'magit-gh-pr-dash)
+    (keymap-set m "p"   (cons "push/pr" (make-sparse-keymap)))
+    (keymap-set m "p p" #'magit-dash-push)
+    (keymap-set m "p a" #'magit-dash-push-all)
+    (keymap-set m "p r" #'magit-dash-gh-pr-views-menu)
+    (keymap-set m "p d" #'magit-gh-pr-dash)
 
     ;; Commit prefix: c
-    (define-key m (kbd "c c") #'magit-dash-magit-commit)
-    (define-key m (kbd "c a") #'magit-dash-commit-all)
-    (define-key m (kbd "c o") #'magit-dash-commit)
+    (keymap-set m "c"   (cons "commit" (make-sparse-keymap)))
+    (keymap-set m "c c" #'magit-dash-magit-commit)
+    (keymap-set m "c a" #'magit-dash-commit-all)
+    (keymap-set m "c o" #'magit-dash-commit)
 
     ;; Sync & Stage prefix: s
-    (define-key m (kbd "s s") #'magit-dash-sync)
-    (define-key m (kbd "s a") #'magit-dash-sync-all)
-    (define-key m (kbd "s t") #'magit-dash-stage-all)
-    (define-key m (kbd "s m") #'magit-dash-stage-all-all)
+    (keymap-set m "s"   (cons "sync/stage" (make-sparse-keymap)))
+    (keymap-set m "s s" #'magit-dash-sync)
+    (keymap-set m "s a" #'magit-dash-sync-all)
+    (keymap-set m "s t" #'magit-dash-stage-all)
+    (keymap-set m "s m" #'magit-dash-stage-all-all)
 
     ;; Branch & Buffer & Bootstrap prefix: b
-    (define-key m (kbd "b b") #'magit-dash-visit-buffer)
-    (define-key m (kbd "b s") #'magit-dash-switch-branch)
-    (define-key m (kbd "b r") #'magit-dash-bootstrap-repo)
-    (define-key m (kbd "b c") #'magit-dash-clone-repo)
+    (keymap-set m "b"   (cons "branch/buffer" (make-sparse-keymap)))
+    (keymap-set m "b b" #'magit-dash-visit-buffer)
+    (keymap-set m "b s" #'magit-dash-switch-branch)
+    (keymap-set m "b r" #'magit-dash-bootstrap-repo)
+    (keymap-set m "b c" #'magit-dash-clone-repo)
 
     ;; Log prefix: l
-    (define-key m (kbd "l l") #'magit-dash-magit-log)
-    (define-key m (kbd "l f") #'magit-dash-magit-log-full)
-    (define-key m (kbd "l a") #'magit-dash-magit-log-full)
+    (keymap-set m "l"   (cons "log" (make-sparse-keymap)))
+    (keymap-set m "l l" #'magit-dash-magit-log)
+    (keymap-set m "l f" #'magit-dash-magit-log-full)
+    (keymap-set m "l a" #'magit-dash-magit-log-full)
 
     ;; Worktree prefix: w
-    (define-key m (kbd "w w") #'magit-dash-open-worktree-dispatch)
-    (define-key m (kbd "w d") #'magit-dash-open-worktree-dispatch)
-    (define-key m (kbd "w a") #'magit-dash-worktree-add)
-    (define-key m (kbd "w k") #'magit-dash-worktree-delete)
-    (define-key m (kbd "w s") #'magit-dash-worktree-sync-symlinks)
-    (define-key m (kbd "w t") #'magit-dash-toggle-discovered-worktrees)
+    (keymap-set m "w"   (cons "worktree" (make-sparse-keymap)))
+    (keymap-set m "w w" #'magit-dash-open-worktree-dispatch)
+    (keymap-set m "w d" #'magit-dash-open-worktree-dispatch)
+    (keymap-set m "w a" #'magit-dash-worktree-add)
+    (keymap-set m "w k" #'magit-dash-worktree-delete)
+    (keymap-set m "w s" #'magit-dash-worktree-sync-symlinks)
+    (keymap-set m "w t" #'magit-dash-toggle-discovered-worktrees)
 
     ;; Agent Shell & Autosync prefix: a
-    (define-key m (kbd "a a") #'magit-dash-auto-sync)
-    (define-key m (kbd "a s") #'magit-dash-auto-sync)
-    (define-key m (kbd "a o") #'magit-dash-agent-shell)
-    (define-key m (kbd "a n") #'magit-dash-agent-shell-new)
-    (define-key m (kbd "a q") #'magit-dash-agent-shell-queue)
-    (define-key m (kbd "a w") #'magit-dash-agent-shell-workflow)
+    (keymap-set m "a"   (cons "agent/autosync" (make-sparse-keymap)))
+    (keymap-set m "a a" #'magit-dash-auto-sync)
+    (keymap-set m "a s" #'magit-dash-auto-sync)
+    (keymap-set m "a o" #'magit-dash-agent-shell)
+    (keymap-set m "a n" #'magit-dash-agent-shell-new)
+    (keymap-set m "a q" #'magit-dash-agent-shell-queue)
+    (keymap-set m "a w" #'magit-dash-agent-shell-workflow)
 
     ;; Tag & Toggle prefix: t
-    (define-key m (kbd "t t") #'magit-dash-filter-by-tag)
-    (define-key m (kbd "t a") #'magit-dash-add-tag)
-    (define-key m (kbd "t c") #'magit-dash-toggle-column)
-    (define-key m (kbd "t s") #'magit-dash-toggle-discovered-submodules)
-    (define-key m (kbd "t w") #'magit-dash-toggle-discovered-worktrees)
+    (keymap-set m "t"   (cons "tag/toggle" (make-sparse-keymap)))
+    (keymap-set m "t t" #'magit-dash-filter-by-tag)
+    (keymap-set m "t a" #'magit-dash-add-tag)
+    (keymap-set m "t c" #'magit-dash-toggle-column)
+    (keymap-set m "t s" #'magit-dash-toggle-discovered-submodules)
+    (keymap-set m "t w" #'magit-dash-toggle-discovered-worktrees)
 
     ;; Hide prefix: h (preserved as-is)
-    (define-key m (kbd "h r") #'magit-dash-hide-repo)
-    (define-key m (kbd "h c") #'magit-dash-unhide-all)
-    (define-key m (kbd "h u") #'magit-dash-unhide-repo)
-    (define-key m (kbd "h s") #'magit-dash-hide-select)
+    (keymap-set m "h"   (cons "hide" (make-sparse-keymap)))
+    (keymap-set m "h r" #'magit-dash-hide-repo)
+    (keymap-set m "h c" #'magit-dash-unhide-all)
+    (keymap-set m "h u" #'magit-dash-unhide-repo)
+    (keymap-set m "h s" #'magit-dash-hide-select)
 
     ;; Execute prefix: x (preserved as-is)
-    (define-key m (kbd "x c") #'magit-dash-run-command)
-    (define-key m (kbd "x b") #'magit-dash-run-command-background)
+    (keymap-set m "x"   (cons "command" (make-sparse-keymap)))
+    (keymap-set m "x c" #'magit-dash-run-command)
+    (keymap-set m "x b" #'magit-dash-run-command-background)
 
     ;; Convenient single-key convenience aliases
-    (define-key m (kbd "n")   #'magit-dash-sync)
-    (define-key m (kbd "i")   #'magit-dash-add-tag)
-    (define-key m (kbd "k")   #'magit-dash-worktree-delete)
-    (define-key m (kbd "M-s") #'magit-dash-toggle-discovered-submodules)
-    (define-key m (kbd "M-t") #'magit-dash-toggle-discovered-worktrees)
+    (keymap-set m "n"   #'magit-dash-sync)
+    (keymap-set m "i"   #'magit-dash-add-tag)
+    (keymap-set m "k"   #'magit-dash-worktree-delete)
+    (keymap-set m "M-s" #'magit-dash-toggle-discovered-submodules)
+    (keymap-set m "M-t" #'magit-dash-toggle-discovered-worktrees)
     m)
   "Keymap for `magit-dash-mode'.")
 
@@ -2209,6 +2248,57 @@ set `default-directory' to the parent directory where the repository should be."
                       (file-name-as-directory path)))
                 (file-name-as-directory (expand-file-name "~/")))))
 
+(defvar which-key-mode)
+(defvar which-key-replacement-alist)
+(declare-function which-key--start-timer "which-key")
+
+(defun magit-dash--which-key-register-replacements ()
+  "Register command abbreviations in `which-key-replacement-alist'.
+Applied for `magit-dash-mode'.  Does nothing if
+`magit-dash-which-key-abbreviate-commands' is nil or
+`which-key-replacement-alist' is not defined."
+  (when (and magit-dash-which-key-abbreviate-commands
+             (boundp 'which-key-replacement-alist))
+    (let* ((prefix-repl (if (eq magit-dash-which-key-abbreviate-commands 'strip)
+                            "\\1"
+                          "md-\\1"))
+           (rules
+            (list
+             (cons (cons nil "\\`magit-dash-agent-shell-queue\\'")
+                   (cons nil "asq"))
+             (cons (cons nil "\\`magit-dash-agent-shell-queue-\\(.*\\)")
+                   (cons nil "asq-\\1"))
+             (cons (cons nil "\\`magit-dash-agent-shell\\'")
+                   (cons nil "as"))
+             (cons (cons nil "\\`magit-dash-agent-shell-\\(.*\\)")
+                   (cons nil "as-\\1"))
+             (cons (cons nil "\\`magit-dash-\\(.*\\)")
+                   (cons nil prefix-repl)))))
+      (setq which-key-replacement-alist
+            (cons (cons 'magit-dash-mode rules)
+                  (assq-delete-all 'magit-dash-mode which-key-replacement-alist))))))
+
+(defun magit-dash--which-key-sync-timer (&optional _window)
+  "Adjust `which-key' idle timer based on current window mode.
+Sets timer to `magit-dash-which-key-idle-delay' when inside a dashboard
+buffer, or restores the default timer when outside."
+  (when (and (bound-and-true-p which-key-mode)
+             (bound-and-true-p magit-dash-which-key-idle-delay)
+             (fboundp 'which-key--start-timer))
+    (let ((in-dash (with-current-buffer (window-buffer (selected-window))
+                     (derived-mode-p 'magit-dash-mode))))
+      (if in-dash
+          (which-key--start-timer magit-dash-which-key-idle-delay)
+        (which-key--start-timer)))))
+
+(defun magit-dash--which-key-setup ()
+  "Hook function to configure `which-key' when entering `magit-dash-mode'.
+Registers command abbreviations and adjusts idle delay."
+  (magit-dash--which-key-register-replacements)
+  (when magit-dash-which-key-idle-delay
+    (add-hook 'window-selection-change-functions #'magit-dash--which-key-sync-timer)
+    (magit-dash--which-key-sync-timer)))
+
 (define-derived-mode magit-dash-mode tabulated-list-mode "Repos"
   "Major mode for the registered repository dashboard."
   (setq tabulated-list-format (magit-dash--build-format magit-dash-repo-list))
@@ -2216,7 +2306,11 @@ set `default-directory' to the parent directory where the repository should be."
   (tabulated-list-init-header)
   (setq-local default-directory (file-name-as-directory (expand-file-name "~/")))
   (add-hook 'post-command-hook #'magit-dash--update-default-directory nil t)
-  (add-hook 'kill-buffer-hook #'magit-dash--cancel-refresh-jobs nil t))
+  (add-hook 'kill-buffer-hook #'magit-dash--cancel-refresh-jobs nil t)
+  (add-hook 'kill-buffer-hook #'magit-dash--which-key-sync-timer nil t))
+
+(add-hook 'magit-dash-mode-hook #'magit-dash--which-key-setup)
+(add-hook 'which-key-mode-hook #'magit-dash--which-key-register-replacements)
 
 (defun magit-dash--build-entry (repo)
   "Return a `tabulated-list-entries' entry for REPO using enabled columns.
@@ -3483,11 +3577,27 @@ Signals `user-error' when the current row is not a worktree."
   (magit-dash--with-repo (magit-dash--repo-at-point)
     (call-interactively #'agent-shell-menu-switch-project-session)))
 
-(defun magit-dash-agent-shell-new ()
-  "Start a new `agent-shell' session in the repository at point."
+(defun magit-dash-agent-shell-new (&optional config)
+  "Start a new `agent-shell' session in the repository at point.
+Prompts for agent config and session choice before creating the shell."
   (interactive)
   (magit-dash--with-repo (magit-dash--repo-at-point)
-    (call-interactively #'agent-shell-new-shell)))
+    (let* ((cfg (or config
+                    (when (fboundp 'agent-shell-select-config)
+                      (agent-shell-select-config :prompt "Start agent: "))
+                    (when (fboundp 'agent-shell--auto-preferred-config)
+                      (agent-shell--auto-preferred-config))))
+           (choices '("New session" "Load previous session"))
+           (choice (completing-read "Session (default New session): "
+                                    choices nil t nil nil "New session"))
+           (strategy (if (string-equal choice "Load previous session")
+                         'prompt
+                       'new)))
+      (if (fboundp 'agent-shell--start)
+          (agent-shell--start :config cfg
+                              :session-strategy strategy
+                              :new-session (eq strategy 'new))
+        (agent-shell-new-shell)))))
 
 (defun magit-dash-agent-shell-queue ()
   "Open the `agent-shell' queue buffer."
@@ -3880,7 +3990,13 @@ When disabled, only explicitly marked repos are targeted."
   "Return non-nil when `agent-shell' buffers exist for the repo at point."
   (when-let* ((repo (ignore-errors (magit-dash--repo-at-point)))
 	      (default-directory (file-name-as-directory (magit-dash-repo-path repo))))
-    (and (boundp 'agent-shell-menu-project-buffers) (agent-shell-menu-project-buffers) t)))
+    (or (and (fboundp 'agent-shell-menu-project-buffers)
+             (agent-shell-menu-project-buffers)
+             t)
+        (and (fboundp 'agent-shell-workflow--project-buffers)
+             (agent-shell-workflow--project-buffers default-directory)
+             t)
+        nil)))
 (defun magit-dash--agent-shell-workflow-available-p ()
   "Return non-nil when workflow selection is available."
   (or (fboundp 'agent-shell-workflow-select)
