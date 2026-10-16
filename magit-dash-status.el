@@ -807,10 +807,9 @@ Calls CALLBACK with list of PR plists."
     (keymap-set magit-mode-map "." #'magit-dash-dispatch))
 
   ;; Inject into magit-dispatch essential commands at the end with 7-space alignment
-  (with-eval-after-load 'magit
-    (transient-remove-suffix 'magit-dispatch ".")
-    (transient-append-suffix 'magit-dispatch "C-x i"
-      '("." "    Dashboard" magit-dash-dispatch))))
+  (transient-remove-suffix 'magit-dispatch ".")
+  (transient-append-suffix 'magit-dispatch "C-x i"
+    '("." "    Dashboard" magit-dash-dispatch)))
 
 (provide 'magit-dash-status)
 ;;; magit-dash-status.el ends here

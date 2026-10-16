@@ -2718,8 +2718,7 @@ When QUIET is non-nil, suppresses echo area messages."
         (with-current-buffer buf
           (magit-dash-refresh-repo repo nil t))))))
 
-(with-eval-after-load 'magit-mode
-  (add-hook 'magit-post-refresh-hook #'magit-dash--on-magit-post-refresh))
+(add-hook 'magit-post-refresh-hook #'magit-dash--on-magit-post-refresh)
 
 ;;;###autoload
 (defun magit-dash-refresh-marked ()
