@@ -348,7 +348,7 @@ Common values are \"PR\" or \"⑂\"."
 
 ;;;; Hooks and operations
 
-(defconst magit-dash--hook-operations '(:fetch :pull :commit :push :sync)
+(defconst magit-dash--hook-operations '(:fetch :pull :stage :stage-all :commit :push :sync)
   "Fixed vocabulary of operations a `:hooks' or `magit-dash-global-hooks'
 entry may key on.")
 
@@ -593,10 +593,58 @@ Includes hostname, Emacs instance ID, and the current sync trigger."
           (or (and (boundp 'sprite-instance-id) sprite-instance-id) "unknown")
           (symbol-name magit-dash-sync-trigger)))
 
-(defun magit-dash--stage-all (repo)
-  "Stage all files in REPO.  Return t on success."
-  (magit-dash-gh--with-repo-dir (magit-dash-repo-path repo)
-    (= 0 (magit-call-git "add" "-A"))))
+(defun magit-dash--stage-all (repo-or-path)
+  "Stage all untracked, unstaged, and deleted files in REPO-OR-PATH.
+Follows ~/garen/scripts/git-readd by first removing any deleted tracked
+files via `git rm --quiet --ignore-unmatch', then staging all working tree
+changes via `git add -A'.  Return t on success, nil on failure."
+  (let* ((path (if (stringp repo-or-path)
+                   repo-or-path
+                 (magit-dash-repo-path repo-or-path)))
+         (default-directory (file-name-as-directory (expand-file-name path))))
+    (magit-dash-gh--with-repo-dir default-directory
+      (condition-case nil
+          (let ((deleted (seq-filter (lambda (s) (not (string-empty-p s)))
+                                     (ignore-errors
+                                       (process-lines (or (bound-and-true-p magit-git-executable) "git")
+                                                      "ls-files" "-d")))))
+            (when deleted
+              (dolist (chunk (seq-partition deleted 50))
+                (apply #'magit-call-git "rm" "--quiet" "--ignore-unmatch" "--" chunk)))
+            (= 0 (magit-call-git "add" "-A")))
+        (error nil)))))
+
+(defun magit-dash--stage-all-async (repo-or-path on-complete)
+  "Stage all files (untracked, unstaged, deleted) in REPO-OR-PATH asynchronously.
+Calls ON-COMPLETE with `ok' on success or `error' on failure."
+  (let ((path (if (stringp repo-or-path)
+                  repo-or-path
+                (magit-dash-repo-path repo-or-path))))
+    (magit-dash--run-git
+     path '("ls-files" "-d")
+     (lambda (deleted-out)
+       (let* ((deleted (seq-filter (lambda (s) (not (string-empty-p s)))
+                                   (split-string deleted-out "\n" t)))
+              (chunks (seq-partition deleted 50)))
+         (letrec ((do-add
+                   (lambda ()
+                     (magit-dash--run-git
+                      path '("add" "-A")
+                      (lambda (_) (funcall on-complete 'ok))
+                      (lambda (out code)
+                        (funcall on-complete 'error (format "git add -A failed (exit %d): %s" code out))))))
+                  (run-chunks
+                   (lambda (rem)
+                     (if (null rem)
+                         (funcall do-add)
+                       (magit-dash--run-git
+                        path (append '("rm" "--quiet" "--ignore-unmatch" "--") (car rem))
+                        (lambda (_) (funcall run-chunks (cdr rem)))
+                        (lambda (out code)
+                          (funcall on-complete 'error (format "git rm failed (exit %d): %s" code out))))))))
+           (funcall run-chunks chunks))))
+     (lambda (out code)
+       (funcall on-complete 'error (format "git ls-files failed (exit %d): %s" code out))))))
 
 (defun magit-dash--auto-commit (repo)
   "Stage all modified files in REPO and commit using its :auto-commit message.
@@ -1316,6 +1364,7 @@ Calls ON-COMPLETE with `ok', `skipped', or `error'."
   (pcase op
     (:fetch  #'magit-dash--auto-fetch-async)
     (:pull   #'magit-dash--auto-pull-async)
+    ((or :stage :stage-all) #'magit-dash--stage-all-async)
     (:commit #'magit-dash--auto-commit-async)
     (:push   #'magit-dash--auto-push-async)
     (:default-sync #'magit-dash--default-sync-async)
@@ -2947,13 +2996,63 @@ Signals `user-error' when :auto-commit is not configured for this repo."
       (message "magit-dash: nothing to commit or commit failed in %s"
                (magit-dash-repo-name repo)))))
 
+(defun magit-dash--current-repo-or-path ()
+  "Return `magit-dash-repo' struct or path for the current context.
+In `magit-dash-mode', returns the repo at point.
+In other buffers (such as `magit-status' or a file buffer), returns the
+registered `magit-dash-repo' matching `magit-toplevel' if one exists,
+otherwise the toplevel path string."
+  (cond
+   ((and (derived-mode-p 'magit-dash-mode)
+         (magit-dash--repo-at-point-p))
+    (magit-dash--repo-at-point))
+   (t
+    (let ((top (or (and (fboundp 'magit-toplevel) (magit-toplevel))
+                   (and default-directory
+                        (locate-dominating-file default-directory ".git")))))
+      (unless top
+        (user-error "Not inside a git repository"))
+      (setq top (file-name-as-directory (expand-file-name top)))
+      (or (seq-find (lambda (r)
+                      (file-equal-p (magit-dash-repo-path r) top))
+                    (magit-dash--all-repos))
+          top)))))
+
+;;;###autoload
 (defun magit-dash-stage-all ()
-  "Stage all working tree files in the repository at point."
+  "Stage all untracked, unstaged, and deleted files in the current repository.
+In `magit-dash-mode', stages the repo at point (or all marked repos if marks exist).
+In `magit-status' and other buffers, stages changes for the current repository
+and refreshes Magit.
+Follows ~/garen/scripts/git-readd by removing deleted tracked files and staging
+all working tree changes."
   (interactive)
-  (let ((repo (magit-dash--repo-at-point)))
-    (if (magit-dash--stage-all repo)
-        (message "magit-dash: staged all changes in %s" (magit-dash-repo-name repo))
-      (message "magit-dash: stage all failed in %s" (magit-dash-repo-name repo)))))
+  (cond
+   ((and (derived-mode-p 'magit-dash-mode) (magit-dash--has-marks-p))
+    (magit-dash-stage-all-all))
+   (t
+    (let* ((target (magit-dash--current-repo-or-path))
+           (name (if (stringp target)
+                     (file-name-nondirectory (directory-file-name target))
+                   (magit-dash-repo-name target)))
+           (path (if (stringp target) target (magit-dash-repo-path target))))
+      (if (magit-dash--stage-all target)
+          (progn
+            (when (fboundp 'magit-dash-gh--cache-remove)
+              (magit-dash-gh--cache-remove path :stats))
+            (when (magit-dash-repo-p target)
+              (when-let* ((buf (get-buffer magit-dash-buffer-name)))
+                (when (buffer-live-p buf)
+                  (magit-dash--collect-stats-async
+                   target
+                   (lambda (_stats)
+                     (when (buffer-live-p buf)
+                       (with-current-buffer buf
+                         (magit-dash--update-entry target))))))))
+            (when (fboundp 'magit-refresh)
+              (ignore-errors (magit-refresh)))
+            (message "magit-dash: staged all changes in %s" name))
+        (message "magit-dash: stage all failed in %s" name))))))
 
 (defun magit-dash-push ()
   "Push current branch to its push remote for the repository at point."
@@ -3636,6 +3735,22 @@ When disabled, only explicitly marked repos are targeted."
      "magit-gh push"
      (lambda (_) (magit-dash--maybe-refresh)))))
 
+;;;###autoload
+(defun magit-dash-stage-all-all ()
+  "Asynchronously stage all changes in marked repos, or all visible repos when none are marked."
+  (interactive)
+  (let ((repos (magit-dash--effective-repos)))
+    (unless repos
+      (user-error "No repositories to stage"))
+    (magit-dash--batch-run
+     repos
+     (lambda (r cb) (magit-dash--run-operation r :stage-all cb))
+     "magit-dash stage-all"
+     (lambda (_) (magit-dash--maybe-refresh)))))
+
+(defalias 'magit-dash-stage-all-marked #'magit-dash-stage-all-all)
+(defalias 'magit-dash-stage-all-batch #'magit-dash-stage-all-all)
+
 (defun magit-dash-submodule-update-all ()
   "Run git submodule update --init --recursive for marked or all visible repos."
   (interactive)
@@ -3746,6 +3861,8 @@ Indicates whether batch operations target all repos or marked repos."
     ("pu"  "Push all"        magit-dash-push-all
      :inapt-if-not magit-dash--batch-enabled-p)
     ("sa"  "Sync all"        magit-dash-sync-all
+     :inapt-if-not magit-dash--batch-enabled-p)
+    ("ta"  "Stage all"       magit-dash-stage-all-all
      :inapt-if-not magit-dash--batch-enabled-p)
     ("ca"  "Commit all"      magit-dash-commit-all
      :inapt-if-not magit-dash--batch-enabled-p)

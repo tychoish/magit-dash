@@ -133,7 +133,7 @@ Default GitHub host endpoint used when :gh-host is not specified during repo reg
 :CUSTOM_ID: magit-dash-global-hooks
 :END:
 
-Plist of ~:pre~/~:post~ hooks applied to every repo’s operations. Same shape as a repo’s ~:hooks~, keyed by operation (~:fetch~/~:pull~/ ~:commit~/~:push~/~:sync~), each value a plist of ~:pre~/~:post~ target lists.  ~:operation~ is not valid here — a global operation override would replace every repo’s operation with the same thing, which is not a real use case.  Set with ~magit-dash-set-global-hooks~ so the shape is validated; do not ~setq~ directly.
+Plist of ~:pre~/~:post~ hooks applied to every repo’s operations. Same shape as a repo’s ~:hooks~, keyed by operation (~:fetch~/~:pull~/~:stage-all~/~:commit~/~:push~/~:sync~), each value a plist of ~:pre~/~:post~ target lists.  ~:operation~ is not valid here — a global operation override would replace every repo’s operation with the same thing, which is not a real use case.  Set with ~magit-dash-set-global-hooks~ so the shape is validated; do not ~setq~ directly.
 
 **** [[file:../magit-dash.el::274][magit-dash-set-global-hooks]]
 :PROPERTIES:
@@ -484,7 +484,17 @@ Auto-commit modified files in the repository at point. Signals ~user-error~ when
 :CUSTOM_ID: magit-dash-stage-all
 :END:
 
-Stage all working tree files in the repository at point.
+Stage all untracked, unstaged, and deleted files in the current repository.
+In ~magit-dash-mode~, stages the repo at point (or all marked repos if marks exist).
+In ~magit-status~ and other buffers, stages changes for the current repository and refreshes Magit.
+Follows ~/garen/scripts/git-readd.
+
+**** [[file:../magit-dash.el][magit-dash-stage-all-all]] :command:
+:PROPERTIES:
+:CUSTOM_ID: magit-dash-stage-all-all
+:END:
+
+Asynchronously stage all changes in marked repos, or all visible repos when none are marked.
 
 **** [[file:../magit-dash.el::2393][magit-dash-push]] :command:
 :PROPERTIES:

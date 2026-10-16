@@ -2275,19 +2275,18 @@ A conflict (e.g. \"b\" and \"bp\" coexisting) causes transient to raise
      keys)))
 
 (defun test-magit-dash--all-transient-suffixes (prefix)
-  "Collect all suffix plists from transient PREFIX layout across all rows and columns."
-  (when-let* ((layout (get prefix 'transient--layout))
-              ((vectorp layout))
-              (rows (aref layout 2)))
-    (thread-last rows
-      (seq-filter #'vectorp)
-      (seq-mapcat (lambda (row)
-                    (let ((cols (aref row 2)))
-                      (if (vectorp cols) (append cols nil) cols))))
-      (seq-filter #'vectorp)
-      (seq-mapcat (lambda (col) (aref col 2)))
-      (seq-filter (lambda (s) (and (listp s) (eq (car s) 'transient-suffix))))
-      (seq-map #'cdr))))
+  "Collect all suffix plists from transient PREFIX layout across all levels."
+  (when-let* ((layout (get prefix 'transient--layout)))
+    (cl-labels ((walk (elem)
+                  (cond
+                   ((vectorp elem)
+                    (seq-mapcat #'walk elem))
+                   ((and (listp elem) (memq (car elem) '(transient-suffix transient-switch transient-argument)))
+                    (list (cdr elem)))
+                   ((listp elem)
+                    (seq-mapcat #'walk elem))
+                   (t nil))))
+      (walk layout))))
 
 (ert-deftest magit-dash/transient-menu-clear-marks-key ()
   "Clear marks suffix in `magit-dash-menu' is bound to mc."
@@ -3859,3 +3858,129 @@ The bug was that add-text-properties returns t, not the modified string."
                         (member k '("RET" "SPC")))
               (push (list p k) violations))))))
     (should (null violations))))
+
+;;; Stage-all operation and commands
+
+(ert-deftest magit-dash/hook-operations-includes-stage-all ()
+  "Test that `:stage-all' and `:stage' are registered in hook operations."
+  (should (memq :stage-all magit-dash--hook-operations))
+  (should (memq :stage magit-dash--hook-operations)))
+
+(ert-deftest magit-dash/stage-all-git-readd-behavior ()
+  "Test that `magit-dash--stage-all' stages untracked, modified, and deleted files."
+  (let* ((tmp-dir (file-name-as-directory (make-temp-file "magit-dash-stage-" t)))
+         (default-directory tmp-dir))
+    (unwind-protect
+        (progn
+          (process-lines "git" "init" "-q")
+          (process-lines "git" "config" "user.email" "test@example.com")
+          (process-lines "git" "config" "user.name" "Test")
+          ;; Initial commit
+          (with-temp-file (expand-file-name "tracked.txt" tmp-dir)
+            (insert "initial content\n"))
+          (with-temp-file (expand-file-name "to-delete.txt" tmp-dir)
+            (insert "to delete\n"))
+          (process-lines "git" "add" "tracked.txt" "to-delete.txt")
+          (process-lines "git" "commit" "-qm" "initial commit")
+
+          ;; Make changes: untracked file, modified file, deleted file
+          (with-temp-file (expand-file-name "untracked.txt" tmp-dir)
+            (insert "new untracked\n"))
+          (with-temp-file (expand-file-name "tracked.txt" tmp-dir)
+            (insert "modified content\n"))
+          (delete-file (expand-file-name "to-delete.txt" tmp-dir))
+
+          ;; Verify dirty state before stage-all
+          (let ((before-lines (process-lines "git" "status" "--porcelain")))
+            (should (seq-find (lambda (l) (string-prefix-p " D" l)) before-lines))
+            (should (seq-find (lambda (l) (string-prefix-p " M" l)) before-lines))
+            (should (seq-find (lambda (l) (string-prefix-p "??" l)) before-lines)))
+
+          ;; Run stage-all
+          (should (magit-dash--stage-all tmp-dir))
+
+          ;; Verify staged state after stage-all
+          (let ((after-lines (process-lines "git" "status" "--porcelain")))
+            (should (seq-find (lambda (l) (string-prefix-p "D " l)) after-lines))
+            (should (seq-find (lambda (l) (string-prefix-p "M " l)) after-lines))
+            (should (seq-find (lambda (l) (string-prefix-p "A " l)) after-lines))
+            ;; Ensure no remaining unstaged or untracked changes
+            (should-not (seq-find (lambda (l) (string-prefix-p " " l)) after-lines))
+            (should-not (seq-find (lambda (l) (string-prefix-p "??" l)) after-lines))))
+      (delete-directory tmp-dir t))))
+
+(ert-deftest magit-dash/stage-all-async-calls-ls-files-and-add ()
+  "Test that `magit-dash--stage-all-async' handles deleted files and git add -A."
+  (let* ((repo (magit-dash-repo--make :name "r" :path "/fake/r"))
+         (git-cmds nil)
+         (result nil))
+    (cl-letf (((symbol-function 'magit-dash--run-git)
+               (lambda (_path args on-success &optional _on-error)
+                 (push (car args) git-cmds)
+                 (cond
+                  ((equal args '("ls-files" "-d"))
+                   (funcall on-success "del1.txt\ndel2.txt\n"))
+                  ((equal (car args) "rm")
+                   (funcall on-success ""))
+                  ((equal args '("add" "-A"))
+                   (funcall on-success ""))))))
+      (magit-dash--stage-all-async repo (lambda (status) (setq result status))))
+    (should (eq result 'ok))
+    (should (member "ls-files" git-cmds))
+    (should (member "rm" git-cmds))
+    (should (member "add" git-cmds))))
+
+(ert-deftest magit-dash/stage-all-in-magit-status-refreshes ()
+  "Test that `magit-dash-stage-all' inside a git repository refreshes Magit."
+  (let* ((staged-path nil)
+         (refreshed nil))
+    (cl-letf (((symbol-function 'magit-dash--current-repo-or-path)
+               (lambda () "/mock/repo/"))
+              ((symbol-function 'magit-dash--stage-all)
+               (lambda (path) (setq staged-path path) t))
+              ((symbol-function 'magit-refresh)
+               (lambda () (setq refreshed t))))
+      (magit-dash-stage-all)
+      (should (equal "/mock/repo/" staged-path))
+      (should refreshed))))
+
+(ert-deftest magit-dash/stage-all-in-dashboard-marked-dispatches-batch ()
+  "Test that `magit-dash-stage-all' in dashboard with marks delegates to batch."
+  (let* ((batch-called nil))
+    (cl-letf (((symbol-function 'derived-mode-p)
+               (lambda (mode) (eq mode 'magit-dash-mode)))
+              ((symbol-function 'magit-dash--has-marks-p)
+               (lambda () t))
+              ((symbol-function 'magit-dash-stage-all-all)
+               (lambda () (setq batch-called t))))
+      (magit-dash-stage-all)
+      (should batch-called))))
+
+(ert-deftest magit-dash/stage-all-all-batch-runs-operation ()
+  "Test that `magit-dash-stage-all-all' runs `:stage-all' operation on effective repos."
+  (let* ((r1 (magit-dash-repo--make :name "r1" :path "/mock/r1"))
+         (batch-repos nil)
+         (batch-label nil))
+    (cl-letf (((symbol-function 'magit-dash--effective-repos)
+               (lambda () (list r1)))
+              ((symbol-function 'magit-dash--batch-run)
+               (lambda (repos _op label &optional _on-done)
+                 (setq batch-repos repos
+                       batch-label label))))
+      (magit-dash-stage-all-all)
+      (should (equal (list r1) batch-repos))
+      (should (equal "magit-dash stage-all" batch-label)))))
+
+(ert-deftest magit-dash/dispatch-menu-includes-stage-all ()
+  "Test that `magit-dash-dispatch' includes 'a' for `magit-dash-stage-all'."
+  (let* ((suffixes (test-magit-dash--all-transient-suffixes 'magit-dash-dispatch))
+         (stage-suffix (seq-find (lambda (s) (equal "a" (plist-get s :key))) suffixes)))
+    (should stage-suffix)
+    (should (eq (plist-get stage-suffix :command) 'magit-dash-stage-all))))
+
+(ert-deftest magit-dash/menu-includes-batch-stage-all ()
+  "Test that `magit-dash-menu' includes 'ta' for `magit-dash-stage-all-all'."
+  (let* ((suffixes (test-magit-dash--all-transient-suffixes 'magit-dash-menu))
+         (batch-stage (seq-find (lambda (s) (equal "ta" (plist-get s :key))) suffixes)))
+    (should batch-stage)
+    (should (eq (plist-get batch-stage :command) 'magit-dash-stage-all-all))))
