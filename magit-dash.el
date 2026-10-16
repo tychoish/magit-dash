@@ -3955,6 +3955,8 @@ Indicates whether batch operations target all repos or marked repos."
      :inapt-if-not magit-dash--repo-at-point-p)
     ("rs"  "Push"            magit-dash-push
      :inapt-if-not magit-dash--repo-at-point-ahead-p)
+    ("y"   "Prune branches"  magit-dash-prune-branches
+     :inapt-if-not magit-dash--repo-at-point-p)
     ("rr"  (lambda () (if (magit-dash--has-marks-p) "Refresh marked" "Refresh row"))
      magit-dash-refresh-repo
      :inapt-if-not magit-dash--can-refresh-repo-p)]
@@ -3985,10 +3987,9 @@ Indicates whether batch operations target all repos or marked repos."
      :inapt-if-not magit-dash--batch-enabled-p)
     ("ba"  (lambda () (if (magit-dash--has-marks-p) "Bootstrap marked" "Bootstrap all"))
      magit-dash-bootstrap-marked
-     :inapt-if-not magit-dash--has-missing-bootstrap-repos-p)
+     :if magit-dash--has-missing-bootstrap-repos-p)
     ("rm" "Refresh marked"   magit-dash-refresh-marked
-     :inapt-if-not magit-dash--has-marks-p)
-    ("rt" "Refresh by tag"   magit-dash-refresh-by-tag)]
+     :inapt-if-not magit-dash--has-marks-p)]
    ["Manage"
     ("ac"  "Auto-commit"     magit-dash-commit
      :inapt-if-not magit-dash--has-auto-commit-p)
@@ -4007,8 +4008,6 @@ Indicates whether batch operations target all repos or marked repos."
      :inapt-if-not magit-dash--has-commands-p)
     ("xb"  "Run in background" magit-dash-run-command-background
      :inapt-if-not magit-dash--has-commands-p)
-    ("y"   "Prune branches"  magit-dash-prune-branches
-     :inapt-if-not magit-dash--repo-at-point-p)
     ("ps"  "project save buffers" magit-dash-save-project-buffers
      :inapt-if-not magit-dash--repo-at-point-p)
     ("sb"  "Bump submodules" magit-dash-bump-submodules-menu
@@ -4016,6 +4015,7 @@ Indicates whether batch operations target all repos or marked repos."
    ["Dashboard"
     ("pr"  "PR views…"       magit-dash-gh-pr-views-menu)
     ("nt"  "Filter by tag"   magit-dash-filter-by-tag)
+    ("rt"  "Refresh by tag"  magit-dash-refresh-by-tag)
     ("hr"  (lambda () (if (magit-dash--has-marks-p) "Hide marked" "Hide repo"))
      magit-dash-hide-repo
      :inapt-if-not magit-dash--can-hide-p
