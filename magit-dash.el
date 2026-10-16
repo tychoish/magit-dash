@@ -2072,7 +2072,6 @@ space they split it proportionally."
 
     ;; Refresh operations
     (define-key m (kbd "r")     #'magit-dash-refresh-repo)
-    (define-key m (kbd "R")     #'magit-dash-refresh-repo)
     (define-key m (kbd "g")     #'magit-dash-refresh)
     (define-key m (kbd "M-r")   #'magit-dash-hard-refresh)
     (define-key m (kbd "C-c r") #'magit-dash-hard-refresh)
@@ -2155,20 +2154,7 @@ space they split it proportionally."
     (define-key m (kbd "x c") #'magit-dash-run-command)
     (define-key m (kbd "x b") #'magit-dash-run-command-background)
 
-    ;; Legacy single/capital aliases preserved for muscle memory
-    (define-key m (kbd "G")   #'magit-dash-stage-all)
-    (define-key m (kbd "F")   #'magit-dash-fetch-all)
-    (define-key m (kbd "U")   #'magit-dash-pull-all)
-    (define-key m (kbd "P")   #'magit-dash-push)
-    (define-key m (kbd "S")   #'magit-dash-sync-all)
-    (define-key m (kbd "A")   #'magit-dash-commit-all)
-    (define-key m (kbd "L")   #'magit-dash-magit-log-full)
-    (define-key m (kbd "T")   #'magit-dash-toggle-column)
-    (define-key m (kbd "W")   #'magit-dash-worktree-add)
-    (define-key m (kbd "Q")   #'magit-dash-agent-shell-queue)
-    (define-key m (kbd "Z")   #'magit-dash-agent-shell-new)
-    (define-key m (kbd "B")   #'magit-dash-switch-branch)
-    (define-key m (kbd "C")   #'magit-dash-commit)
+    ;; Convenient single-key convenience aliases
     (define-key m (kbd "n")   #'magit-dash-sync)
     (define-key m (kbd "i")   #'magit-dash-add-tag)
     (define-key m (kbd "k")   #'magit-dash-worktree-delete)

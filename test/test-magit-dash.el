@@ -3687,10 +3687,10 @@ The bug was that add-text-properties returns t, not the modified string."
       (magit-dash-refresh-marked)
       (should (equal (list r1) refreshed)))))
 
-(ert-deftest magit-dash/keybinding-R-bound-to-refresh-repo ()
-  "Key bindings r and R in `magit-dash-mode-map' are bound to `magit-dash-refresh-repo'."
+(ert-deftest magit-dash/keybinding-r-bound-to-refresh-repo ()
+  "Key binding r in `magit-dash-mode-map' is bound to `magit-dash-refresh-repo'."
   (should (eq (lookup-key magit-dash-mode-map (kbd "r")) #'magit-dash-refresh-repo))
-  (should (eq (lookup-key magit-dash-mode-map (kbd "R")) #'magit-dash-refresh-repo))
+  (should-not (eq (lookup-key magit-dash-mode-map (kbd "R")) #'magit-dash-refresh-repo))
   (should (fboundp 'magit-dash-refresh-row))
   (should (eq (symbol-function 'magit-dash-refresh-row) #'magit-dash-refresh-repo)))
 
@@ -3699,7 +3699,21 @@ The bug was that add-text-properties returns t, not the modified string."
   (let ((m magit-dash-mode-map))
     ;; Refresh
     (should (eq (lookup-key m (kbd "r")) #'magit-dash-refresh-repo))
-    (should (eq (lookup-key m (kbd "R")) #'magit-dash-refresh-repo))
+    ;; Uppercase legacy magit-dash commands removed
+    (should-not (eq (lookup-key m (kbd "R")) #'magit-dash-refresh-repo))
+    (should-not (eq (lookup-key m (kbd "G")) #'magit-dash-stage-all))
+    (should-not (eq (lookup-key m (kbd "F")) #'magit-dash-fetch-all))
+    (should-not (eq (lookup-key m (kbd "U")) #'magit-dash-pull-all))
+    (should-not (eq (lookup-key m (kbd "P")) #'magit-dash-push))
+    (should-not (eq (lookup-key m (kbd "S")) #'magit-dash-sync-all))
+    (should-not (eq (lookup-key m (kbd "A")) #'magit-dash-commit-all))
+    (should-not (eq (lookup-key m (kbd "L")) #'magit-dash-magit-log-full))
+    (should-not (eq (lookup-key m (kbd "T")) #'magit-dash-toggle-column))
+    (should-not (eq (lookup-key m (kbd "W")) #'magit-dash-worktree-add))
+    (should-not (eq (lookup-key m (kbd "Q")) #'magit-dash-agent-shell-queue))
+    (should-not (eq (lookup-key m (kbd "Z")) #'magit-dash-agent-shell-new))
+    (should-not (eq (lookup-key m (kbd "B")) #'magit-dash-switch-branch))
+    (should-not (eq (lookup-key m (kbd "C")) #'magit-dash-commit))
     (should (eq (lookup-key m (kbd "g")) #'magit-dash-refresh))
     (should (eq (lookup-key m (kbd "M-r")) #'magit-dash-hard-refresh))
     ;; Fetch
