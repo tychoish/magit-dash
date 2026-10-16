@@ -2603,7 +2603,7 @@ Simulates the user's issue where a cache reset caused rendering problems."
                  (setq collect-called t)
                  (list :branch "feat" :dirty t :head-hash "new")))
               ((symbol-function 'magit-dash--maybe-refresh)
-               (lambda () (setq refresh-called t))))
+               (lambda (&optional _) (setq refresh-called t))))
       (magit-dash-cache-reset-at-point)
       (should collect-called)
       (should refresh-called)
@@ -3716,6 +3716,7 @@ The bug was that add-text-properties returns t, not the modified string."
     (should-not (eq (lookup-key m (kbd "C")) #'magit-dash-commit))
     (should (eq (lookup-key m (kbd "g")) #'magit-dash-refresh))
     (should (eq (lookup-key m (kbd "M-r")) #'magit-dash-hard-refresh))
+    (should-not (lookup-key m (kbd "C-c")))
     ;; Fetch
     (should (eq (lookup-key m (kbd "f f")) #'magit-dash-fetch))
     (should (eq (lookup-key m (kbd "f a")) #'magit-dash-fetch-all))
@@ -4076,3 +4077,89 @@ The bug was that add-text-properties returns t, not the modified string."
          (batch-stage (seq-find (lambda (s) (equal "ta" (plist-get s :key))) suffixes)))
     (should batch-stage)
     (should (eq (plist-get batch-stage :command) 'magit-dash-stage-all-all))))
+
+
+;;;; Single-line and targeted refresh operations
+
+(ert-deftest magit-dash/on-magit-post-refresh-updates-row ()
+  "magit-post-refresh hook triggers magit-dash-refresh-repo for matching repo."
+  (let* ((repo (magit-dash-repo--make :name "my-repo" :path "/tmp/my-repo"))
+         (magit-dash-repo-list (list repo))
+         (refreshed-repo nil)
+         (dash-buf (get-buffer-create magit-dash-buffer-name)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'magit-toplevel)
+                   (lambda () "/tmp/my-repo/"))
+                  ((symbol-function 'magit-dash-refresh-repo)
+                   (lambda (target &optional _force _quiet)
+                     (setq refreshed-repo target))))
+          (magit-dash--on-magit-post-refresh)
+          (should (eq refreshed-repo repo)))
+      (kill-buffer dash-buf))))
+
+(ert-deftest magit-dash/on-magit-post-refresh-skips-when-buffer-dead ()
+  "magit-post-refresh hook does nothing when magit-dash buffer is not live."
+  (when (get-buffer magit-dash-buffer-name)
+    (kill-buffer (get-buffer magit-dash-buffer-name)))
+  (let* ((repo (magit-dash-repo--make :name "my-repo" :path "/tmp/my-repo"))
+         (magit-dash-repo-list (list repo))
+         (refreshed nil))
+    (cl-letf (((symbol-function 'magit-toplevel)
+               (lambda () "/tmp/my-repo/"))
+              ((symbol-function 'magit-dash-refresh-repo)
+               (lambda (&rest _) (setq refreshed t))))
+      (magit-dash--on-magit-post-refresh)
+      (should-not refreshed))))
+
+(ert-deftest magit-dash/maybe-refresh-target-only-refreshes-target ()
+  "magit-dash--maybe-refresh with a target only refreshes that target."
+  (let* ((repo (magit-dash-repo--make :name "r1" :path "/tmp/r1"))
+         (refreshed-target nil)
+         (full-refreshed nil)
+         (dash-buf (get-buffer-create magit-dash-buffer-name)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'magit-dash-refresh-repo)
+                   (lambda (target &optional _force _quiet)
+                     (setq refreshed-target target)))
+                  ((symbol-function 'magit-dash-refresh)
+                   (lambda () (setq full-refreshed t))))
+          (magit-dash--maybe-refresh repo)
+          (should (eq refreshed-target repo))
+          (should-not full-refreshed)
+          ;; And without target, performs full refresh
+          (setq refreshed-target nil)
+          (magit-dash--maybe-refresh)
+          (should-not refreshed-target)
+          (should full-refreshed))
+      (kill-buffer dash-buf))))
+
+(ert-deftest magit-dash/commit-refreshes-target-repo ()
+  "magit-dash-commit refreshes the single repo on successful auto-commit."
+  (let* ((repo (magit-dash-repo--make :name "r1" :path "/tmp/r1" :auto-commit t))
+         (refreshed-repo nil))
+    (cl-letf (((symbol-function 'magit-dash--repo-at-point) (lambda () repo))
+              ((symbol-function 'magit-dash--auto-commit) (lambda (_) t))
+              ((symbol-function 'magit-dash-refresh-repo)
+               (lambda (r &optional _force _quiet) (setq refreshed-repo r))))
+      (magit-dash-commit)
+      (should (eq refreshed-repo repo)))))
+
+(ert-deftest magit-dash/batch-run-refreshes-each-row ()
+  "batch-run refreshes the repo row as each repo in the batch completes."
+  (let* ((r1 (magit-dash-repo--make :name "r1" :path "/tmp/r1"))
+         (r2 (magit-dash-repo--make :name "r2" :path "/tmp/r2"))
+         (repos (list r1 r2))
+         (refreshed-repos nil)
+         (dash-buf (get-buffer-create magit-dash-buffer-name)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'magit-dash-refresh-repo)
+                   (lambda (r &optional _force _quiet)
+                     (push r refreshed-repos))))
+          (magit-dash--batch-run
+           repos
+           (lambda (_repo cb) (funcall cb 'ok))
+           "test")
+          (should (= 2 (length refreshed-repos)))
+          (should (member r1 refreshed-repos))
+          (should (member r2 refreshed-repos)))
+      (kill-buffer dash-buf))))

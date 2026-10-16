@@ -1499,6 +1499,10 @@ ON-ALL-DONE with an alist of (NAME . STATUS)."
                 (magit-dash--log-operation
                  (magit-dash-repo-name repo) label status error-text)
                 (push (cons (magit-dash-repo-name repo) status) results)
+                (when-let* ((buf (get-buffer magit-dash-buffer-name))
+                            ((buffer-live-p buf)))
+                  (with-current-buffer buf
+                    (magit-dash-refresh-repo repo nil t)))
                 (setcar remaining (1- (car remaining)))
                 (when (= 0 (car remaining))
                   (let* ((ok (seq-count (lambda (r) (eq 'ok (cdr r))) results))
@@ -1520,12 +1524,17 @@ ON-ALL-DONE with an alist of (NAME . STATUS)."
            (error (funcall callback 'error (error-message-string err))))))
      repos)))
 
-(defun magit-dash--maybe-refresh ()
-  "Refresh the repo dashboard buffer if it is currently live."
+(defun magit-dash--maybe-refresh (&optional target)
+  "Refresh the repo dashboard buffer if it is currently live.
+When TARGET is non-nil (a `magit-dash-repo' struct, a list of repos,
+or a path), refresh only that target row or rows in-place.
+When TARGET is nil, performs a full dashboard refresh."
   (when-let* ((buf (get-buffer magit-dash-buffer-name))
               ((buffer-live-p buf)))
     (with-current-buffer buf
-      (magit-dash-refresh))))
+      (if target
+          (magit-dash-refresh-repo target nil t)
+        (magit-dash-refresh)))))
 
 ;;;; Cache management
 
@@ -2074,7 +2083,6 @@ space they split it proportionally."
     (define-key m (kbd "r")     #'magit-dash-refresh-repo)
     (define-key m (kbd "g")     #'magit-dash-refresh)
     (define-key m (kbd "M-r")   #'magit-dash-hard-refresh)
-    (define-key m (kbd "C-c r") #'magit-dash-hard-refresh)
 
     ;; Mark & menu operations
     (define-key m (kbd "*")   #'magit-dash-unmark-all)
@@ -2304,13 +2312,15 @@ until `magit-dash--populate-stats-async' updates them."
                    tabulated-list-entries))
     (tabulated-list-print t)))
 
-(defun magit-dash--populate-stats-async (repos &optional on-done)
+(defun magit-dash--populate-stats-async (repos &optional on-done quiet)
   "Asynchronously collect stats for stale or uncached repos in REPOS.
 Uses `gen-run-async' with bounded concurrency and cooperative timer yields.
 Emits a status message with repo counts; updates dashboard rows as each finishes.
 When ON-DONE is non-nil, call it when all stats collections finish.
+When QUIET is non-nil, suppresses echo area messages.
 Returns a cancellation handle."
-  (let* ((buf (current-buffer))
+  (let* ((buf (or (get-buffer magit-dash-buffer-name)
+                  (and (derived-mode-p 'magit-dash-mode) (current-buffer))))
          (needs-update
           (seq-filter
            (lambda (repo)
@@ -2326,20 +2336,22 @@ Returns a cancellation handle."
          (done (list 0)))
     (if (= stale 0)
         (progn
-          (message "magit-dash: %d repos (all cached)" total)
+          (unless quiet
+            (message "magit-dash: %d repos (all cached)" total))
           (when on-done (funcall on-done))
           (lambda (&rest _) nil))
-      (message "magit-dash: %d repos, loading %d…" total stale)
+      (unless quiet
+        (message "magit-dash: %d repos, loading %d…" total stale))
       (gen-run-async
        (lambda (repo done-cb)
          (magit-dash--collect-stats-async
           repo
           (lambda (_stats)
             (setcar done (1+ (car done)))
-            (when (buffer-live-p buf)
+            (when (and buf (buffer-live-p buf))
               (with-current-buffer buf
                 (magit-dash--update-entry repo)))
-            (when (= (car done) stale)
+            (when (and (= (car done) stale) (not quiet))
               (message "magit-dash: %d repos, %d updated" total stale))
             (funcall done-cb))))
        needs-update
@@ -2590,10 +2602,11 @@ re-collected asynchronously."
   (or (magit-dash--has-marks-p)
       (magit-dash--repo-at-point-p)))
 
-(defun magit-dash--refresh-repos (repos &optional force)
+(defun magit-dash--refresh-repos (repos &optional force quiet)
   "Refresh only REPOS, updating their dashboard rows in-place.
 When FORCE is non-nil, resets last fetch and sync attempt timestamps
-for REPOS so automatic fetch/sync is not throttled."
+for REPOS so automatic fetch/sync is not throttled.
+When QUIET is non-nil, suppresses echo area messages."
   (let ((buf (or (get-buffer magit-dash-buffer-name)
                  (and (derived-mode-p 'magit-dash-mode) (current-buffer)))))
     (seq-do
@@ -2607,7 +2620,9 @@ for REPOS so automatic fetch/sync is not throttled."
            (remhash exp-path magit-dash--repo-last-fetch-attempts)
            (remhash exp-path magit-dash--repo-last-sync-attempts))))
      repos)
-    (let ((stats-handle (magit-dash--populate-stats-async repos))
+    (let ((stats-handle (if quiet
+                            (magit-dash--populate-stats-async repos nil quiet)
+                          (magit-dash--populate-stats-async repos)))
           (ci-handle (when (and buf (buffer-live-p buf))
                        (magit-dash-gh-ci-fetch-batch repos)))
           (sync-handle (magit-dash--refresh-fetch-or-sync-async repos)))
@@ -2617,7 +2632,7 @@ for REPOS so automatic fetch/sync is not throttled."
         (when (functionp sync-handle) (funcall sync-handle action))))))
 
 ;;;###autoload
-(defun magit-dash-refresh-repo (&optional target force)
+(defun magit-dash-refresh-repo (&optional target force quiet)
   "Refresh only TARGET or repository at point, updating row(s) in-place.
 When TARGET is nil:
   - If repositories are marked, refreshes all marked repositories.
@@ -2630,10 +2645,12 @@ TARGET may also be:
   - A symbol representing a tag, refreshing all repositories with that tag.
   - A string (path or name) identifying a repository.
 When FORCE is non-nil (the default), resets in-memory fetch and sync
-attempt timestamps so operations are not skipped."
+attempt timestamps so operations are not skipped.
+When QUIET is non-nil, suppresses echo area messages."
   (interactive (list (when current-prefix-arg
                        (magit-dash--read-tag "Refresh repos with tag: " :require-match t))
-                     t))
+                     t
+                     nil))
   (let* ((force (if (null force) t force))
          (repos
           (cond
@@ -2669,13 +2686,40 @@ attempt timestamps so operations are not skipped."
             (user-error "Invalid target for refresh: %s" target)))))
     (unless repos
       (user-error "No repositories to refresh"))
-    (if (= (length repos) 1)
-        (message "magit-dash: refreshing %s…" (magit-dash-repo-name (car repos)))
-      (message "magit-dash: refreshing %d repos…" (length repos)))
-    (magit-dash--refresh-repos repos force)))
+    (unless quiet
+      (if (= (length repos) 1)
+          (message "magit-dash: refreshing %s…" (magit-dash-repo-name (car repos)))
+        (message "magit-dash: refreshing %d repos…" (length repos))))
+    (if quiet
+        (magit-dash--refresh-repos repos force quiet)
+      (magit-dash--refresh-repos repos force))))
 
 ;;;###autoload
 (defalias 'magit-dash-refresh-row #'magit-dash-refresh-repo)
+
+(defvar magit-dash--inhibit-post-refresh-hook nil
+  "Non-nil when `magit-dash--on-magit-post-refresh' is executing.")
+
+(defun magit-dash--on-magit-post-refresh ()
+  "Refresh dashboard row for the current repository after a Magit operation."
+  (unless magit-dash--inhibit-post-refresh-hook
+    (let ((magit-dash--inhibit-post-refresh-hook t))
+      (when-let* ((buf (get-buffer magit-dash-buffer-name))
+                  ((buffer-live-p buf))
+                  (top (or (and (fboundp 'magit-toplevel) (magit-toplevel))
+                           default-directory))
+                  (top-dir (file-name-as-directory (expand-file-name top)))
+                  (repo (seq-find (lambda (r)
+                                    (let ((r-dir (file-name-as-directory
+                                                  (expand-file-name (magit-dash-repo-path r)))))
+                                      (or (string-equal r-dir top-dir)
+                                          (ignore-errors (file-equal-p r-dir top-dir)))))
+                                  (magit-dash--all-repos))))
+        (with-current-buffer buf
+          (magit-dash-refresh-repo repo nil t))))))
+
+(with-eval-after-load 'magit-mode
+  (add-hook 'magit-post-refresh-hook #'magit-dash--on-magit-post-refresh))
 
 ;;;###autoload
 (defun magit-dash-refresh-marked ()
@@ -3041,7 +3085,9 @@ Signals `user-error' when :auto-commit is not configured for this repo."
     (unless (magit-dash-repo-auto-commit repo)
       (user-error "Auto-commit is not configured for %s" (magit-dash-repo-name repo)))
     (if (magit-dash--auto-commit repo)
-        (message "magit-dash: committed changes in %s" (magit-dash-repo-name repo))
+        (progn
+          (magit-dash-refresh-repo repo nil t)
+          (message "magit-dash: committed changes in %s" (magit-dash-repo-name repo)))
       (message "magit-dash: nothing to commit or commit failed in %s"
                (magit-dash-repo-name repo)))))
 
@@ -3087,17 +3133,8 @@ all working tree changes."
            (path (if (stringp target) target (magit-dash-repo-path target))))
       (if (magit-dash--stage-all target)
           (progn
-            (when (fboundp 'magit-dash-gh--cache-remove)
-              (magit-dash-gh--cache-remove path :stats))
             (when (magit-dash-repo-p target)
-              (when-let* ((buf (get-buffer magit-dash-buffer-name)))
-                (when (buffer-live-p buf)
-                  (magit-dash--collect-stats-async
-                   target
-                   (lambda (_stats)
-                     (when (buffer-live-p buf)
-                       (with-current-buffer buf
-                         (magit-dash--update-entry target))))))))
+              (magit-dash-refresh-repo target nil t))
             (when (fboundp 'magit-refresh)
               (ignore-errors (magit-refresh)))
             (message "magit-dash: staged all changes in %s" name))
@@ -3106,8 +3143,9 @@ all working tree changes."
 (defun magit-dash-push ()
   "Push current branch to its push remote for the repository at point."
   (interactive)
-  (magit-dash--with-repo (magit-dash--repo-at-point)
-    (call-interactively #'magit-push-current-to-pushremote)))
+  (let ((repo (magit-dash--repo-at-point)))
+    (magit-dash--with-repo repo
+      (call-interactively #'magit-push-current-to-pushremote))))
 
 (defun magit-dash-sync ()
   "Run the configured auto operations for the repository at point asynchronously.
@@ -3120,7 +3158,7 @@ Signals `user-error' when no auto operations are configured for this repo."
       (magit-dash--auto-sync-async
        repo
        (lambda (_status &optional _error-text)
-         (magit-dash--maybe-refresh))))))
+         (magit-dash-refresh-repo repo nil t))))))
 
 (defun magit-dash-commit-all ()
   "Auto-commit marked repos (or all if none marked) with :auto-commit configured.
@@ -3134,7 +3172,7 @@ Displays a summary message and refreshes the dashboard when all complete."
      repos
      #'magit-dash--auto-commit-async
      "magit-dash commit"
-     (lambda (_) (magit-dash--maybe-refresh)))))
+     (lambda (_) (magit-dash--maybe-refresh repos)))))
 
 (defun magit-dash-sync-all ()
   "Run auto operations for marked repos (or all if none marked), then refresh.
@@ -3147,7 +3185,7 @@ Operations run asynchronously."
      repos
      #'magit-dash--auto-sync-async
      "magit-dash sync"
-     (lambda (_) (magit-dash--maybe-refresh)))))
+     (lambda (_) (magit-dash--maybe-refresh repos)))))
 
 ;;;###autoload
 (defun magit-dash-sync-repo ()
@@ -3169,7 +3207,7 @@ Operations run asynchronously."
         (magit-dash--auto-sync-async
          repo
          (lambda (_status &optional _error-text)
-           (magit-dash--maybe-refresh)))))))
+           (magit-dash-refresh-repo repo nil t)))))))
 
 (defun magit-dash-auto-sync ()
   "Run auto operations for marked repos (or all if none marked) asynchronously.
@@ -3352,8 +3390,11 @@ Adds to any existing marks rather than replacing them."
 (defun magit-dash-switch-branch ()
   "Switch branch in the repository at point via magit."
   (interactive)
-  (magit-dash--with-repo (magit-dash--repo-at-point)
-    (call-interactively #'magit-checkout)))
+  (let ((repo (magit-dash--repo-at-point)))
+    (magit-dash--with-repo repo
+      (call-interactively #'magit-checkout))
+    (when repo
+      (magit-dash-refresh-repo repo nil t))))
 
 (defun magit-dash-prune-branches ()
   "Prune merged branches in a repository.
@@ -3362,8 +3403,20 @@ otherwise the git repository containing the current buffer (works from any
 `magit' buffer or a file/`dired' buffer inside a repo), and finally prompts
 among the registered repositories when neither applies."
   (interactive)
-  (let ((default-directory (file-name-as-directory (magit-dash--resolve-repo-path))))
-    (magit-dash-gh-prune-merged-branches)))
+  (let* ((repo (ignore-errors (magit-dash--repo-at-point)))
+         (path (magit-dash--resolve-repo-path))
+         (default-directory (file-name-as-directory path)))
+    (magit-dash-gh-prune-merged-branches)
+    (if repo
+        (magit-dash-refresh-repo repo nil t)
+      (when-let* ((target-dir (file-name-as-directory (expand-file-name path)))
+                  (r (seq-find (lambda (it)
+                                 (let ((it-dir (file-name-as-directory
+                                                (expand-file-name (magit-dash-repo-path it)))))
+                                   (or (string-equal it-dir target-dir)
+                                       (ignore-errors (file-equal-p it-dir path)))))
+                               (magit-dash--all-repos))))
+        (magit-dash-refresh-repo r nil t)))))
 
 ;;;###autoload
 (defun magit-dash-drop-stashes ()
@@ -3768,7 +3821,7 @@ When disabled, only explicitly marked repos are targeted."
      repos
      #'magit-dash--fetch-async
      "magit-gh fetch"
-     (lambda (_) (magit-dash--maybe-refresh)))))
+     (lambda (_) (magit-dash--maybe-refresh repos)))))
 
 (defun magit-dash-pull-all ()
   "Asynchronously pull marked repos, or all visible repos when none are marked."
@@ -3780,7 +3833,7 @@ When disabled, only explicitly marked repos are targeted."
      repos
      #'magit-dash--pull-async
      "magit-gh pull"
-     (lambda (_) (magit-dash--maybe-refresh)))))
+     (lambda (_) (magit-dash--maybe-refresh repos)))))
 
 (defun magit-dash-push-all ()
   "Asynchronously push marked repos, or all visible repos when none are marked."
@@ -3792,7 +3845,7 @@ When disabled, only explicitly marked repos are targeted."
      repos
      #'magit-dash--push-async
      "magit-gh push"
-     (lambda (_) (magit-dash--maybe-refresh)))))
+     (lambda (_) (magit-dash--maybe-refresh repos)))))
 
 ;;;###autoload
 (defun magit-dash-stage-all-all ()
@@ -3805,7 +3858,7 @@ When disabled, only explicitly marked repos are targeted."
      repos
      (lambda (r cb) (magit-dash--run-operation r :stage-all cb))
      "magit-dash stage-all"
-     (lambda (_) (magit-dash--maybe-refresh)))))
+     (lambda (_) (magit-dash--maybe-refresh repos)))))
 
 (defalias 'magit-dash-stage-all-marked #'magit-dash-stage-all-all)
 (defalias 'magit-dash-stage-all-batch #'magit-dash-stage-all-all)
@@ -3820,7 +3873,7 @@ When disabled, only explicitly marked repos are targeted."
      repos
      #'magit-dash--submodule-update-async
      "magit-dash submodule-update"
-     (lambda (_) (magit-dash--maybe-refresh)))))
+     (lambda (_) (magit-dash--maybe-refresh repos)))))
 
 ;;;; Transient menus
 
