@@ -326,15 +326,13 @@ Set to nil to leave `which-key-idle-delay' untouched."
   :type '(choice (number :tag "Seconds") (const :tag "Disabled" nil))
   :group 'magit-dash)
 
-(defcustom magit-dash-which-key-abbreviate-commands 'md
+(defcustom magit-dash-which-key-abbreviate-commands 'strip
   "How to abbreviate command names in `which-key' for `magit-dash-mode'.
-When set to `md' (or t), `magit-dash-' becomes `md-',
-`magit-dash-agent-shell-' becomes `as-', and
-`magit-dash-agent-shell-queue' becomes `asq'.
-When set to `strip', `magit-dash-' is removed completely.
+When set to `strip' (or t), the `magit-dash-' prefix is removed completely.
+When set to `md', `magit-dash-' becomes `md-'.
 When nil, no replacements are registered."
-  :type '(choice (const :tag "Abbreviate as md- / as- / asq-" md)
-                 (const :tag "Strip magit-dash- prefix completely" strip)
+  :type '(choice (const :tag "Strip magit-dash- prefix completely" strip)
+                 (const :tag "Abbreviate prefix as md-" md)
                  (const :tag "Disabled" nil))
   :group 'magit-dash)
 
@@ -2259,21 +2257,11 @@ Applied for `magit-dash-mode'.  Does nothing if
 `which-key-replacement-alist' is not defined."
   (when (and magit-dash-which-key-abbreviate-commands
              (boundp 'which-key-replacement-alist))
-    (let* ((prefix-repl (if (eq magit-dash-which-key-abbreviate-commands 'strip)
+    (let* ((prefix-repl (if (memq magit-dash-which-key-abbreviate-commands '(strip t))
                             "\\1"
                           "md-\\1"))
-           (rules
-            (list
-             (cons (cons nil "\\`magit-dash-agent-shell-queue\\'")
-                   (cons nil "asq"))
-             (cons (cons nil "\\`magit-dash-agent-shell-queue-\\(.*\\)")
-                   (cons nil "asq-\\1"))
-             (cons (cons nil "\\`magit-dash-agent-shell\\'")
-                   (cons nil "as"))
-             (cons (cons nil "\\`magit-dash-agent-shell-\\(.*\\)")
-                   (cons nil "as-\\1"))
-             (cons (cons nil "\\`magit-dash-\\(.*\\)")
-                   (cons nil prefix-repl)))))
+           (rules (list (cons (cons nil "\\`magit-dash-\\(.*\\)")
+                              (cons nil prefix-repl)))))
       (setq which-key-replacement-alist
             (cons (cons 'magit-dash-mode rules)
                   (assq-delete-all 'magit-dash-mode which-key-replacement-alist))))))

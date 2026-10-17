@@ -4256,18 +4256,18 @@ The bug was that add-text-properties returns t, not the modified string."
     (should (equal "hide" (cadr (assoc ?h (cdr m)))))
     (should (equal "command" (cadr (assoc ?x (cdr m)))))))
 
+(ert-deftest magit-dash/which-key-default-abbreviation-is-strip ()
+  "Test that default abbreviation setting is 'strip."
+  (should (eq (eval (car (get 'magit-dash-which-key-abbreviate-commands 'standard-value))) 'strip)))
+
 (ert-deftest magit-dash/which-key-register-replacements-md ()
-  "Test which-key replacement rules when configured with default 'md abbreviation."
+  "Test which-key replacement rules when configured with 'md abbreviation."
   (let ((which-key-replacement-alist nil)
         (magit-dash-which-key-abbreviate-commands 'md))
     (magit-dash--which-key-register-replacements)
     (let ((rules (alist-get 'magit-dash-mode which-key-replacement-alist)))
       (should rules)
-      (should (assoc (cons nil "\\`magit-dash-agent-shell-queue\\'") rules))
-      (should (equal (cdr (assoc (cons nil "\\`magit-dash-agent-shell-queue\\'") rules))
-                     '(nil . "asq")))
-      (should (equal (cdr (assoc (cons nil "\\`magit-dash-agent-shell\\'") rules))
-                     '(nil . "as")))
+      (should (equal 1 (length rules)))
       (should (equal (cdr (assoc (cons nil "\\`magit-dash-\\(.*\\)") rules))
                      '(nil . "md-\\1"))))))
 
