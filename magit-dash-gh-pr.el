@@ -38,6 +38,9 @@
 (declare-function magit-dash--format-age "magit-dash")
 (declare-function magit-dash-repo-p "magit-dash")
 (declare-function magit-dash-repo-path "magit-dash")
+(declare-function magit-dash-repo-name "magit-dash")
+(declare-function magit-dash-repo-repo "magit-dash")
+(declare-function magit-dash-repo-upstream-repo "magit-dash")
 (declare-function magit-dash--repo-at-point "magit-dash")
 (declare-function magit-dash--repo-at-point-p "magit-dash")
 (declare-function magit-dash-gh-actions-fetch-for-pr "magit-dash-gh-actions")
@@ -241,15 +244,29 @@ Creates an artifact directory under plans/ containing:
 
 ;;;; PR dashboard mode
 
+(defcustom magit-dash-gh-pr-worktree-path-format 'sibling
+  "Format or strategy for PR worktree checkout paths.
+Can be:
+- `sibling' (default): creates `<parent>/<repo-base>-<name>'
+- `dot-wt': creates `<repo-root>/.wt/<name>'
+- A string format where `%r' is the repo root, `%b' is the repo base name,
+  and `%n' is the worktree name (e.g. \"pr-42\").
+- A function called with (REPO-DIR NAME ENTRY) returning an absolute path string."
+  :type '(choice (const :tag "Sibling directory (<repo>-<name>)" sibling)
+                 (const :tag "Subdirectory under .wt/ (<repo>/.wt/<name>)" dot-wt)
+                 (string :tag "Format string (%r=repo, %b=repo-base, %n=name)")
+                 (function :tag "Custom function"))
+  :group 'magit-dash)
+
 (defvar magit-dash-gh-pr-columns
-  '((org . nil) (repo . t) (worktree . t) (pr . t) (title . t) (ci . t) (age . t) (comments . t) (review . t))
+  '((org . nil) (repo . t) (worktree . t) (pr . t) (title . t) (ci . t) (updated . t) (age . nil) (comments . t) (review . t))
   "Alist of (COLUMN-SYMBOL . ENABLED) for the PR dashboard.
 Persisted across sessions via `savehist-additional-variables'.")
 
 (add-to-list 'savehist-additional-variables 'magit-dash-gh-pr-columns)
 
 (defconst magit-dash-gh-pr--all-columns
-  '(org repo worktree pr title ci age comments review)
+  '(org repo worktree pr title ci updated age comments review)
   "All available PR dashboard columns in display order.")
 
 (defconst magit-dash-gh-pr--column-defs
@@ -258,7 +275,8 @@ Persisted across sessions via `savehist-additional-variables'.")
     (worktree . ("WT"      3  t))
     (pr       . ("PR#"     5  nil))
     (title    . ("Title"   38 t))
-    (ci       . ("CI"      8  t))
+    (ci       . ("CI"      3  t))
+    (updated  . ("Updated" 8  nil))
     (age      . ("Age"     6  nil))
     (comments . ("Cmts"    4  nil))
     (review   . ("Review"  14 t)))
@@ -282,7 +300,11 @@ Kept in sync with `magit-dash-gh-pr-columns'."
           (cdr (assq 'org magit-dash-gh-pr-columns)))
     (if-let* ((entry (assq col magit-dash-gh-pr-columns)))
         (cdr entry)
-      nil)))
+      (if (eq col 'updated)
+          (if-let* ((age-entry (assq 'age magit-dash-gh-pr-columns)))
+              (cdr age-entry)
+            t)
+        nil))))
 
 (defun magit-dash-gh-pr--active-columns ()
   "Return PR column symbols that are currently enabled, in display order."
@@ -463,13 +485,13 @@ Returns \"SUCCESS\", \"FAILURE\", \"PENDING\", \"ERROR\", or nil."
            (t nil))))))))
 
 (defun magit-dash-gh-pr-dashboard--format-ci (rollup-state)
-  "Format CI ROLLUP-STATE string for display."
+  "Format CI ROLLUP-STATE string for display using checkmark/x glyphs.
+Uses the same ✓/x/⟳ indicators as the repository dashboard."
   (pcase rollup-state
-    ("SUCCESS" (propertize "pass" 'face 'magit-dash-gh-pr-ci-pass-face))
-    ("FAILURE" (propertize "fail" 'face 'magit-dash-gh-pr-ci-fail-face))
-    ("PENDING" (propertize "pending" 'face 'magit-dash-gh-pr-ci-pending-face))
-    ("ERROR" (propertize "error" 'face 'magit-dash-gh-pr-ci-fail-face))
-    (_ "—")))
+    ("SUCCESS" (propertize "✓" 'face 'magit-dash-gh-pr-ci-pass-face))
+    ((or "FAILURE" "ERROR") (propertize "x" 'face 'magit-dash-gh-pr-ci-fail-face))
+    ("PENDING" (propertize "⟳" 'face 'magit-dash-gh-pr-ci-pending-face))
+    (_ (propertize "—" 'face 'shadow))))
 
 (defun magit-dash-gh-pr-dashboard--format-review (decision)
   "Format review DECISION string for display."
@@ -511,14 +533,14 @@ Otherwise uses `gh search prs' for cross-repo listing."
         (append
          (list "pr" "list" "-R" repo "--state" state
                "--json"
-               "number,title,state,author,updatedAt,comments,reviewDecision,statusCheckRollup,isDraft,url"
+               "number,title,state,author,createdAt,updatedAt,comments,reviewDecision,statusCheckRollup,isDraft,url,headRefName"
                "--jq" "map(. + {commentsCount: (.comments | length)} | del(.comments))")
          (when author (list "--author" author)))
       (append
        (list "search" "prs"
              "--state" (if (member state '("open" "closed")) state "open")
              "--json"
-             "number,title,state,repository,author,updatedAt,commentsCount,isDraft,url")
+             "number,title,state,repository,author,createdAt,updatedAt,commentsCount,isDraft,url")
        (when author
          (list "--author" author))
        (when review-requested
@@ -532,7 +554,11 @@ Otherwise uses `gh search prs' for cross-repo listing."
 (defun magit-dash-gh-pr-dashboard--build-entry (pr repo-name)
   "Return a `tabulated-list-entries' entry for PR alist in REPO-NAME using active columns."
   (let* ((number (map-elt pr 'number))
-         (entry-id (list :number number :repo repo-name :pr pr))
+         (entry-id (list :number number
+                         :repo repo-name
+                         :updated (map-elt pr 'updatedAt)
+                         :head-ref (map-elt pr 'headRefName)
+                         :pr pr))
          (pair (magit-dash-gh-pr--split-slug repo-name))
          (org-str (car pair))
          (short-repo (if (string-empty-p (cdr pair)) (car pair) (cdr pair)))
@@ -556,8 +582,11 @@ Otherwise uses `gh search prs' for cross-repo listing."
                       ('ci
                        (magit-dash-gh-pr-dashboard--format-ci
                         (magit-dash-gh-pr--parse-status-rollup (map-elt pr 'statusCheckRollup))))
-                      ('age
+                      ('updated
                        (or (magit-dash-gh-pr-dashboard--format-age (map-elt pr 'updatedAt)) "?"))
+                      ('age
+                       (or (magit-dash-gh-pr-dashboard--format-age
+                            (or (map-elt pr 'createdAt) (map-elt pr 'updatedAt))) "?"))
                       ('comments
                        (number-to-string (magit-dash-gh-pr-dashboard--comments-count pr)))
                       ('review
@@ -581,25 +610,30 @@ Returns nil when OUTPUT is not a JSON array."
                    prs))))))
 
 (defun magit-dash-gh-pr-dashboard--merge-ci (buf repo output)
-  "Merge statusCheckRollup values from OUTPUT into REPO's rows in BUF.
-OUTPUT is `gh pr list' JSON with `number' and `statusCheckRollup' fields."
+  "Merge statusCheckRollup and headRefName values from OUTPUT into REPO's rows in BUF.
+OUTPUT is `gh pr list' JSON with `number', `statusCheckRollup', and `headRefName' fields."
   (when (buffer-live-p buf)
     (let ((trimmed (string-trim output)))
       (when (string-prefix-p "[" trimmed)
-        (when-let* ((rollups (json-parse-string trimmed :array-type 'list :object-type 'alist))
+        (when-let* ((items (json-parse-string trimmed :array-type 'list :object-type 'alist))
                     (table (make-hash-table :test #'eql)))
-          (dolist (r rollups)
-            (puthash (map-elt r 'number) (map-elt r 'statusCheckRollup) table))
+          (dolist (item items)
+            (puthash (map-elt item 'number) item table))
           (with-current-buffer buf
             (setq tabulated-list-entries
                   (seq-map (lambda (entry)
                              (let* ((id (car entry))
-                                    (rollup (and (equal (plist-get id :repo) repo)
-                                                 (gethash (plist-get id :number) table))))
-                               (if rollup
-                                   (magit-dash-gh-pr-dashboard--build-entry
-                                    (cons (cons 'statusCheckRollup rollup) (plist-get id :pr))
-                                    repo)
+                                    (match (and (equal (plist-get id :repo) repo)
+                                                (gethash (plist-get id :number) table))))
+                               (if match
+                                   (let* ((rollup (map-elt match 'statusCheckRollup))
+                                          (head-ref (map-elt match 'headRefName))
+                                          (pr-data (plist-get id :pr))
+                                          (merged (append
+                                                   (when rollup (list (cons 'statusCheckRollup rollup)))
+                                                   (when head-ref (list (cons 'headRefName head-ref)))
+                                                   pr-data)))
+                                     (magit-dash-gh-pr-dashboard--build-entry merged repo))
                                  entry)))
                            tabulated-list-entries))
             (tabulated-list-print t)))))))
@@ -625,7 +659,7 @@ return `statusCheckRollup'.  DIR is the working directory for `gh'."
                  (funcall done)
                (magit-dash-gh--run-process
                 (list "pr" "list" "-R" repo "--state" state
-                      "--json" "number,statusCheckRollup" "--limit" "200")
+                      "--json" "number,statusCheckRollup,headRefName" "--limit" "200")
                 dir
                 (lambda (output)
                   (magit-dash-gh-pr-dashboard--merge-ci buf repo output)
@@ -638,7 +672,7 @@ return `statusCheckRollup'.  DIR is the working directory for `gh'."
         (dolist (repo repos)
           (magit-dash-gh--run-process
            (list "pr" "list" "-R" repo "--state" state
-                 "--json" "number,statusCheckRollup" "--limit" "200")
+                 "--json" "number,statusCheckRollup,headRefName" "--limit" "200")
            dir
            (lambda (output) (magit-dash-gh-pr-dashboard--merge-ci buf repo output))
            (lambda (_output _code) nil)))))))
@@ -870,16 +904,147 @@ Signals `user-error' when no GitHub repository can be determined."
    (list :state "open" :author "@me"
          :repo (magit-dash-gh-pr-dashboard--current-repo-slug) :org nil)))
 
+(defun magit-dash-gh-pr--git-worktrees (repo-dir)
+  "Return a list of alists ((path . PATH) (branch . BRANCH) (head . HEAD)) for REPO-DIR."
+  (when (and repo-dir (file-directory-p repo-dir))
+    (with-temp-buffer
+      (when (zerop (call-process "git" nil (current-buffer) nil
+                                 "-C" (expand-file-name repo-dir)
+                                 "worktree" "list" "--porcelain"))
+        (let ((lines (split-string (buffer-string) "\n" t))
+              (worktrees nil)
+              (cur-path nil)
+              (cur-head nil)
+              (cur-branch nil))
+          (dolist (line lines)
+            (cond
+             ((string-prefix-p "worktree " line)
+              (when cur-path
+                (push `((path . ,cur-path) (head . ,cur-head) (branch . ,cur-branch)) worktrees)
+                (setq cur-head nil cur-branch nil))
+              (setq cur-path (string-trim (substring line 9))))
+             ((string-prefix-p "HEAD " line)
+              (setq cur-head (string-trim (substring line 5))))
+             ((string-prefix-p "branch " line)
+              (let ((ref (string-trim (substring line 7))))
+                (setq cur-branch (replace-regexp-in-string "^refs/heads/" "" ref))))))
+          (when cur-path
+            (push `((path . ,cur-path) (head . ,cur-head) (branch . ,cur-branch)) worktrees))
+          (nreverse worktrees))))))
+
+(defun magit-dash-gh-pr--compute-worktree-path (repo-dir name &optional entry)
+  "Compute projected worktree path for NAME under REPO-DIR using `magit-dash-gh-pr-worktree-path-format'."
+  (let* ((repo-dir (expand-file-name repo-dir))
+         (repo-base (file-name-nondirectory (directory-file-name repo-dir)))
+         (parent (file-name-directory (directory-file-name repo-dir)))
+         (fmt magit-dash-gh-pr-worktree-path-format))
+    (cond
+     ((functionp fmt)
+      (funcall fmt repo-dir name entry))
+     ((eq fmt 'dot-wt)
+      (expand-file-name (concat ".wt/" name) repo-dir))
+     ((stringp fmt)
+      (let ((s fmt))
+        (setq s (replace-regexp-in-string "%r" (directory-file-name repo-dir) s t t))
+        (setq s (replace-regexp-in-string "%b" repo-base s t t))
+        (setq s (replace-regexp-in-string "%n" name s t t))
+        (expand-file-name s repo-dir)))
+     ;; default 'sibling
+     (t
+      (expand-file-name (format "%s-%s" repo-base name) parent)))))
+
+(defun magit-dash-gh-pr--find-existing-worktree (repo-dir pr-num &optional branch-name)
+  "Find an existing worktree directory for PR-NUM and BRANCH-NAME under REPO-DIR."
+  (when (and repo-dir (file-directory-p repo-dir))
+    (let* ((repo-dir (expand-file-name repo-dir))
+           (repo-base (file-name-nondirectory (directory-file-name repo-dir)))
+           (pr-name (format "pr-%d" pr-num))
+           (git-wts (magit-dash-gh-pr--git-worktrees repo-dir)))
+      ;; 1. Check git worktrees by branch or path
+      (or
+       (seq-some
+        (lambda (wt)
+          (let ((path (alist-get 'path wt))
+                (br (alist-get 'branch wt)))
+            (when (and path (file-directory-p path))
+              (when (or (and br (or (string= br pr-name)
+                                    (and branch-name (string= br branch-name))
+                                    (and branch-name (string= br (concat "wt/" branch-name)))
+                                    (string= br (concat "wt/" pr-name))))
+                        (string-suffix-p (concat "/.wt/" pr-name) path)
+                        (string-suffix-p (concat "/" repo-base "-" pr-name) path)
+                        (and branch-name (string-suffix-p (concat "/.wt/" branch-name) path))
+                        (and branch-name (string-suffix-p (concat "/" repo-base "-" branch-name) path)))
+                path))))
+        git-wts)
+       ;; 2. Check candidate directories on disk
+       (seq-some
+        (lambda (dir)
+          (and dir (file-directory-p dir) dir))
+        (list
+         (expand-file-name (concat ".wt/" pr-name) repo-dir)
+         (expand-file-name (format "%s-%s" repo-base pr-name)
+                           (file-name-directory (directory-file-name repo-dir)))
+         (and branch-name (expand-file-name (concat ".wt/" branch-name) repo-dir))
+         (and branch-name (expand-file-name (format "%s-%s" repo-base branch-name)
+                                            (file-name-directory (directory-file-name repo-dir))))))))))
+
+(defun magit-dash-gh-pr-dashboard--find-local-path (repo-slug)
+  "Return a local checkout path for REPO-SLUG (owner/name), or nil.
+Matches against `magit-dash-repo-list' (by repo slug, repo name, remote URL,
+or checkout directory name), falling back to current repo if it matches."
+  (when (and repo-slug (stringp repo-slug))
+    (let* ((slug-clean (string-trim repo-slug))
+           (repo-name (if (string-match ".*/\\([^/]+\\)$" slug-clean)
+                          (match-string 1 slug-clean)
+                        slug-clean))
+           (repo-base (replace-regexp-in-string "\\.el\\'" "" repo-name)))
+      (or
+       ;; 1. Search magit-dash-repo-list
+       (when (bound-and-true-p magit-dash-repo-list)
+         (seq-some
+          (lambda (r)
+            (when (magit-dash-repo-p r)
+              (let* ((rpath (magit-dash-repo-path r))
+                     (rdir (and rpath (file-name-nondirectory (directory-file-name (expand-file-name rpath)))))
+                     (rdir-base (and rdir (replace-regexp-in-string "\\.el\\'" "" rdir)))
+                     (rname (magit-dash-repo-name r))
+                     (rname-base (and rname (replace-regexp-in-string "<.*>" "" rname)))
+                     (rrepo (magit-dash-repo-repo r))
+                     (rpair (and rrepo (magit-dash-gh--owner-repo-from-url rrepo)))
+                     (rslug (and rpair (format "%s/%s" (car rpair) (cdr rpair)))))
+                (when (or (and rslug (string-equal-ignore-case rslug slug-clean))
+                          (and rpair (string-equal-ignore-case (cdr rpair) repo-name))
+                          (and rname (string-equal-ignore-case rname repo-name))
+                          (and rname-base (string-equal-ignore-case rname-base repo-base))
+                          (and rdir (string-equal-ignore-case rdir repo-name))
+                          (and rdir-base (string-equal-ignore-case rdir-base repo-base)))
+                  rpath))))
+          magit-dash-repo-list))
+       ;; 2. Fall back to current repo if it matches
+       (when-let* ((top (or (magit-toplevel)
+                            (ignore-errors (magit-dash-gh--repo-dir)))))
+         (let* ((top-dir (file-name-nondirectory (directory-file-name (expand-file-name top))))
+                (top-base (replace-regexp-in-string "\\.el\\'" "" top-dir))
+                (top-slug (ignore-errors (magit-dash-gh-pr-dashboard--current-repo-slug))))
+           (when (or (and top-slug (string-equal-ignore-case top-slug slug-clean))
+                     (string-equal-ignore-case top-dir repo-name)
+                     (string-equal-ignore-case top-base repo-base))
+             top)))))))
+
 (defun magit-dash-gh-pr-dashboard--worktree-path (entry)
   "Return existing or projected worktree path for PR ENTRY."
   (let* ((pr-num (plist-get entry :number))
          (repo (plist-get entry :repo))
+         (pr-data (plist-get entry :pr))
+         (branch-name (or (and pr-data (map-elt pr-data 'headRefName))
+                          (plist-get entry :head-ref)))
          (local-path (magit-dash-gh-pr-dashboard--find-local-path repo)))
     (when local-path
       (let* ((repo-dir (expand-file-name local-path))
-             (repo-base (file-name-nondirectory (directory-file-name repo-dir))))
-        (expand-file-name (format "%s-pr-%d" repo-base pr-num)
-                          (file-name-directory (directory-file-name repo-dir)))))))
+             (existing (magit-dash-gh-pr--find-existing-worktree repo-dir pr-num branch-name)))
+        (or existing
+            (magit-dash-gh-pr--compute-worktree-path repo-dir (format "pr-%d" pr-num) entry))))))
 
 (defun magit-dash-gh-pr-dashboard--worktree-exists-p (entry)
   "Return non-nil if a local worktree directory exists for PR ENTRY."
@@ -899,31 +1064,36 @@ If the worktree does not exist yet, creates it first."
         (when (file-directory-p dir)
           (dired dir))))))
 
-(defun magit-dash-gh-pr-dashboard--find-local-path (repo-slug)
-  "Return a local checkout path for REPO-SLUG (owner/name), or nil.
-Searches `magit-dash-repo-list' when bound, matching the repo name
-component of REPO-SLUG against the final directory component of each entry."
-  (when (and (boundp 'magit-dash-repo-list)
-             (string-match ".*/\\([^/]+\\)$" repo-slug))
-    (let ((repo-name (match-string 1 repo-slug)))
-      (seq-some (lambda (r)
-                  (when (and (magit-dash-repo-p r)
-                             (string= repo-name
-                                      (file-name-nondirectory
-                                       (directory-file-name
-                                        (magit-dash-repo-path r)))))
-                    (magit-dash-repo-path r)))
-                magit-dash-repo-list))))
+(defun magit-dash-gh-pr--resolve-remote-branch (repo pr-num &optional pr-data dir)
+  "Resolve remote head branch name for PR-NUM in REPO.
+Checks PR-DATA first, then queries GitHub via `gh pr view', falling back
+to \"pr-PR-NUM\" on failure."
+  (or (and pr-data (map-elt pr-data 'headRefName))
+      (when (executable-find "gh")
+        (let ((default-directory (or dir default-directory)))
+          (ignore-errors
+            (with-temp-buffer
+              (when (zerop (call-process "gh" nil (current-buffer) nil
+                                         "pr" "view" (number-to-string pr-num)
+                                         "-R" repo
+                                         "--json" "headRefName"
+                                         "--jq" ".headRefName"))
+                (let ((name (string-trim (buffer-string))))
+                  (unless (string-empty-p name)
+                    name)))))))
+      (format "pr-%d" pr-num)))
 
+;;;###autoload
 (defun magit-dash-gh-pr-dashboard-open-worktree (&optional entry)
   "Create and open a git worktree for the pull request at point (or ENTRY).
 If a worktree for this PR already exists, switches to its magit status buffer.
-Otherwise, fetches the PR branch from GitHub, adds the worktree, and opens
-its magit status buffer."
+Otherwise, fetches the remote PR branch into a local branch mirroring its remote
+name, creates the worktree directory, and opens its magit status buffer."
   (interactive)
   (let* ((entry (or entry (magit-dash-gh-pr-dashboard--entry-at-point)))
          (pr-num (plist-get entry :number))
          (repo (plist-get entry :repo))
+         (pr-data (plist-get entry :pr))
          (local-path (or (magit-dash-gh-pr-dashboard--find-local-path repo)
                          (let ((prompt-path (read-directory-name (format "Local repository path for %s: " repo))))
                            (if (and prompt-path (file-directory-p prompt-path))
@@ -931,16 +1101,20 @@ its magit status buffer."
                              (user-error "No registered local checkout for %s" repo)))))
          (repo-dir (expand-file-name local-path))
          (repo-base (file-name-nondirectory (directory-file-name repo-dir)))
-         (wt-dir (expand-file-name (format "%s-pr-%d" repo-base pr-num)
-                                   (file-name-directory (directory-file-name repo-dir))))
-         (branch-name (format "pr-%d" pr-num)))
-    (if (file-directory-p wt-dir)
+         (branch-name (magit-dash-gh-pr--resolve-remote-branch repo pr-num pr-data repo-dir))
+         (wt-dir (magit-dash-gh-pr-dashboard--worktree-path entry)))
+    (if (and wt-dir (file-directory-p wt-dir))
         (progn
           (message "magit-gh: opening existing worktree at %s" wt-dir)
           (magit-status-setup-buffer wt-dir))
-      (message "magit-gh: fetching PR #%d in %s..." pr-num repo-base)
+      (message "magit-gh: fetching PR #%d (%s) in %s..." pr-num branch-name repo-base)
       (let ((default-directory repo-dir))
-        (magit-call-git "fetch" "origin" (format "pull/%d/head:%s" pr-num branch-name))
+        (let ((refspec (format "pull/%d/head:%s" pr-num branch-name)))
+          (unless (= 0 (magit-call-git "fetch" "origin" refspec))
+            (magit-call-git "fetch" "origin" (concat "+" refspec))))
+        (let ((parent (file-name-directory (directory-file-name wt-dir))))
+          (when parent
+            (ignore-errors (make-directory parent t))))
         (let ((exit-code (magit-call-git "worktree" "add" wt-dir branch-name)))
           (if (= exit-code 0)
               (progn
@@ -949,6 +1123,9 @@ its magit status buffer."
                 (message "magit-gh: opened worktree for PR #%d at %s" pr-num wt-dir)
                 (magit-status-setup-buffer wt-dir))
             (user-error "Failed to create worktree at %s (exit %d)" wt-dir exit-code)))))))
+
+;;;###autoload
+(defalias 'magit-dash-gh-pr-create-worktree #'magit-dash-gh-pr-dashboard-open-worktree)
 
 (defun magit-dash-gh-pr-dashboard-fetch-ci ()
   "Fetch GitHub Actions CI logs for the pull request at point."

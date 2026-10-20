@@ -1052,15 +1052,15 @@ without real git repos or a live dashboard buffer."
 ;;;; magit-dash-gh-pr-dashboard--format-ci
 
 (ert-deftest magit-dash/format-ci-success ()
-  (should (equal "pass" (substring-no-properties
+  (should (equal "✓" (substring-no-properties
                          (magit-dash-gh-pr-dashboard--format-ci "SUCCESS")))))
 
 (ert-deftest magit-dash/format-ci-failure ()
-  (should (equal "fail" (substring-no-properties
+  (should (equal "x" (substring-no-properties
                          (magit-dash-gh-pr-dashboard--format-ci "FAILURE")))))
 
 (ert-deftest magit-dash/format-ci-pending ()
-  (should (equal "pending" (substring-no-properties
+  (should (equal "⟳" (substring-no-properties
                             (magit-dash-gh-pr-dashboard--format-ci "PENDING")))))
 
 (ert-deftest magit-dash/format-ci-nil ()
@@ -1186,7 +1186,7 @@ without real git repos or a live dashboard buffer."
     (should (equal "myrepo" (aref vec 0)))
     (should (equal "10" (aref vec 2)))
     (should (equal "My PR" (aref vec 3)))
-    (should (equal "pass" (substring-no-properties (aref vec 4))))
+    (should (equal "✓" (substring-no-properties (aref vec 4))))
     (should (equal "approved" (substring-no-properties (aref vec 7))))
     (should (equal 10 (plist-get id :number)))
     (should (equal "myorg/myrepo" (plist-get id :repo))))
@@ -3817,6 +3817,7 @@ The bug was that add-text-properties returns t, not the modified string."
     ;; Worktree
     (should (eq (lookup-key m (kbd "w w")) #'magit-dash-open-worktree-dispatch))
     (should (eq (lookup-key m (kbd "w a")) #'magit-dash-worktree-add))
+    (should (eq (lookup-key m (kbd "w r")) #'magit-dash-worktree-from-pr))
     (should (eq (lookup-key m (kbd "w k")) #'magit-dash-worktree-delete))
     ;; Agent shell
     (should (eq (lookup-key m (kbd "a a")) #'magit-dash-auto-sync))

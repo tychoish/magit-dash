@@ -34,6 +34,9 @@
 (declare-function asq-worktree-generate-name "agent-shell-queue")
 (declare-function asq-worktree-git-repo-root "agent-shell-queue")
 (declare-function annotated-completing-read "annotated-completing-read")
+(declare-function magit-dash-gh-pr-dashboard-open-worktree "magit-dash-gh-pr")
+(declare-function magit-dash-gh-pr-dashboard--current-repo-slug "magit-dash-gh-pr")
+
 
 ;; Forward declarations for magit-dash core functions and variables
 (declare-function magit-dash-repo-name "magit-dash")
@@ -303,6 +306,53 @@ Establishes configured symlinks for the new worktree."
       (if (fboundp 'asq-worktree-dispatch-task)
           (asq-worktree-dispatch-task prompt :target-dir wt-path :mode mode :name name)
         wt-path))))
+
+
+;;;###autoload
+(defun magit-dash-worktree-from-pr (&optional pr-arg repo-dir)
+  "Create and open a git worktree from a GitHub pull request.
+The worktree directory is created using `magit-dash-gh-pr-worktree-path-format',
+and the local branch mirrors the remote branch name.
+Interactively, prompts for the PR number or selection in REPO-DIR (defaulting
+to the current repository or repository at point)."
+  (interactive)
+  (require 'magit-dash-gh-pr)
+  (let* ((dir (or repo-dir
+                  (if (and (fboundp 'magit-dash--repo-at-point-p)
+                           (magit-dash--repo-at-point-p))
+                      (magit-dash-repo-path (magit-dash--repo-at-point))
+                    (or (magit-toplevel) default-directory))))
+         (slug (or (ignore-errors
+                     (let ((default-directory dir))
+                       (magit-dash-gh-pr-dashboard--current-repo-slug)))
+                   (file-name-nondirectory (directory-file-name dir))))
+         (pr-num
+          (cond
+           ((integerp pr-arg) pr-arg)
+           ((and (stringp pr-arg) (string-match-p "\\`[0-9]+\\'" pr-arg))
+            (string-to-number pr-arg))
+           (t
+            (let* ((candidates
+                    (when (executable-find "gh")
+                      (ignore-errors
+                        (with-temp-buffer
+                          (when (zerop (call-process "gh" nil (current-buffer) nil
+                                                     "pr" "list" "-R" slug
+                                                     "--json" "number,title,headRefName"
+                                                     "--template"
+                                                     "{{range .}}{{tablerow (printf \"#%v\" .number) .headRefName .title}}{{end}}"))
+                            (split-string (string-trim (buffer-string)) "\n" t))))))
+                   (choice (if candidates
+                               (completing-read (format "PR in %s: " slug) candidates nil nil)
+                             (read-string (format "PR number for %s: " slug)))))
+              (if (string-match "#?\\([0-9]+\\)" choice)
+                  (string-to-number (match-string 1 choice))
+                (user-error "Invalid PR number: %s" choice)))))))
+    (let ((entry (list :number pr-num :repo slug :pr nil)))
+      (magit-dash-gh-pr-dashboard-open-worktree entry))))
+
+;;;###autoload
+(defalias 'magit-dash-worktree-checkout-pr #'magit-dash-worktree-from-pr)
 
 (provide 'magit-dash-worktree)
 ;;; magit-dash-worktree.el ends here

@@ -2166,6 +2166,7 @@ space they split it proportionally."
     (keymap-set m "w w" #'magit-dash-open-worktree-dispatch)
     (keymap-set m "w d" #'magit-dash-open-worktree-dispatch)
     (keymap-set m "w a" #'magit-dash-worktree-add)
+    (keymap-set m "w r" #'magit-dash-worktree-from-pr)
     (keymap-set m "w k" #'magit-dash-worktree-delete)
     (keymap-set m "w s" #'magit-dash-worktree-sync-symlinks)
     (keymap-set m "w t" #'magit-dash-toggle-discovered-worktrees)
@@ -4020,6 +4021,8 @@ Indicates whether batch operations target all repos or marked repos."
      :inapt-if-not magit-dash--repo-at-point-p)
     ("wa"  "Add"             magit-dash-worktree-add
      :inapt-if-not magit-dash--can-add-worktree-p)
+    ("wr"  "From PR"         magit-dash-worktree-from-pr
+     :inapt-if-not magit-dash--repo-at-point-p)
     ("wd"  "Delete"          magit-dash-worktree-delete
      :inapt-if-not magit-dash--at-worktree-p)
     ("ws"  "Sync symlinks"   magit-dash-worktree-sync-symlinks

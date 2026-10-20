@@ -364,7 +364,7 @@
 (ert-deftest magit-dash-gh-pr/build-format-fallback-no-entries ()
   "When no entries exist, Repo column falls back to available window space (min 12)."
   (let ((fmt (magit-dash-gh-pr-dashboard--build-format 100 nil)))
-    (should (= (- 100 80) (cadr (aref fmt 0))))))
+    (should (= (- 100 77) (cadr (aref fmt 0))))))
 
 (ert-deftest magit-dash-gh-pr/split-slug ()
   "Split slug correctly extracts owner and repo."
@@ -492,6 +492,7 @@
   (should (eq t (alist-get 'worktree magit-dash-gh-pr-columns)))
   (should (eq t (alist-get 'title magit-dash-gh-pr-columns)))
   (should (eq t (alist-get 'ci magit-dash-gh-pr-columns)))
+  (should (eq t (alist-get 'updated magit-dash-gh-pr-columns)))
   (should (memq 'magit-dash-gh-pr-columns savehist-additional-variables)))
 
 (ert-deftest magit-dash-gh-pr/toggle-column ()
@@ -516,6 +517,90 @@
       (should (= 2 (length vec)))
       (should (equal "repo" (aref vec 0)))
       (should (equal "10" (aref vec 1))))))
+
+
+(ert-deftest magit-dash-gh-pr/worktree-path-format-options ()
+  "Test custom worktree path formatting options: sibling, dot-wt, and custom string."
+  (let ((entry '(:number 42 :repo "owner/myrepo" :pr nil)))
+    (cl-letf (((symbol-function 'magit-dash-gh-pr-dashboard--find-local-path)
+               (lambda (_) "/tmp/myrepo"))
+              ((symbol-function 'file-directory-p) (lambda (_) nil)))
+      ;; Default: sibling
+      (let ((magit-dash-gh-pr-worktree-path-format 'sibling))
+        (should (equal (expand-file-name "/tmp/myrepo-pr-42")
+                       (magit-dash-gh-pr-dashboard--worktree-path entry))))
+      ;; dot-wt
+      (let ((magit-dash-gh-pr-worktree-path-format 'dot-wt))
+        (should (equal (expand-file-name "/tmp/myrepo/.wt/pr-42")
+                       (magit-dash-gh-pr-dashboard--worktree-path entry))))
+      ;; Custom string template
+      (let ((magit-dash-gh-pr-worktree-path-format "%r/.worktrees/%n"))
+        (should (equal (expand-file-name "/tmp/myrepo/.worktrees/pr-42")
+                       (magit-dash-gh-pr-dashboard--worktree-path entry)))))))
+
+(ert-deftest magit-dash-gh-pr/open-worktree-mirrors-remote-branch ()
+  "open-worktree uses headRefName as branch name while keeping worktree name as pr-NUM."
+  (let ((git-calls nil)
+        (setup-path nil))
+    (cl-letf (((symbol-function 'magit-dash-gh-pr-dashboard--entry-at-point)
+               (lambda () '(:number 42 :repo "owner/myrepo"
+                            :pr ((headRefName . "feature/cool-idea")))))
+              ((symbol-function 'magit-dash-gh-pr-dashboard--find-local-path)
+               (lambda (_) "/tmp/myrepo"))
+              ((symbol-function 'file-directory-p) (lambda (_) nil))
+              ((symbol-function 'magit-call-git)
+               (lambda (&rest args) (push args git-calls) 0))
+              ((symbol-function 'magit-status-setup-buffer)
+               (lambda (path) (setq setup-path path))))
+      (let ((magit-dash-gh-pr-worktree-path-format 'dot-wt))
+        (magit-dash-gh-pr-dashboard-open-worktree)
+        (should (equal (expand-file-name "/tmp/myrepo/.wt/pr-42") setup-path))
+        ;; Verify fetch used remote branch name
+        (should (seq-some (lambda (call)
+                            (and (equal (nth 0 call) "fetch")
+                                 (equal (nth 1 call) "origin")
+                                 (equal (nth 2 call) "pull/42/head:feature/cool-idea")))
+                          git-calls))
+        ;; Verify worktree add checked out that branch into wt directory
+        (should (seq-some (lambda (call)
+                            (and (equal (nth 0 call) "worktree")
+                                 (equal (nth 1 call) "add")
+                                 (equal (nth 2 call) (expand-file-name "/tmp/myrepo/.wt/pr-42"))
+                                 (equal (nth 3 call) "feature/cool-idea")))
+                          git-calls))))))
+
+(ert-deftest magit-dash-gh-pr/worktree-detection-finds-dot-wt ()
+  "worktree-exists-p detects existing worktrees in .wt directory."
+  (let ((entry '(:number 10 :repo "owner/test-repo" :pr nil)))
+    (cl-letf (((symbol-function 'magit-dash-gh-pr-dashboard--find-local-path)
+               (lambda (_) "/tmp/test-repo"))
+              ((symbol-function 'file-directory-p)
+               (lambda (path)
+                 (member (directory-file-name path)
+                         (list (expand-file-name "/tmp/test-repo")
+                               (expand-file-name "/tmp/test-repo/.wt/pr-10"))))))
+      (should (magit-dash-gh-pr-dashboard--worktree-exists-p entry)))))
+
+(ert-deftest magit-dash-gh-pr/build-entry-updated-column ()
+  "build-entry populates updated column with formatted age from updatedAt."
+  (let* ((pr '((number . 15)
+               (title . "Fix stuff")
+               (updatedAt . "2024-06-01T12:00:00Z")
+               (headRefName . "bugfix/issue-15")
+               (comments . 1)
+               (reviewDecision . nil)
+               (statusCheckRollup . ((state . "FAILURE")))
+               (url . "https://example.com/15")))
+         (entry (magit-dash-gh-pr-dashboard--build-entry pr "owner/myrepo"))
+         (id (car entry))
+         (vec (cadr entry)))
+    ;; id should store :updated and :head-ref
+    (should (equal "2024-06-01T12:00:00Z" (plist-get id :updated)))
+    (should (equal "bugfix/issue-15" (plist-get id :head-ref)))
+    ;; CI column is aref 4 -> "x"
+    (should (equal "x" (substring-no-properties (aref vec 4))))
+    ;; Updated column is aref 5
+    (should-not (string-empty-p (aref vec 5)))))
 
 (provide 'test-magit-dash-gh-pr)
 ;;; test-magit-dash-gh-pr.el ends here
