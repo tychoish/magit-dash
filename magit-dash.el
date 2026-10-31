@@ -3211,8 +3211,7 @@ all working tree changes."
     (let* ((target (magit-dash--current-repo-or-path))
            (name (if (stringp target)
                      (file-name-nondirectory (directory-file-name target))
-                   (magit-dash-repo-name target)))
-           (path (if (stringp target) target (magit-dash-repo-path target))))
+                   (magit-dash-repo-name target))))
       (if (magit-dash--stage-all target)
           (progn
             (when (magit-dash-repo-p target)
@@ -3479,7 +3478,7 @@ Adds to any existing marks rather than replacing them."
       (magit-dash-refresh-repo repo nil t))))
 
 (defun magit-dash-prune-branches ()
-  "Prune merged branches in a repository.
+  "Prune merged branches and clean worktrees in a repository.
 Uses the repository at point when called from a `magit-dash' buffer,
 otherwise the git repository containing the current buffer (works from any
 `magit' buffer or a file/`dired' buffer inside a repo), and finally prompts
@@ -3487,16 +3486,19 @@ among the registered repositories when neither applies."
   (interactive)
   (let* ((repo (ignore-errors (magit-dash--repo-at-point)))
          (path (magit-dash--resolve-repo-path))
-         (default-directory (file-name-as-directory path)))
+         (main-path (if (fboundp 'magit-dash-worktree-main-dir)
+                        (magit-dash-worktree-main-dir path)
+                      path))
+         (default-directory (file-name-as-directory main-path)))
     (magit-dash-gh-prune-merged-branches)
     (if repo
         (magit-dash-refresh-repo repo nil t)
-      (when-let* ((target-dir (file-name-as-directory (expand-file-name path)))
+      (when-let* ((target-dir (file-name-as-directory (expand-file-name main-path)))
                   (r (seq-find (lambda (it)
                                  (let ((it-dir (file-name-as-directory
                                                 (expand-file-name (magit-dash-repo-path it)))))
                                    (or (string-equal it-dir target-dir)
-                                       (ignore-errors (file-equal-p it-dir path)))))
+                                       (ignore-errors (file-equal-p it-dir main-path)))))
                                (magit-dash--all-repos))))
         (magit-dash-refresh-repo r nil t)))))
 

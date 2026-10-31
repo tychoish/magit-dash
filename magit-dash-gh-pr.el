@@ -912,31 +912,7 @@ Signals `user-error' when no GitHub repository can be determined."
 
 (defun magit-dash-gh-pr--git-worktrees (repo-dir)
   "Return a list of alists ((path . PATH) (branch . BRANCH) (head . HEAD)) for REPO-DIR."
-  (when (and repo-dir (file-directory-p repo-dir))
-    (with-temp-buffer
-      (when (zerop (call-process "git" nil (current-buffer) nil
-                                 "-C" (expand-file-name repo-dir)
-                                 "worktree" "list" "--porcelain"))
-        (let ((lines (split-string (buffer-string) "\n" t))
-              (worktrees nil)
-              (cur-path nil)
-              (cur-head nil)
-              (cur-branch nil))
-          (dolist (line lines)
-            (cond
-             ((string-prefix-p "worktree " line)
-              (when cur-path
-                (push `((path . ,cur-path) (head . ,cur-head) (branch . ,cur-branch)) worktrees)
-                (setq cur-head nil cur-branch nil))
-              (setq cur-path (string-trim (substring line 9))))
-             ((string-prefix-p "HEAD " line)
-              (setq cur-head (string-trim (substring line 5))))
-             ((string-prefix-p "branch " line)
-              (let ((ref (string-trim (substring line 7))))
-                (setq cur-branch (replace-regexp-in-string "^refs/heads/" "" ref))))))
-          (when cur-path
-            (push `((path . ,cur-path) (head . ,cur-head) (branch . ,cur-branch)) worktrees))
-          (nreverse worktrees))))))
+  (magit-dash-gh--git-worktrees repo-dir))
 
 (defun magit-dash-gh-pr--compute-worktree-path (repo-dir name &optional entry)
   "Compute projected worktree path for NAME under REPO-DIR using `magit-dash-gh-pr-worktree-path-format'."
