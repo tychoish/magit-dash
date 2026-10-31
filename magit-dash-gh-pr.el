@@ -43,6 +43,9 @@
 (declare-function magit-dash-repo-upstream-repo "magit-dash")
 (declare-function magit-dash--repo-at-point "magit-dash")
 (declare-function magit-dash--repo-at-point-p "magit-dash")
+(declare-function magit-dash-worktree-uncommitted-changes-p "magit-dash-worktree")
+(declare-function magit-dash-worktree-symlink-worktree "magit-dash-worktree")
+(declare-function magit-dash-worktree-main-dir "magit-dash-worktree")
 (declare-function magit-dash-gh-actions-fetch-for-pr "magit-dash-gh-actions")
 ;;; Configuration
 
@@ -244,11 +247,11 @@ Creates an artifact directory under plans/ containing:
 
 ;;;; PR dashboard mode
 
-(defcustom magit-dash-gh-pr-worktree-path-format 'sibling
+(defcustom magit-dash-gh-pr-worktree-path-format 'dot-wt
   "Format or strategy for PR worktree checkout paths.
 Can be:
-- `sibling' (default): creates `<parent>/<repo-base>-<name>'
-- `dot-wt': creates `<repo-root>/.wt/<name>'
+- `dot-wt' (default): creates `<repo-root>/.wt/<name>'
+- `sibling': creates `<parent>/<repo-base>-<name>'
 - A string format where `%r' is the repo root, `%b' is the repo base name,
   and `%n' is the worktree name (e.g. \"pr-42\").
 - A function called with (REPO-DIR NAME ENTRY) returning an absolute path string."
@@ -414,6 +417,10 @@ ENTRIES is the list of tabulated-list entries."
     (define-key m (kbd "RET") #'magit-dash-gh-pr-dashboard-open-browser)
     (define-key m (kbd "w")   #'magit-dash-gh-pr-dashboard-open-worktree)
     (define-key m (kbd "W")   #'magit-dash-gh-pr-dashboard-open-worktree)
+    (define-key m (kbd "c w") #'magit-dash-gh-pr-dashboard-create-worktree)
+    (define-key m (kbd "c a") #'magit-dash-gh-pr-dashboard-create-all-worktrees)
+    (define-key m (kbd "c i") #'magit-dash-gh-pr-dashboard-fetch-ci)
+    (define-key m (kbd "k")   #'magit-dash-gh-pr-dashboard-clean-merged-worktrees)
     (define-key m (kbd "d")   #'magit-dash-gh-pr-dashboard-open-dired)
     (define-key m (kbd "O")   #'magit-dash-gh-pr-toggle-org)
     (define-key m (kbd "T")   #'magit-dash-gh-pr-toggle-column)
@@ -423,7 +430,6 @@ ENTRIES is the list of tabulated-list entries."
     (define-key m (kbd "f")   #'magit-dash-gh-pr-dashboard-set-filter)
     (define-key m (kbd "/")   #'magit-dash-gh-pr-dashboard-set-filter)
     (define-key m (kbd "F")   #'magit-dash-gh-pr-dashboard-clear-filters)
-    (define-key m (kbd "c")   #'magit-dash-gh-pr-dashboard-fetch-ci)
     (define-key m (kbd "q")   #'magit-dash-gh-pr-dashboard-quit)
     (define-key m (kbd "m")   #'magit-dash-gh-pr-dashboard-menu)
     (define-key m (kbd "?")   #'magit-dash-gh-pr-dashboard-menu)
@@ -955,11 +961,11 @@ Signals `user-error' when no GitHub repository can be determined."
 
 (defun magit-dash-gh-pr--find-existing-worktree (repo-dir pr-num &optional branch-name)
   "Find an existing worktree directory for PR-NUM and BRANCH-NAME under REPO-DIR."
-  (when (and repo-dir (file-directory-p repo-dir))
+  (when repo-dir
     (let* ((repo-dir (expand-file-name repo-dir))
            (repo-base (file-name-nondirectory (directory-file-name repo-dir)))
            (pr-name (format "pr-%d" pr-num))
-           (git-wts (magit-dash-gh-pr--git-worktrees repo-dir)))
+           (git-wts (ignore-errors (magit-dash-gh-pr--git-worktrees repo-dir))))
       ;; 1. Check git worktrees by branch or path
       (or
        (seq-some
@@ -1083,12 +1089,105 @@ to \"pr-PR-NUM\" on failure."
                     name)))))))
       (format "pr-%d" pr-num)))
 
+(defun magit-dash-gh-pr--fetch-repo-prs (repo &optional state)
+  "Fetch pull requests for REPO from GitHub CLI.
+STATE may be closed', or open').
+Returns a list of PR alists or nil on error."
+  (when (executable-find "gh")
+    (with-temp-buffer
+      (when (zerop (call-process "gh" nil (current-buffer) nil
+                                 "pr" "list" "-R" repo
+                                 "--state" (or state "open")
+                                 "--limit" "100"
+                                 "--json" "number,title,headRefName,state,mergedAt"))
+        (ignore-errors
+          (json-parse-string (buffer-string) :object-type 'alist :array-type 'list))))))
+
+(defun magit-dash-gh-pr--match-worktree-to-pr (wt prs)
+  "Match git worktree WT to a pull request in PRS alist list.
+Matches by branch name (headRefName, pr-NUM, wt/...) or worktree directory name.
+Returns matching PR alist or nil."
+  (let ((wt-branch (alist-get 'branch wt))
+        (wt-path (alist-get 'path wt)))
+    (when (and wt-path (file-directory-p wt-path))
+      (let ((wt-name (file-name-nondirectory (directory-file-name wt-path))))
+        (seq-some
+         (lambda (pr)
+           (let* ((num (map-elt pr 'number))
+                  (head (map-elt pr 'headRefName))
+                  (pr-tag (when num (format "pr-%d" num))))
+             (when (or (and head (or (equal wt-branch head)
+                                     (equal wt-branch (concat "wt/" head))))
+                       (and pr-tag (or (equal wt-branch pr-tag)
+                                       (equal wt-branch (concat "wt/" pr-tag))))
+                       (and pr-tag (string-suffix-p pr-tag wt-name))
+                       (and num (string-match-p (format "\(?:^\|[^0-9]\)%d\(?:$\|[^0-9]\)" num) wt-name)))
+               pr)))
+         prs)))))
+
+(defun magit-dash-gh-pr--path-equal-p (path-a path-b)
+  "Return non-nil if PATH-A and PATH-B refer to the same location."
+  (when (and path-a path-b)
+    (or (string= (directory-file-name (expand-file-name path-a))
+                 (directory-file-name (expand-file-name path-b)))
+        (ignore-errors (file-equal-p path-a path-b)))))
+
+(defun magit-dash-gh-pr--move-worktree (repo-dir old-path new-path)
+  "Move git worktree from OLD-PATH to NEW-PATH in REPO-DIR.
+Returns NEW-PATH on success, nil on failure."
+  (let* ((repo-dir (expand-file-name repo-dir))
+         (old-path (expand-file-name old-path))
+         (new-path (expand-file-name new-path))
+         (parent (file-name-directory (directory-file-name new-path))))
+    (when (file-exists-p new-path)
+      (user-error "Destination worktree path already exists: %s" new-path))
+    (when parent
+      (make-directory parent t))
+    (let ((exit-code (call-process "git" nil nil nil
+                                   "-C" repo-dir
+                                   "worktree" "move" old-path new-path)))
+      (if (zerop exit-code)
+          (progn
+            (when (fboundp 'magit-dash-worktree-symlink-worktree)
+              (magit-dash-worktree-symlink-worktree new-path repo-dir))
+            new-path)
+        (message "magit-gh: failed to move worktree %s -> %s (exit %d)"
+                 old-path new-path exit-code)
+        nil))))
+
 ;;;###autoload
-(defun magit-dash-gh-pr-dashboard-open-worktree (&optional entry)
-  "Create and open a git worktree for the pull request at point (or ENTRY).
-If a worktree for this PR already exists, switches to its magit status buffer.
-Otherwise, fetches the remote PR branch into a local branch mirroring its remote
-name, creates the worktree directory, and opens its magit status buffer."
+(defun magit-dash-gh-pr-delete-worktree (wt-path &optional repo-dir)
+  "Safely remove the worktree at WT-PATH for REPO-DIR.
+Refuses to delete if WT-PATH contains uncommitted changes.
+Preserves the underlying branch until branch pruning."
+  (require 'magit-dash-worktree nil t)
+  (let* ((wt-path (expand-file-name wt-path))
+         (repo-dir (expand-file-name
+                    (or repo-dir
+                        (if (fboundp 'magit-dash-worktree-main-dir)
+                            (magit-dash-worktree-main-dir wt-path)
+                          default-directory)))))
+    (when (and (fboundp 'magit-dash-worktree-uncommitted-changes-p)
+               (magit-dash-worktree-uncommitted-changes-p wt-path))
+      (user-error "Cannot delete worktree %s: contains uncommitted changes" wt-path))
+    (let ((exit-code (call-process "git" nil nil nil
+                                   "-C" repo-dir
+                                   "worktree" "remove" wt-path)))
+      (if (zerop exit-code)
+          (progn
+            (call-process "git" nil nil nil "-C" repo-dir "worktree" "prune")
+            (message "magit-gh: deleted worktree at %s (branch preserved)" wt-path)
+            t)
+        (user-error "Failed to remove worktree %s (git exit %d)" wt-path exit-code)))))
+
+;;;###autoload
+(defun magit-dash-gh-pr-dashboard-create-worktree (&optional entry switch)
+  "Create a git worktree for the pull request at point (or ENTRY).
+When SWITCH is non-nil, switches to the worktree's magit status buffer.
+If a worktree already exists, checks if its path matches the configured PR format
+and prompts to rename it if it does not.
+If the worktree does not exist, fetches the PR branch, creates the worktree,
+and sets up configured symlinks."
   (interactive)
   (let* ((entry (or entry (magit-dash-gh-pr-dashboard--entry-at-point)))
          (pr-num (plist-get entry :number))
@@ -1102,11 +1201,25 @@ name, creates the worktree directory, and opens its magit status buffer."
          (repo-dir (expand-file-name local-path))
          (repo-base (file-name-nondirectory (directory-file-name repo-dir)))
          (branch-name (magit-dash-gh-pr--resolve-remote-branch repo pr-num pr-data repo-dir))
-         (wt-dir (magit-dash-gh-pr-dashboard--worktree-path entry)))
+         (existing (magit-dash-gh-pr--find-existing-worktree repo-dir pr-num branch-name))
+         (target-path (magit-dash-gh-pr--compute-worktree-path repo-dir (format "pr-%d" pr-num) entry))
+         (wt-dir (or existing target-path)))
+    ;; If existing worktree found at a non-matching path, offer to rename it
+    (when (and existing (not (magit-dash-gh-pr--path-equal-p existing target-path)))
+      (if (y-or-n-p (format "Worktree '%s' does not match PR #%d format ('%s'). Rename it? "
+                            (file-name-nondirectory (directory-file-name existing))
+                            pr-num
+                            (file-name-nondirectory (directory-file-name target-path))))
+          (let ((moved (magit-dash-gh-pr--move-worktree repo-dir existing target-path)))
+            (when moved (setq wt-dir target-path)))
+        (setq wt-dir existing)))
     (if (and wt-dir (file-directory-p wt-dir))
-        (progn
-          (message "magit-gh: opening existing worktree at %s" wt-dir)
-          (magit-status-setup-buffer wt-dir))
+        (if switch
+            (progn
+              (message "magit-gh: opening existing worktree at %s" wt-dir)
+              (magit-status-setup-buffer wt-dir))
+          (message "magit-gh: worktree for PR #%d already exists at %s" pr-num wt-dir)
+          wt-dir)
       (message "magit-gh: fetching PR #%d (%s) in %s..." pr-num branch-name repo-base)
       (let ((default-directory repo-dir))
         (let ((refspec (format "pull/%d/head:%s" pr-num branch-name)))
@@ -1120,43 +1233,255 @@ name, creates the worktree directory, and opens its magit status buffer."
               (progn
                 (when (fboundp 'magit-dash-worktree-symlink-worktree)
                   (magit-dash-worktree-symlink-worktree wt-dir repo-dir))
-                (message "magit-gh: opened worktree for PR #%d at %s" pr-num wt-dir)
-                (magit-status-setup-buffer wt-dir))
+                (message "magit-gh: %s worktree for PR #%d at %s"
+                         (if switch "opened" "created") pr-num wt-dir)
+                (when (derived-mode-p 'magit-dash-gh-pr-dashboard-mode)
+                  (tabulated-list-print t))
+                (if switch
+                    (magit-status-setup-buffer wt-dir)
+                  wt-dir))
             (user-error "Failed to create worktree at %s (exit %d)" wt-dir exit-code)))))))
 
 ;;;###autoload
-(defalias 'magit-dash-gh-pr-create-worktree #'magit-dash-gh-pr-dashboard-open-worktree)
+(defun magit-dash-gh-pr-dashboard-open-worktree (&optional entry)
+  "Create and open a git worktree for the pull request at point (or ENTRY).
+If a worktree for this PR already exists, switches to its magit status buffer.
+Otherwise, fetches the remote PR branch into a local branch mirroring its remote
+name, creates the worktree directory, and opens its magit status buffer."
+  (interactive)
+  (magit-dash-gh-pr-dashboard-create-worktree entry t))
+
+;;;###autoload
+(defalias 'magit-dash-gh-pr-create-worktree #'magit-dash-gh-pr-dashboard-create-worktree)
+
+;;;###autoload
+(defun magit-dash-gh-pr-review-worktrees (&optional repo-dir prompt-p prs merged-only)
+  "Review existing worktrees in REPO-DIR against GitHub pull requests.
+Prompts to rename worktrees that do not match the configured PR naming format,
+and prompts to delete worktrees for merged PRs (refusing if uncommitted changes exist).
+Leaves branches intact until branch pruning.
+PROMPT-P specifies whether to prompt for actions (defaults to interactive).
+PRS can be an existing list of PR alists to avoid refetching.
+When MERGED-ONLY is non-nil, only checks and cleans worktrees for merged PRs.
+Returns a plist with :renamed, :deleted, :matching, and :skipped counts."
+  (interactive (list nil t nil nil))
+  (require 'magit-dash-worktree nil t)
+  (let* ((prompt-p (if (called-interactively-p 'interactive) t prompt-p))
+         (repo-dir (expand-file-name
+                    (or repo-dir
+                        (if (fboundp 'magit-dash-worktree-main-dir)
+                            (magit-dash-worktree-main-dir)
+                          (magit-toplevel))
+                        default-directory)))
+         (slug (or (ignore-errors
+                     (let ((default-directory repo-dir))
+                       (magit-dash-gh-pr-dashboard--current-repo-slug)))
+                   (file-name-nondirectory (directory-file-name repo-dir))))
+         (prs (or prs (magit-dash-gh-pr--fetch-repo-prs slug "all")))
+         (git-wts (magit-dash-gh-pr--git-worktrees repo-dir))
+         (counts (list :renamed 0 :deleted 0 :matching 0 :skipped 0)))
+    (dolist (wt git-wts)
+      (let* ((wt-path (alist-get 'path wt)))
+        (unless (or (null wt-path)
+                    (magit-dash-gh-pr--path-equal-p wt-path repo-dir)
+                    (not (file-directory-p wt-path)))
+          (let* ((wt-name (file-name-nondirectory (directory-file-name wt-path)))
+                 (matched (magit-dash-gh-pr--match-worktree-to-pr wt prs)))
+            (when matched
+              (let* ((pr-num (map-elt matched 'number))
+                     (state (upcase (or (map-elt matched 'state) "")))
+                     (merged-p (or (string= state "MERGED")
+                                   (map-elt matched 'mergedAt))))
+                (cond
+                 ;; Case 1: PR has merged
+                 (merged-p
+                  (if (and (fboundp 'magit-dash-worktree-uncommitted-changes-p)
+                           (magit-dash-worktree-uncommitted-changes-p wt-path))
+                      (progn
+                        (message "magit-gh: worktree %s (PR #%d merged) has uncommitted changes; skipping"
+                                 wt-name pr-num)
+                        (plist-put counts :skipped (1+ (plist-get counts :skipped))))
+                    (if (or (not prompt-p)
+                            (y-or-n-p (format "PR #%d is merged and worktree '%s' has no uncommitted changes. Delete worktree? (branch preserved) "
+                                              pr-num wt-name)))
+                        (progn
+                          (magit-dash-gh-pr-delete-worktree wt-path repo-dir)
+                          (plist-put counts :deleted (1+ (plist-get counts :deleted))))
+                      (plist-put counts :skipped (1+ (plist-get counts :skipped))))))
+                 ;; Case 2: PR is open - check path match (skipped when merged-only)
+                 ((and (not merged-only) (string= state "OPEN"))
+                  (let ((target-path (magit-dash-gh-pr--compute-worktree-path
+                                      repo-dir (format "pr-%d" pr-num))))
+                    (if (magit-dash-gh-pr--path-equal-p wt-path target-path)
+                        (plist-put counts :matching (1+ (plist-get counts :matching)))
+                      (if (or (not prompt-p)
+                              (y-or-n-p (format "Worktree '%s' does not match PR #%d format ('%s'). Rename it to match? "
+                                                wt-name pr-num
+                                                (file-name-nondirectory (directory-file-name target-path)))))
+                          (if (magit-dash-gh-pr--move-worktree repo-dir wt-path target-path)
+                              (plist-put counts :renamed (1+ (plist-get counts :renamed)))
+                            (plist-put counts :skipped (1+ (plist-get counts :skipped))))
+                        (plist-put counts :skipped (1+ (plist-get counts :skipped))))))))))))))
+    (if merged-only
+        (message "magit-gh: clean merged worktrees for %s — %d deleted, %d skipped"
+                 slug (plist-get counts :deleted) (plist-get counts :skipped))
+      (message "magit-gh: reviewed worktrees for %s — %d renamed, %d deleted, %d matching, %d skipped"
+               slug
+               (plist-get counts :renamed)
+               (plist-get counts :deleted)
+               (plist-get counts :matching)
+               (plist-get counts :skipped)))
+    counts))
+
+;;;###autoload
+(defun magit-dash-gh-pr-clean-merged-worktrees (&optional repo-dir prompt-p)
+  "Delete worktrees for merged PRs in REPO-DIR when clean.
+Refuses to delete any worktree with uncommitted changes.
+Leaves local branches intact until branch pruning.
+PROMPT-P specifies whether to prompt before deleting each clean worktree."
+  (interactive (list nil t))
+  (let ((counts (magit-dash-gh-pr-review-worktrees repo-dir prompt-p nil t)))
+    (list :deleted (plist-get counts :deleted)
+          :skipped (plist-get counts :skipped))))
+
+;;;###autoload
+(defun magit-dash-gh-pr-create-all-worktrees (&optional repo-dir)
+  "Create worktrees for all open PRs in REPO-DIR.
+First reviews existing worktrees, prompting to rename any that do not match
+the canonical PR format, and prompting to delete any for merged PRs that are clean.
+Then creates worktrees for each open PR that does not yet have one.
+Establishes configured symlinks for all created worktrees."
+  (interactive)
+  (let* ((repo-dir (expand-file-name
+                    (or repo-dir
+                        (if (fboundp 'magit-dash-worktree-main-dir)
+                            (magit-dash-worktree-main-dir)
+                          (magit-toplevel))
+                        default-directory)))
+         (slug (or (ignore-errors
+                     (let ((default-directory repo-dir))
+                       (magit-dash-gh-pr-dashboard--current-repo-slug)))
+                   (file-name-nondirectory (directory-file-name repo-dir))))
+         (all-prs (magit-dash-gh-pr--fetch-repo-prs slug "all"))
+         (open-prs (seq-filter
+                    (lambda (pr)
+                      (string= (upcase (or (map-elt pr 'state) "")) "OPEN"))
+                    all-prs)))
+    ;; 1. Review existing worktrees first (prompting to rename mismatches / clean merged)
+    (magit-dash-gh-pr-review-worktrees repo-dir t all-prs)
+    ;; 2. Create worktree for every open PR without one
+    (let ((created 0)
+          (existing 0)
+          (failed 0))
+      (dolist (pr open-prs)
+        (let* ((pr-num (map-elt pr 'number))
+               (head-ref (map-elt pr 'headRefName))
+               (wt-existing (magit-dash-gh-pr--find-existing-worktree repo-dir pr-num head-ref)))
+          (if wt-existing
+              (setq existing (1+ existing))
+            (condition-case err
+                (let ((entry (list :number pr-num :repo slug :pr pr)))
+                  (magit-dash-gh-pr-dashboard-create-worktree entry nil)
+                  (setq created (1+ created)))
+              (error
+               (message "magit-gh: failed to create worktree for PR #%d: %s"
+                        pr-num (error-message-string err))
+               (setq failed (1+ failed)))))))
+      (message "magit-gh: created %d worktree(s) for %s (%d existing, %d failed)"
+               created slug existing failed)
+      (list :created created :existing existing :failed failed))))
+
+(defun magit-dash-gh-pr-dashboard--repo-path-at-point ()
+  "Return registered local repository path for PR at point, or signal `user-error'."
+  (let* ((entry (magit-dash-gh-pr-dashboard--entry-at-point))
+         (repo (plist-get entry :repo)))
+    (or (magit-dash-gh-pr-dashboard--find-local-path repo)
+        (user-error "No registered local checkout for %s" repo))))
+
+(defun magit-dash-gh-pr-dashboard-review-worktrees ()
+  "Review worktrees for the pull request / repository at point in dashboard."
+  (interactive)
+  (magit-dash-gh-pr-review-worktrees (magit-dash-gh-pr-dashboard--repo-path-at-point) t)
+  (magit-dash-gh-pr-dashboard-refresh))
+
+(defun magit-dash-gh-pr-dashboard-clean-merged-worktrees ()
+  "Clean worktrees for merged PRs for the repository at point in dashboard."
+  (interactive)
+  (magit-dash-gh-pr-clean-merged-worktrees (magit-dash-gh-pr-dashboard--repo-path-at-point) t)
+  (magit-dash-gh-pr-dashboard-refresh))
+
+(defun magit-dash-gh-pr-dashboard-create-all-worktrees ()
+  "Create worktrees for all open PRs in the current dashboard view.
+If filtered to a single repository, creates worktrees for that repository.
+Otherwise prompts or processes open PRs in the dashboard."
+  (interactive)
+  (let* ((entries (or tabulated-list-entries nil))
+         (repo-filter (plist-get magit-dash-gh-pr-dashboard--filters :repo)))
+    (if repo-filter
+        (let ((path (magit-dash-gh-pr-dashboard--find-local-path repo-filter)))
+          (unless path
+            (user-error "No registered local checkout for %s" repo-filter))
+          (magit-dash-gh-pr-create-all-worktrees path)
+          (magit-dash-gh-pr-dashboard-refresh))
+      (let ((created 0)
+            (existing 0)
+            (failed 0))
+        (dolist (item entries)
+          (let* ((entry (car item))
+                 (pr-num (plist-get entry :number))
+                 (repo (plist-get entry :repo))
+                 (pr-data (plist-get entry :pr))
+                 (local-path (magit-dash-gh-pr-dashboard--find-local-path repo)))
+            (when (and local-path (file-directory-p local-path))
+              (let* ((repo-dir (expand-file-name local-path))
+                     (branch-name (or (and pr-data (map-elt pr-data 'headRefName))
+                                      (plist-get entry :head-ref)))
+                     (wt-exists (magit-dash-gh-pr--find-existing-worktree repo-dir pr-num branch-name)))
+                (if wt-exists
+                    (setq existing (1+ existing))
+                  (condition-case err
+                      (progn
+                        (magit-dash-gh-pr-dashboard-create-worktree entry nil)
+                        (setq created (1+ created)))
+                    (error
+                     (message "magit-gh: failed to create worktree for PR #%d: %s"
+                              pr-num (error-message-string err))
+                     (setq failed (1+ failed)))))))))
+        (message "magit-gh: batch creation complete — %d created, %d existing, %d failed"
+                 created existing failed)
+        (magit-dash-gh-pr-dashboard-refresh)))))
 
 (defun magit-dash-gh-pr-dashboard-fetch-ci ()
   "Fetch GitHub Actions CI logs for the pull request at point."
   (interactive)
   (require 'magit-dash-gh-actions)
-  (let* ((entry (magit-dash-gh-pr-dashboard--entry-at-point))
-         (repo (plist-get entry :repo))
-         (path (or (magit-dash-gh-pr-dashboard--find-local-path repo)
-                   (user-error "No registered local checkout for %s" repo))))
+  (let ((entry (magit-dash-gh-pr-dashboard--entry-at-point))
+        (path (magit-dash-gh-pr-dashboard--repo-path-at-point)))
     (magit-dash-gh-actions-fetch-for-pr (plist-get entry :number) path)))
 
 (transient-define-prefix magit-dash-gh-pr-dashboard-menu ()
   "Actions for the PR dashboard."
   [["Pull Request"
-    ("b"   "Open in browser"       magit-dash-gh-pr-dashboard-open-browser)]
+    ("b"   "Open in browser"          magit-dash-gh-pr-dashboard-open-browser)]
    ["Worktree"
-    ("w"   "Open Magit in worktree" magit-dash-gh-pr-dashboard-open-worktree)
-    ("d"   "Open Dired in worktree" magit-dash-gh-pr-dashboard-open-dired)]
+    ("cw"  "Create worktree"          magit-dash-gh-pr-dashboard-create-worktree)
+    ("ca"  "Create all worktrees"     magit-dash-gh-pr-dashboard-create-all-worktrees)
+    ("r"   "Review / rename worktrees" magit-dash-gh-pr-dashboard-review-worktrees)
+    ("k"   "Clean merged worktrees"   magit-dash-gh-pr-dashboard-clean-merged-worktrees)
+    ("w"   "Open Magit in worktree"   magit-dash-gh-pr-dashboard-open-worktree)
+    ("d"   "Open Dired in worktree"   magit-dash-gh-pr-dashboard-open-dired)]
    ["CI"
-    ("ci"  "Fetch CI logs"         magit-dash-gh-pr-dashboard-fetch-ci)]
+    ("ci"  "Fetch CI logs"            magit-dash-gh-pr-dashboard-fetch-ci)]
    ["View & Filter"
-    ("v"   "Switch view…"          magit-dash-gh-pr-dashboard-switch-view)
-    ("tc"  "Toggle column…"        magit-dash-gh-pr-toggle-column)
-    ("to"  "Toggle Org column"     magit-dash-gh-pr-toggle-org)
-    ("fs"  "Set filter…"           magit-dash-gh-pr-dashboard-set-filter)
-    ("fc"  "Clear all filters"     magit-dash-gh-pr-dashboard-clear-filters)]
+    ("v"   "Switch view…"             magit-dash-gh-pr-dashboard-switch-view)
+    ("tc"  "Toggle column…"           magit-dash-gh-pr-toggle-column)
+    ("to"  "Toggle Org column"        magit-dash-gh-pr-toggle-org)
+    ("fs"  "Set filter…"              magit-dash-gh-pr-dashboard-set-filter)
+    ("fc"  "Clear all filters"        magit-dash-gh-pr-dashboard-clear-filters)]
    ["Dashboard"
-    ("g"   "Refresh"               magit-dash-gh-pr-dashboard-refresh)
-    ("q"   "Quit"                  magit-dash-gh-pr-dashboard-quit)]])
+    ("g"   "Refresh"                  magit-dash-gh-pr-dashboard-refresh)
+    ("q"   "Quit"                     magit-dash-gh-pr-dashboard-quit)]])
 
-;;;###autoload (autoload 'magit-dash-gh-pr-views-menu "magit-dash-gh-pr" nil t)
 (transient-define-prefix magit-dash-gh-pr-views-menu ()
   "Jump to a pull request dashboard view."
   [["Pull Requests"

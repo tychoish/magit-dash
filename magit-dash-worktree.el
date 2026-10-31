@@ -36,6 +36,9 @@
 (declare-function annotated-completing-read "annotated-completing-read")
 (declare-function magit-dash-gh-pr-dashboard-open-worktree "magit-dash-gh-pr")
 (declare-function magit-dash-gh-pr-dashboard--current-repo-slug "magit-dash-gh-pr")
+(declare-function magit-dash-gh-pr-create-all-worktrees "magit-dash-gh-pr")
+(declare-function magit-dash-gh-pr-review-worktrees "magit-dash-gh-pr")
+(declare-function magit-dash-gh-pr-clean-merged-worktrees "magit-dash-gh-pr")
 
 
 ;; Forward declarations for magit-dash core functions and variables
@@ -251,13 +254,31 @@ Creates configured symlinks in PATH from the main repository checkout."
     (magit-dash-refresh)))
 
 ;;;###autoload
+(defun magit-dash-worktree-uncommitted-changes-p (path)
+  "Return non-nil if git worktree at PATH has uncommitted changes.
+Checks for modified tracked files, staged changes, or untracked files
+via `git status --porcelain'."
+  (when (and path (file-directory-p path))
+    (with-temp-buffer
+      (let ((exit (call-process "git" nil (current-buffer) nil
+                                "-C" (expand-file-name path)
+                                "status" "--porcelain")))
+        (if (zerop exit)
+            (not (string-empty-p (string-trim (buffer-string))))
+          t)))))
+
+;;;###autoload
 (defun magit-dash-worktree-delete ()
   "Delete the worktree at point via magit.
-Signals `user-error' when the current row is not a worktree."
+Signals `user-error' when the current row is not a worktree,
+or when the worktree contains uncommitted changes."
   (interactive)
   (let ((repo (magit-dash--repo-at-point)))
     (unless (magit-dash-repo-worktree repo)
       (user-error "Not a worktree row; use 'k' only on worktree entries"))
+    (let ((path (magit-dash-repo-path repo)))
+      (when (magit-dash-worktree-uncommitted-changes-p path)
+        (user-error "Cannot delete worktree %s: contains uncommitted changes" path)))
     (magit-dash-gh--with-repo-dir (magit-dash-repo-path repo)
       (call-interactively #'magit-worktree-delete))
     (magit-dash-refresh)))
@@ -353,6 +374,35 @@ to the current repository or repository at point)."
 
 ;;;###autoload
 (defalias 'magit-dash-worktree-checkout-pr #'magit-dash-worktree-from-pr)
+
+;;;###autoload
+(defun magit-dash-worktree-create-for-all-prs (&optional repo-dir)
+  "Create worktrees for all open PRs in REPO-DIR.
+Reviews existing worktrees first, prompting to rename any that do not match
+the canonical PR format, and prompting to delete any for merged PRs that are clean.
+Establishes configured symlinks for all created worktrees."
+  (interactive)
+  (require 'magit-dash-gh-pr)
+  (magit-dash-gh-pr-create-all-worktrees repo-dir))
+
+;;;###autoload
+(defun magit-dash-worktree-review-prs (&optional repo-dir)
+  "Review existing worktrees in REPO-DIR against GitHub pull requests.
+Prompts to rename worktrees that do not match the canonical PR naming format,
+and prompts to delete worktrees for merged PRs (refusing if uncommitted changes exist).
+Leaves branches intact until branch pruning."
+  (interactive)
+  (require 'magit-dash-gh-pr)
+  (magit-dash-gh-pr-review-worktrees repo-dir t))
+
+;;;###autoload
+(defun magit-dash-worktree-clean-merged-prs (&optional repo-dir)
+  "Delete worktrees for merged PRs in REPO-DIR when clean.
+Leaves local branches intact until branch pruning.
+Refuses to delete any worktree with uncommitted changes."
+  (interactive)
+  (require 'magit-dash-gh-pr)
+  (magit-dash-gh-pr-clean-merged-worktrees repo-dir t))
 
 (provide 'magit-dash-worktree)
 ;;; magit-dash-worktree.el ends here

@@ -3551,11 +3551,16 @@ prompts among the registered repositories when neither applies."
 
 (defun magit-dash-worktree-delete ()
   "Delete the worktree at point via magit.
-Signals `user-error' when the current row is not a worktree."
+Signals `user-error' when the current row is not a worktree,
+or when the worktree contains uncommitted changes."
   (interactive)
   (let ((repo (magit-dash--repo-at-point)))
     (unless (magit-dash-repo-worktree repo)
       (user-error "Not a worktree row; use 'k' only on worktree entries"))
+    (let ((path (magit-dash-repo-path repo)))
+      (when (and (fboundp 'magit-dash-worktree-uncommitted-changes-p)
+                 (magit-dash-worktree-uncommitted-changes-p path))
+        (user-error "Cannot delete worktree %s: contains uncommitted changes" path)))
     (magit-dash--with-repo repo
       (call-interactively #'magit-worktree-delete))
     (magit-dash-refresh)))

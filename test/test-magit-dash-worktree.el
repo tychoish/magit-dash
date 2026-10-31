@@ -130,5 +130,71 @@
       (delete-directory main-dir t)
       (delete-directory wt-dir t))))
 
+
+;;; Uncommitted changes & deletion tests
+
+(ert-deftest magit-dash-worktree/uncommitted-changes-detects-clean ()
+  "uncommitted-changes-p returns nil for clean worktree."
+  (let ((dir (make-temp-file "magit-dash-clean-" t)))
+    (unwind-protect
+        (progn
+          (call-process "git" nil nil nil "init" dir)
+          (call-process "git" nil nil nil "-C" dir "config" "user.name" "test")
+          (call-process "git" nil nil nil "-C" dir "config" "user.email" "test@example.com")
+          (with-temp-file (expand-file-name "file.txt" dir) (insert "hello\n"))
+          (call-process "git" nil nil nil "-C" dir "add" "file.txt")
+          (call-process "git" nil nil nil "-C" dir "commit" "-m" "initial")
+          (should-not (magit-dash-worktree-uncommitted-changes-p dir)))
+      (delete-directory dir t))))
+
+(ert-deftest magit-dash-worktree/uncommitted-changes-detects-dirty ()
+  "uncommitted-changes-p returns non-nil for modified or untracked files."
+  (let ((dir (make-temp-file "magit-dash-dirty-" t)))
+    (unwind-protect
+        (progn
+          (call-process "git" nil nil nil "init" dir)
+          (call-process "git" nil nil nil "-C" dir "config" "user.name" "test")
+          (call-process "git" nil nil nil "-C" dir "config" "user.email" "test@example.com")
+          (with-temp-file (expand-file-name "file.txt" dir) (insert "hello\n"))
+          (call-process "git" nil nil nil "-C" dir "add" "file.txt")
+          (call-process "git" nil nil nil "-C" dir "commit" "-m" "initial")
+          ;; Untracked file
+          (with-temp-file (expand-file-name "untracked.txt" dir) (insert "new\n"))
+          (should (magit-dash-worktree-uncommitted-changes-p dir))
+          ;; Remove untracked, modify tracked
+          (delete-file (expand-file-name "untracked.txt" dir))
+          (should-not (magit-dash-worktree-uncommitted-changes-p dir))
+          (with-temp-file (expand-file-name "file.txt" dir) (insert "modified\n"))
+          (should (magit-dash-worktree-uncommitted-changes-p dir)))
+      (delete-directory dir t))))
+
+(ert-deftest magit-dash-worktree/delete-refuses-on-uncommitted-changes ()
+  "magit-dash-worktree-delete signals user-error when worktree has uncommitted changes."
+  (let* ((repo (magit-dash-repo--make :name "wt-repo" :path "/tmp/fake-wt" :worktree t))
+         (magit-dash-repo-list (list repo)))
+    (cl-letf (((symbol-function 'magit-dash--repo-at-point) (lambda () repo))
+              ((symbol-function 'magit-dash-worktree-uncommitted-changes-p) (lambda (_) t)))
+      (should-error (magit-dash-worktree-delete) :type 'user-error))))
+
+(ert-deftest magit-dash-worktree/pr-wrappers-delegate ()
+  "Test that magit-dash-worktree PR wrapper commands delegate to magit-dash-gh-pr."
+  (let ((create-called nil)
+        (review-called nil)
+        (clean-called nil))
+    (cl-letf (((symbol-function 'magit-dash-gh-pr-create-all-worktrees)
+               (lambda (&optional dir) (setq create-called dir)))
+              ((symbol-function 'magit-dash-gh-pr-review-worktrees)
+               (lambda (&optional dir prompt prs) (setq review-called (list dir prompt prs))))
+              ((symbol-function 'magit-dash-gh-pr-clean-merged-worktrees)
+               (lambda (&optional dir prompt) (setq clean-called (list dir prompt)))))
+      (magit-dash-worktree-create-for-all-prs "/tmp/test-repo")
+      (should (equal "/tmp/test-repo" create-called))
+
+      (magit-dash-worktree-review-prs "/tmp/test-repo")
+      (should (equal (list "/tmp/test-repo" t nil) review-called))
+
+      (magit-dash-worktree-clean-merged-prs "/tmp/test-repo")
+      (should (equal (list "/tmp/test-repo" t) clean-called)))))
+
 (provide 'test-magit-dash-worktree)
 ;;; test-magit-dash-worktree.el ends here
