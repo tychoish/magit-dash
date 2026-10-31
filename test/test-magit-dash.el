@@ -922,11 +922,11 @@ without real git repos or a live dashboard buffer."
 ;;;; magit-dash--build-format
 
 (ert-deftest magit-dash/build-format-elastic-width ()
-  "Name column width is capped at the longest repo name + 3."
+  "Name column width is capped at the longest repo name + 2."
   (let* ((r1 (magit-dash-repo--make :name "short" :path "/tmp/r1"))
          (r2 (magit-dash-repo--make :name "a-much-longer-name" :path "/tmp/r2"))
          (fmt (magit-dash--build-format (list r1 r2))))
-    (should (= (+ (length "a-much-longer-name") 3) (cadr (aref fmt 0))))))
+    (should (= (+ (length "a-much-longer-name") 2) (cadr (aref fmt 0))))))
 
 (ert-deftest magit-dash/build-format-minimum-width ()
   "Name column is at least as wide as the header label \"Name\"."

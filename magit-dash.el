@@ -2034,7 +2034,7 @@ Returns an empty string when nothing is set."
 (defun magit-dash--build-format (repos)
   "Return the tabulated-list format vector for REPOS using enabled columns.
 Name and Branch columns are elastic: Name is capped at the longest
-display name + 3 (minimum 4 for header), and Branch is wide enough
+display name + 2 (minimum 4 for header), and Branch is wide enough
 for its longest value.  When both together exceed the available window
 space they split it proportionally."
   (let* ((raw-name (seq-reduce
@@ -2061,7 +2061,7 @@ space they split it proportionally."
                            acc))
                        magit-dash--column-defs 0))
          (available (max 20 (- (or (ignore-errors (window-width)) 97) fixed-width)))
-         (name-cap (max (length "Name") (+ raw-name 3)))
+         (name-cap (max (length "Name") (+ raw-name 2)))
          (name-need name-cap)
          (branch-need (max 8 (1+ raw-branch)))
          (widths (cond
