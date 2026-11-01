@@ -44,6 +44,7 @@
 (declare-function magit-dash-stage-all "magit-dash")
 (declare-function magit-dash-gh-pr-dashboard-open-worktree "magit-dash-gh-pr")
 (declare-function magit-dash-ci-dispatch-fix-operation "magit-dash-gh-ci")
+(declare-function agent-shell-workflow-dispatch "agent-shell-workflow")
 (declare-function magit-dash-gh-actions-fetch "magit-dash-gh-actions")
 (declare-function magit-dash-gh-actions-fetch-for-pr "magit-dash-gh-actions")
 (declare-function magit-gh-pr-dash "magit-dash-gh-pr")
@@ -586,7 +587,14 @@ Calls CALLBACK with list of PR plists."
                          (seq-find (lambda (r) (file-equal-p (magit-dash-repo-path r) top))
                                    magit-dash-repo-list))))
         (magit-dash-ci-dispatch-fix-operation repo)
-      (user-error "Repository %s is not registered in `magit-dash-repo-list'" top))))
+      (if (fboundp 'agent-shell-workflow-dispatch)
+          (let* ((default-directory (file-name-as-directory top))
+                 (ci-status (magit-dash-gh--cache-get top :ci-status))
+                 (run-id (and ci-status (plist-get ci-status :run-id)))
+                 (args (when run-id (list :run-id run-id))))
+            (message "Dispatching fix-CI workflow for %s..." (file-name-nondirectory (directory-file-name top)))
+            (agent-shell-workflow-dispatch 'fix-ci :args args :context-dir default-directory))
+        (user-error "Repository %s is not registered in `magit-dash-repo-list'" top)))))
 
 (defun magit-dash-status-ci-refresh ()
   "Force refresh of CI status for current repository."

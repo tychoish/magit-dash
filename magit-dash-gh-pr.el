@@ -29,6 +29,7 @@
 (require 'subr-x)
 (require 'tabulated-list)
 (require 'transient)
+(require 'savehist)
 (require 'magit-dash-gh)
 
 (declare-function magit-toplevel "magit-git")
@@ -254,7 +255,8 @@ Can be:
 - `sibling': creates `<parent>/<repo-base>-<name>'
 - A string format where `%r' is the repo root, `%b' is the repo base name,
   and `%n' is the worktree name (e.g. \"pr-42\").
-- A function called with (REPO-DIR NAME ENTRY) returning an absolute path string."
+- A function called with (REPO-DIR NAME ENTRY) returning an absolute
+  path string."
   :type '(choice (const :tag "Sibling directory (<repo>-<name>)" sibling)
                  (const :tag "Subdirectory under .wt/ (<repo>/.wt/<name>)" dot-wt)
                  (string :tag "Format string (%r=repo, %b=repo-base, %n=name)")
@@ -284,7 +286,8 @@ Persisted across sessions via `savehist-additional-variables'.")
     (comments . ("Cmts"    4  nil))
     (review   . ("Review"  14 t)))
   "Alist of COLUMN-SYMBOL to default (LABEL WIDTH SORTABLE) for PR columns.
-Org and Repo widths are computed dynamically in `magit-dash-gh-pr-dashboard--build-format'.")
+Org and Repo widths are computed dynamically in
+`magit-dash-gh-pr-dashboard--build-format'.")
 
 (defcustom magit-dash-gh-pr-show-org nil
   "When non-nil, display a separate Org column in the PR dashboard.
@@ -371,9 +374,9 @@ Keys: :state (\"open\"/\"closed\"), :author, :repo (OWNER/NAME), :org.")
   :group 'magit-dash)
 
 (defun magit-dash-gh-pr-dashboard--build-format (&optional width entries)
-  "Return the `tabulated-list-format' vector with elastic columns using active columns.
-WIDTH is available window width; when nil, `window-width' is used.
-ENTRIES is the list of tabulated-list entries."
+  "Return `tabulated-list-format' vector with elastic columns.
+Uses active columns.  WIDTH is available window width; when nil,
+`window-width' is used.  ENTRIES is the list of tabulated-list entries."
   (let* ((ents (or entries (and (boundp 'tabulated-list-entries) tabulated-list-entries)))
          (active (magit-dash-gh-pr--active-columns))
          (show-org (magit-dash-gh-pr--column-enabled-p 'org))
@@ -558,7 +561,8 @@ Otherwise uses `gh search prs' for cross-repo listing."
   "Maximum display width for PR title column.")
 
 (defun magit-dash-gh-pr-dashboard--build-entry (pr repo-name)
-  "Return a `tabulated-list-entries' entry for PR alist in REPO-NAME using active columns."
+  "Return a `tabulated-list-entries' entry for PR in REPO-NAME.
+Uses active columns."
   (let* ((number (map-elt pr 'number))
          (entry-id (list :number number
                          :repo repo-name
@@ -616,8 +620,10 @@ Returns nil when OUTPUT is not a JSON array."
                    prs))))))
 
 (defun magit-dash-gh-pr-dashboard--merge-ci (buf repo output)
-  "Merge statusCheckRollup and headRefName values from OUTPUT into REPO's rows in BUF.
-OUTPUT is `gh pr list' JSON with `number', `statusCheckRollup', and `headRefName' fields."
+  "Merge statusCheckRollup and headRefName values from OUTPUT into rows.
+Updates REPO's rows in BUF.
+OUTPUT is `gh pr list' JSON with `number', `statusCheckRollup', and
+`headRefName' fields."
   (when (buffer-live-p buf)
     (let ((trimmed (string-trim output)))
       (when (string-prefix-p "[" trimmed)
@@ -645,9 +651,10 @@ OUTPUT is `gh pr list' JSON with `number', `statusCheckRollup', and `headRefName
             (tabulated-list-print t)))))))
 
 (defun magit-dash-gh-pr-dashboard--enrich-ci (buf state dir)
-  "Fetch CI status per repo and merge it into BUF's rows for STATE using `gen-run-async'.
-Used for aggregate (cross-repo) views, whose listing endpoint does not
-return `statusCheckRollup'.  DIR is the working directory for `gh'."
+  "Fetch CI status per repo and merge it into BUF's rows for STATE.
+Uses `gen-run-async'.  Used for aggregate (cross-repo) views, whose
+listing endpoint does not return `statusCheckRollup'.  DIR is the
+working directory for `gh'."
   (when (buffer-live-p buf)
     (let* ((repos (delete-dups
                    (with-current-buffer buf
@@ -803,7 +810,8 @@ Interactively prompts with available PR views."
 
 (defun magit-dash-gh-pr-dashboard-quit ()
   "Quit the PR dashboard.
-Deletes the window (restoring window layout if split beneath) and buries the buffer."
+Deletes the window (restoring window layout if split beneath) and
+buries the buffer."
   (interactive)
   (let ((buf (current-buffer))
         (win (selected-window)))
@@ -827,7 +835,8 @@ Deletes the window (restoring window layout if split beneath) and buries the buf
 (defun magit-gh-pr-dash (&optional repo)
   "Open the GitHub pull request dashboard buffer.
 When opened from a repository dashboard window, splits the window beneath.
-Aggregates all open PRs by default across repositories, or for REPO when provided."
+Aggregates all open PRs by default across repositories, or for REPO
+when provided."
   (interactive)
   (magit-dash-gh--check-gh)
   (let* ((orig-buf (current-buffer))
@@ -911,11 +920,13 @@ Signals `user-error' when no GitHub repository can be determined."
          :repo (magit-dash-gh-pr-dashboard--current-repo-slug) :org nil)))
 
 (defun magit-dash-gh-pr--git-worktrees (repo-dir)
-  "Return a list of alists ((path . PATH) (branch . BRANCH) (head . HEAD)) for REPO-DIR."
+  "Return a list of alists ((path . PATH) (branch . BRANCH) (head . HEAD)).
+Checked for REPO-DIR."
   (magit-dash-gh--git-worktrees repo-dir))
 
 (defun magit-dash-gh-pr--compute-worktree-path (repo-dir name &optional entry)
-  "Compute projected worktree path for NAME under REPO-DIR using `magit-dash-gh-pr-worktree-path-format'."
+  "Compute projected worktree path for NAME under REPO-DIR.
+Uses `magit-dash-gh-pr-worktree-path-format'."
   (let* ((repo-dir (expand-file-name repo-dir))
          (repo-base (file-name-nondirectory (directory-file-name repo-dir)))
          (parent (file-name-directory (directory-file-name repo-dir)))
@@ -936,7 +947,7 @@ Signals `user-error' when no GitHub repository can be determined."
       (expand-file-name (format "%s-%s" repo-base name) parent)))))
 
 (defun magit-dash-gh-pr--find-existing-worktree (repo-dir pr-num &optional branch-name)
-  "Find an existing worktree directory for PR-NUM and BRANCH-NAME under REPO-DIR."
+  "Find existing worktree directory for PR-NUM and BRANCH-NAME under REPO-DIR."
   (when repo-dir
     (let* ((repo-dir (expand-file-name repo-dir))
            (repo-base (file-name-nondirectory (directory-file-name repo-dir)))
@@ -1160,8 +1171,8 @@ Preserves the underlying branch until branch pruning."
 (defun magit-dash-gh-pr-dashboard-create-worktree (&optional entry switch)
   "Create a git worktree for the pull request at point (or ENTRY).
 When SWITCH is non-nil, switches to the worktree's magit status buffer.
-If a worktree already exists, checks if its path matches the configured PR format
-and prompts to rename it if it does not.
+If a worktree already exists, checks if its path matches configured
+PR format and prompts to rename it if it does not.
 If the worktree does not exist, fetches the PR branch, creates the worktree,
 and sets up configured symlinks."
   (interactive)
@@ -1234,7 +1245,8 @@ name, creates the worktree directory, and opens its magit status buffer."
 (defun magit-dash-gh-pr-review-worktrees (&optional repo-dir prompt-p prs merged-only)
   "Review existing worktrees in REPO-DIR against GitHub pull requests.
 Prompts to rename worktrees that do not match the configured PR naming format,
-and prompts to delete worktrees for merged PRs (refusing if uncommitted changes exist).
+and prompts to delete worktrees for merged PRs (refusing if
+uncommitted changes exist).
 Leaves branches intact until branch pruning.
 PROMPT-P specifies whether to prompt for actions (defaults to interactive).
 PRS can be an existing list of PR alists to avoid refetching.
@@ -1324,7 +1336,8 @@ PROMPT-P specifies whether to prompt before deleting each clean worktree."
 (defun magit-dash-gh-pr-create-all-worktrees (&optional repo-dir)
   "Create worktrees for all open PRs in REPO-DIR.
 First reviews existing worktrees, prompting to rename any that do not match
-the canonical PR format, and prompting to delete any for merged PRs that are clean.
+the canonical PR format, and prompting to delete any for merged PRs
+that are clean.
 Then creates worktrees for each open PR that does not yet have one.
 Establishes configured symlinks for all created worktrees."
   (interactive)
@@ -1368,7 +1381,8 @@ Establishes configured symlinks for all created worktrees."
       (list :created created :existing existing :failed failed))))
 
 (defun magit-dash-gh-pr-dashboard--repo-path-at-point ()
-  "Return registered local repository path for PR at point, or signal `user-error'."
+  "Return registered local repository path for PR at point.
+Signals `user-error' when not found."
   (let* ((entry (magit-dash-gh-pr-dashboard--entry-at-point))
          (repo (plist-get entry :repo)))
     (or (magit-dash-gh-pr-dashboard--find-local-path repo)

@@ -248,13 +248,16 @@ Does nothing when no CI status is cached for REPO."
               name
             (user-error "Cannot determine GitHub owner/repo slug for %s" name))))))
 
-(defun magit-dash-ci--dispatch-prompt (id args)
-  "Dispatch prompt ID with ARGS plist.
-Calls dispatch (or fallback exec) with `:args' ARGS."
+(defun magit-dash-ci--dispatch-prompt (id args &optional context-dir)
+  "Dispatch prompt ID with ARGS plist in optional CONTEXT-DIR.
+Calls dispatch (or fallback exec) with `:args' ARGS and `:context-dir'
+CONTEXT-DIR."
   (let ((fn (cond ((fboundp 'agent-shell-workflow-dispatch) #'agent-shell-workflow-dispatch)
                   ((fboundp 'agent-shell-workflow-exec) #'agent-shell-workflow-exec)
                   (t (user-error "magit-dash fix-CI requires the agent-shell-workflow library")))))
-    (funcall fn id :args args)))
+    (if context-dir
+        (funcall fn id :args args :context-dir context-dir)
+      (funcall fn id :args args))))
 
 (defun magit-dash-ci--download-and-dispatch (repo run-id)
   "Dispatch the `fix-ci' prompt library workflow for REPO and RUN-ID.
@@ -262,19 +265,27 @@ Requires `agent-shell-workflow-dispatch' from `agent-shell-workflow'."
   (let* ((path (magit-dash-repo-path repo))
          (slug (magit-dash-ci--repo-slug repo))
          (default-directory (file-name-as-directory path)))
-    (magit-dash-ci--dispatch-prompt 'fix-ci (list :repo slug :run-id run-id))))
+    (message "Dispatching fix-CI workflow for %s (run %s)..." slug run-id)
+    (magit-dash-ci--dispatch-prompt 'fix-ci (list :repo slug :run-id run-id) default-directory)))
 
 ;;;###autoload
 (defun magit-dash-ci-dispatch-fix-operation (repo)
   "Dispatch the `fix-ci' prompt library workflow for REPO.
-Invokes workflow dispatch with `:repo' set to REPO's OWNER/NAME slug."
+Invokes workflow dispatch with `:repo' set to REPO's OWNER/NAME slug,
+and passes cached failing `:run-id' if available."
   (unless (magit-dash-repo-include-ci repo)
     (user-error "magit-dash fix-CI: %s does not have CI enabled (:include-ci)"
                 (magit-dash-repo-name repo)))
   (let* ((path (magit-dash-repo-path repo))
          (slug (magit-dash-ci--repo-slug repo))
-         (default-directory (file-name-as-directory path)))
-    (magit-dash-ci--dispatch-prompt 'fix-ci (list :repo slug))))
+         (default-directory (file-name-as-directory path))
+         (ci-status (magit-dash-gh--cache-get path :ci-status))
+         (run-id (and ci-status (plist-get ci-status :run-id)))
+         (args (if run-id (list :repo slug :run-id run-id) (list :repo slug))))
+    (if run-id
+        (message "Dispatching fix-CI workflow for %s (run %s)..." slug run-id)
+      (message "Dispatching fix-CI workflow for %s..." slug))
+    (magit-dash-ci--dispatch-prompt 'fix-ci args default-directory)))
 
 (provide 'magit-dash-gh-ci)
 ;;; magit-dash-gh-ci.el ends here

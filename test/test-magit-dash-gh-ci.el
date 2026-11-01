@@ -120,9 +120,6 @@ passes nil explicitly to exercise the disabled case."
       (should (equal "owner/myrepo" (plist-get (plist-get captured-kwargs :args) :repo)))
       (should (= 12345 (plist-get (plist-get captured-kwargs :args) :run-id))))))
 
-(provide 'test-magit-dash-gh-ci)
-;;; test-magit-dash-gh-ci.el ends here
-
 (ert-deftest magit-dash-gh-ci/parse-runs-failure-in-any-workflow-wins ()
   (let ((ci (magit-dash-gh-ci--parse-runs
              '(((headSha . "a") (status . "completed") (conclusion . "success")
@@ -151,3 +148,46 @@ passes nil explicitly to exercise the disabled case."
                 (databaseId . 2))))))
     (should (equal "in_progress" (plist-get ci :status)))
     (should-not (plist-get ci :conclusion))))
+
+(ert-deftest magit-dash-gh-ci/dispatch-fix-operation-includes-cached-run-id ()
+  "Dispatches fix-ci with cached run-id and context-dir when available."
+  (let* ((repo (magit-dash-gh-ci-test/make-repo "myrepo" "/tmp/myrepo" "main"))
+         (captured-prompt nil)
+         (captured-kwargs nil))
+    (cl-letf (((symbol-function 'magit-dash-ci--repo-slug) (lambda (_) "owner/myrepo"))
+              ((symbol-function 'magit-dash-gh--cache-get)
+               (lambda (path key)
+                 (when (and (equal path "/tmp/myrepo") (eq key :ci-status))
+                   (list :run-id 99999 :conclusion "failure"))))
+              ((symbol-function 'agent-shell-workflow-dispatch)
+               (lambda (prompt &rest kwargs)
+                 (setq captured-prompt prompt
+                       captured-kwargs kwargs))))
+      (magit-dash-ci-dispatch-fix-operation repo)
+      (should (eq 'fix-ci captured-prompt))
+      (should (equal "owner/myrepo" (plist-get (plist-get captured-kwargs :args) :repo)))
+      (should (= 99999 (plist-get (plist-get captured-kwargs :args) :run-id)))
+      (should (equal "/tmp/myrepo/" (plist-get captured-kwargs :context-dir))))))
+
+(ert-deftest magit-dash-status/ci-fix-falls-back-to-workflow-dispatch ()
+  "magit-dash-status-ci-fix falls back to agent-shell-workflow-dispatch for unregistered repos."
+  (let ((captured-prompt nil)
+        (captured-kwargs nil))
+    (cl-letf (((symbol-function 'magit-dash-status--repo-root)
+               (lambda () "/tmp/unregistered-repo"))
+              ((symbol-function 'magit-dash-gh--cache-get)
+               (lambda (path key)
+                 (when (and (equal path "/tmp/unregistered-repo") (eq key :ci-status))
+                   (list :run-id 88888))))
+              ((symbol-function 'agent-shell-workflow-dispatch)
+               (lambda (prompt &rest kwargs)
+                 (setq captured-prompt prompt
+                       captured-kwargs kwargs))))
+      (let ((magit-dash-repo-list nil))
+        (magit-dash-status-ci-fix)
+        (should (eq 'fix-ci captured-prompt))
+        (should (= 88888 (plist-get (plist-get captured-kwargs :args) :run-id)))
+        (should (equal "/tmp/unregistered-repo/" (plist-get captured-kwargs :context-dir)))))))
+
+(provide 'test-magit-dash-gh-ci)
+;;; test-magit-dash-gh-ci.el ends here
