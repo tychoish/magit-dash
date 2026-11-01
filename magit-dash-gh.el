@@ -783,11 +783,11 @@ signal."
 (defun magit-dash-gh--owner-repo-from-url (url)
   "Extract (OWNER . REPO) pair from URL or slug string if possible."
   (when (and url (stringp url))
-    (let ((clean (replace-regexp-in-string "\\.git\\\'" "" (string-trim url))))
+    (let ((clean (replace-regexp-in-string "\\.git\\'" "" (string-trim url))))
       (cond
-       ((string-match "github\\.com[:/]\\([^/]+\\)/\\([^/]+\\)\\\'" clean)
+       ((string-match "github\\.com[:/]\\([^/]+\\)/\\([^/]+\\)\\'" clean)
         (cons (match-string 1 clean) (match-string 2 clean)))
-       ((string-match "\\\\`\\([^/]+\\)/\\([^/]+\\)\\\'" clean)
+       ((string-match "\\`\\([^/]+\\)/\\([^/]+\\)\\'" clean)
         (cons (match-string 1 clean) (match-string 2 clean)))))))
 
 (defun magit-dash-gh--repo-info ()
