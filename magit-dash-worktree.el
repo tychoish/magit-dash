@@ -238,7 +238,6 @@ Creates configured symlinks in PATH from the main repository checkout."
                 path (error-message-string err))))))
 
 ;; Automatically register on `magit-post-worktree-add-hook'
-(add-hook 'magit-post-worktree-add-hook #'magit-dash-worktree-post-add-hook-function)
 
 ;;; Interactive worktree commands for dashboard & overview
 

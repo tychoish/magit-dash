@@ -1844,7 +1844,6 @@ Returns a cancellation handle."
   "Alist of (COLUMN-SYMBOL . ENABLED) for the repository dashboard.
 Persisted across sessions via `savehist-additional-variables'.")
 
-(add-to-list 'savehist-additional-variables 'magit-dash-columns)
 
 (defconst magit-dash--all-columns
   '(org name branch fetched updated ci status worktree sync cached upstream)
@@ -2097,7 +2096,7 @@ space they split it proportionally."
     (keymap-set m "d"   #'magit-dash-magit-diff)
     (keymap-set m "e"   #'magit-dash-find-file)
     (keymap-set m "o"   #'magit-dash-open-repo)
-    (keymap-set m "q"   #'quit-window)
+    (keymap-set m "q"   #'magit-dash-quit-window)
     (keymap-set m "?"   #'magit-dash-menu)
     (keymap-set m "!"   #'magit-dash-magit-dispatch)
     (keymap-set m "/"   #'magit-dash-hide-select)
@@ -2296,10 +2295,8 @@ Registers command abbreviations and adjusts idle delay."
   (setq-local default-directory (file-name-as-directory (expand-file-name "~/")))
   (add-hook 'post-command-hook #'magit-dash--update-default-directory nil t)
   (add-hook 'kill-buffer-hook #'magit-dash--cancel-refresh-jobs nil t)
-  (add-hook 'kill-buffer-hook #'magit-dash--which-key-sync-timer nil t))
-
-(add-hook 'magit-dash-mode-hook #'magit-dash--which-key-setup)
-(add-hook 'which-key-mode-hook #'magit-dash--which-key-register-replacements)
+  (add-hook 'kill-buffer-hook #'magit-dash--which-key-sync-timer nil t)
+  (magit-dash--which-key-setup))
 
 (defun magit-dash--build-entry (repo)
   "Return a `tabulated-list-entries' entry for REPO using enabled columns.
@@ -2801,7 +2798,6 @@ When QUIET is non-nil, suppresses echo area messages."
         (with-current-buffer buf
           (magit-dash-refresh-repo repo nil t))))))
 
-(add-hook 'magit-post-refresh-hook #'magit-dash--on-magit-post-refresh)
 
 ;;;###autoload
 (defun magit-dash-refresh-marked ()
@@ -4155,7 +4151,7 @@ Indicates whether batch operations target all repos or marked repos."
     ("tc"  "Toggle column"   magit-dash-toggle-column)
     ("ts"  "Toggle submodules" magit-dash-toggle-discovered-submodules)
     ("gg"  "Refresh"         magit-dash-refresh)
-    ("q"   "Quit"            quit-window)]])
+    ("q"   "Quit"            magit-dash-quit-window)]])
 
 (defun magit-dash-default-sync ()
   "Run safe default sync (fetch, safe pull, safe push) for target repo(s)."
@@ -4241,22 +4237,48 @@ Indicates whether batch operations target all repos or marked repos."
 
 
 
-(defun magit-dash--quit-window-advice (orig-fn &optional kill window)
-  "Around advice for `quit-window': delete split window in dashboard buffers.
-Also cancels in-flight async refresh jobs when quitting `magit-dash-mode'.
-ORIG-FN is the original `quit-window' function.  KILL and WINDOW are
-passed through to ORIG-FN.
-Only applies in `magit-dash-mode' and `magit-dash-gh-pr-dashboard-mode'.
-Falls through otherwise."
+;;;###autoload
+(defun magit-dash-quit-window (&optional kill window)
+  "Quit the current dashboard window and cancel any active refresh jobs.
+KILL and WINDOW are passed through to `quit-window'."
+  (interactive "P")
   (when (derived-mode-p 'magit-dash-mode)
     (magit-dash--cancel-refresh-jobs))
   (if (or kill (one-window-p)
           (not (derived-mode-p 'magit-dash-mode
                                'magit-dash-gh-pr-dashboard-mode)))
-      (funcall orig-fn kill window)
+      (quit-window kill window)
     (delete-window (or window (selected-window)))))
 
-(advice-add 'quit-window :around #'magit-dash--quit-window-advice)
+(defalias 'magit-dash--quit-window-advice
+  (lambda (orig-fn &optional kill window)
+    (when (derived-mode-p 'magit-dash-mode)
+      (magit-dash--cancel-refresh-jobs))
+    (if (or kill (one-window-p)
+            (not (derived-mode-p 'magit-dash-mode
+                                 'magit-dash-gh-pr-dashboard-mode)))
+        (funcall orig-fn kill window)
+      (delete-window (or window (selected-window))))))
+
+;;;###autoload
+(define-minor-mode magit-dash-global-mode
+  "Global minor mode for `magit-dash' integrations."
+  :global t
+  :group 'magit-dash
+  (if magit-dash-global-mode
+      (progn
+        (add-hook 'magit-post-refresh-hook #'magit-dash--on-magit-post-refresh)
+        (add-hook 'which-key-mode-hook #'magit-dash--which-key-register-replacements)
+        (when (boundp 'savehist-additional-variables)
+          (add-to-list 'savehist-additional-variables 'magit-dash-columns)
+          (when (boundp 'magit-dash-gh-pr-columns)
+            (add-to-list 'savehist-additional-variables 'magit-dash-gh-pr-columns)))
+        (when (fboundp 'magit-dash-worktree-post-add-hook-function)
+          (add-hook 'magit-post-worktree-add-hook #'magit-dash-worktree-post-add-hook-function)))
+    (remove-hook 'magit-post-refresh-hook #'magit-dash--on-magit-post-refresh)
+    (remove-hook 'which-key-mode-hook #'magit-dash--which-key-register-replacements)
+    (when (fboundp 'magit-dash-worktree-post-add-hook-function)
+      (remove-hook 'magit-post-worktree-add-hook #'magit-dash-worktree-post-add-hook-function))))
 (provide 'magit-dash)
 
 ;;; magit-dash.el ends here

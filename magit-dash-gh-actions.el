@@ -57,6 +57,7 @@ Applies ANSI colour sequences and provides read-only navigation."
     (let ((inhibit-read-only t))
       (ansi-color-apply-on-region (point-min) (point-max)))))
 
+;;;###autoload
 (add-to-list 'auto-mode-alist '("\\.ghlog\\'" . magit-dash-gh-actions-log-mode))
 
 ;;; Internal helpers
