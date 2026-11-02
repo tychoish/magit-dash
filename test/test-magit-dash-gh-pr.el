@@ -493,6 +493,7 @@
   (should (eq t (alist-get 'title magit-dash-gh-pr-columns)))
   (should (eq t (alist-get 'ci magit-dash-gh-pr-columns)))
   (should (eq t (alist-get 'updated magit-dash-gh-pr-columns)))
+  (magit-dash-global-mode 1)
   (should (memq 'magit-dash-gh-pr-columns savehist-additional-variables)))
 
 (ert-deftest magit-dash-gh-pr/toggle-column ()
