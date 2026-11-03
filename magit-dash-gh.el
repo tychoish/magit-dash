@@ -203,8 +203,7 @@ Signals `user-error' when not inside a git repository."
       (when (zerop (call-process "git" nil (current-buffer) nil
                                  "-C" (expand-file-name repo-dir)
                                  "worktree" "list" "--porcelain"))
-        (let ((lines (split-string (buffer-string) "
-" t))
+        (let ((lines (split-string (buffer-string) "\n" t))
               (worktrees nil)
               (cur-path nil)
               (cur-head nil)
@@ -258,9 +257,7 @@ Signals `user-error' when not inside a git repository."
           (when (= 0 (call-process "git" nil (current-buffer) nil
                                    "branch" "--format=%(refname:short)" "--merged" default-branch))
             (seq-filter (lambda (b) (not (string-empty-p b)))
-                        (split-string (buffer-string) "
-" t "[ 	
-]+"))))))))
+                        (split-string (buffer-string) "\n" t "[ \t\n]+"))))))))
 
 (defvar magit-dash-gh-prune-pr-limit 100
   "Maximum number of PRs to fetch from GitHub on each incremental scan.")
@@ -270,7 +267,9 @@ Signals `user-error' when not inside a git repository."
 
 (defun magit-dash-gh--pr-closed-p (pr)
   "Return non-nil when PR alist represents a merged or closed PR."
-  (member (map-elt pr 'state) '("MERGED" "CLOSED")))
+  (let ((state (map-elt pr 'state)))
+    (and (stringp state)
+         (member (upcase state) '("MERGED" "CLOSED")))))
 
 (defun magit-dash-gh--default-branch ()
   "Return the repository's default branch name, falling back to `main'."

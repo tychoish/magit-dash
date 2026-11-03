@@ -264,22 +264,22 @@ Can be:
   :group 'magit-dash)
 
 (defvar magit-dash-gh-pr-columns
-  '((org . nil) (repo . t) (worktree . t) (pr . t) (title . t) (ci . t) (updated . t) (age . nil) (comments . t) (review . t))
+  '((org . nil) (repo . t) (pr . t) (ci . t) (title . t) (worktree . t) (updated . t) (age . nil) (comments . t) (review . t))
   "Alist of (COLUMN-SYMBOL . ENABLED) for the PR dashboard.
 Persisted across sessions via `savehist-additional-variables'.")
 
 
 (defconst magit-dash-gh-pr--all-columns
-  '(org repo worktree pr title ci updated age comments review)
+  '(org repo pr ci title worktree updated age comments review)
   "All available PR dashboard columns in display order.")
 
 (defconst magit-dash-gh-pr--column-defs
   '((org      . ("Org"     10 t))
     (repo     . ("Repo"    16 t))
-    (worktree . ("WT"      3  t))
     (pr       . ("PR#"     5  nil))
-    (title    . ("Title"   38 t))
     (ci       . ("CI"      3  t))
+    (title    . ("Title"   38 t))
+    (worktree . ("WT"      3  t))
     (updated  . ("Updated" 8  nil))
     (age      . ("Age"     6  nil))
     (comments . ("Cmts"    4  nil))
@@ -357,6 +357,9 @@ Kept in sync with `magit-dash-gh-pr-columns'."
   "Current PR dashboard filters plist.
 Keys: :state (\"open\"/\"closed\"), :author, :repo (OWNER/NAME), :org.")
 
+(defvar-local magit-dash-gh-pr-dashboard--marked-entries nil
+  "List of marked PR keys (cons of (REPO . NUMBER)) in the current PR dashboard.")
+
 (defface magit-dash-gh-pr-ci-pass-face
   '((t :inherit success))
   "Face for passing CI status in the PR dashboard."
@@ -418,32 +421,38 @@ Uses active columns.  WIDTH is available window width; when nil,
   (let ((m (make-sparse-keymap)))
     (keymap-set m "RET" #'magit-dash-gh-pr-dashboard-open-browser)
     (keymap-set m "w"   #'magit-dash-gh-pr-dashboard-open-worktree)
-    (keymap-set m "W"   #'magit-dash-gh-pr-dashboard-open-worktree)
     (keymap-set m "c w" #'magit-dash-gh-pr-dashboard-create-worktree)
     (keymap-set m "c a" #'magit-dash-gh-pr-dashboard-create-all-worktrees)
     (keymap-set m "c i" #'magit-dash-gh-pr-dashboard-fetch-ci)
     (keymap-set m "k"   #'magit-dash-gh-pr-dashboard-clean-merged-worktrees)
     (keymap-set m "d"   #'magit-dash-gh-pr-dashboard-open-dired)
-    (keymap-set m "O"   #'magit-dash-gh-pr-toggle-org)
-    (keymap-set m "T"   #'magit-dash-gh-pr-toggle-column)
-    (keymap-set m "v"   #'magit-dash-gh-pr-dashboard-switch-view)
+    (keymap-set m "*"   #'magit-dash-gh-pr-dashboard-mark-all)
+    (keymap-set m "SPC"   #'magit-dash-gh-pr-dashboard-toggle-mark)
+    (keymap-set m "m m"   #'magit-dash-gh-pr-dashboard-toggle-mark)
+    (keymap-set m "m u"   #'magit-dash-gh-pr-dashboard-unmark)
+    (keymap-set m "m c"   #'magit-dash-gh-pr-dashboard-unmark-all)
+    (keymap-set m "m a"   #'magit-dash-gh-pr-dashboard-mark-all)
+    (keymap-set m "v o"   #'magit-dash-gh-pr-toggle-org)
+    (keymap-set m "v t"   #'magit-dash-gh-pr-toggle-column)
+    (keymap-set m "v s"   #'magit-dash-gh-pr-dashboard-switch-view)
     (keymap-set m "g"   #'magit-dash-gh-pr-dashboard-refresh)
     (keymap-set m "r"   #'magit-dash-gh-pr-dashboard-refresh)
     (keymap-set m "f"   #'magit-dash-gh-pr-dashboard-set-filter)
     (keymap-set m "/"   #'magit-dash-gh-pr-dashboard-set-filter)
-    (keymap-set m "F"   #'magit-dash-gh-pr-dashboard-clear-filters)
+    (keymap-set m "C-/"   #'magit-dash-gh-pr-dashboard-clear-filters)
     (keymap-set m "q"   #'magit-dash-gh-pr-dashboard-quit)
-    (keymap-set m "m"   #'magit-dash-gh-pr-dashboard-menu)
     (keymap-set m "?"   #'magit-dash-gh-pr-dashboard-menu)
     m)
   "Keymap for `magit-dash-gh-pr-dashboard-mode'.")
+
 (define-derived-mode magit-dash-gh-pr-dashboard-mode tabulated-list-mode "PRs"
   "Major mode for the pull request dashboard."
   (setq tabulated-list-format (magit-dash-gh-pr-dashboard--build-format))
   (setq tabulated-list-sort-key nil)
   (tabulated-list-init-header)
   (setq-local magit-dash-gh-pr-dashboard--filters
-              (list :state "open" :author nil :repo nil :org nil)))
+              (list :state "open" :author nil :repo nil :org nil))
+  (setq-local magit-dash-gh-pr-dashboard--marked-entries nil))
 
 (defun magit-dash-gh-pr--parse-status-rollup (rollup)
   "Calculate overall CI state from GitHub ROLLUP check runs or contexts.
@@ -541,7 +550,7 @@ Otherwise uses `gh search prs' for cross-repo listing."
         (append
          (list "pr" "list" "-R" repo "--state" state
                "--json"
-               "number,title,state,author,createdAt,updatedAt,comments,reviewDecision,statusCheckRollup,isDraft,url,headRefName"
+               "number,title,state,mergedAt,author,createdAt,updatedAt,comments,reviewDecision,statusCheckRollup,isDraft,url,headRefName"
                "--jq" "map(. + {commentsCount: (.comments | length)} | del(.comments))")
          (when author (list "--author" author)))
       (append
@@ -559,6 +568,17 @@ Otherwise uses `gh search prs' for cross-repo listing."
 (defconst magit-dash-gh-pr-dashboard--title-width 36
   "Maximum display width for PR title column.")
 
+(defun magit-dash-gh-pr-dashboard--entry-key (entry)
+  "Return unique key `(REPO . NUMBER)' for PR ENTRY plist."
+  (cons (plist-get entry :repo) (plist-get entry :number)))
+
+(defun magit-dash-gh-pr-dashboard--entry-marked-p (entry)
+  "Return non-nil if PR ENTRY is marked in the current dashboard."
+  (and (bound-and-true-p magit-dash-gh-pr-dashboard--marked-entries)
+       (member (magit-dash-gh-pr-dashboard--entry-key entry)
+               magit-dash-gh-pr-dashboard--marked-entries)
+       t))
+
 (defun magit-dash-gh-pr-dashboard--build-entry (pr repo-name)
   "Return a `tabulated-list-entries' entry for PR in REPO-NAME.
 Uses active columns."
@@ -568,6 +588,7 @@ Uses active columns."
                          :updated (map-elt pr 'updatedAt)
                          :head-ref (map-elt pr 'headRefName)
                          :pr pr))
+         (is-marked (magit-dash-gh-pr-dashboard--entry-marked-p entry-id))
          (pair (magit-dash-gh-pr--split-slug repo-name))
          (org-str (car pair))
          (short-repo (if (string-empty-p (cdr pair)) (car pair) (cdr pair)))
@@ -578,19 +599,29 @@ Uses active columns."
                   (lambda (col)
                     (pcase col
                       ('org org-str)
-                      ('repo short-repo)
+                      ('repo
+                       (if is-marked
+                           (propertize short-repo 'face 'bold)
+                         short-repo))
                       ('worktree
                        (if (magit-dash-gh-pr-dashboard--worktree-exists-p entry-id)
                            (propertize "✓" 'face 'success)
                          (propertize "·" 'face 'shadow)))
-                      ('pr (number-to-string number))
+                      ('pr
+                       (let ((s (number-to-string number)))
+                         (if is-marked
+                             (propertize (concat "*" s) 'face 'bold)
+                           s)))
                       ('title
-                       (truncate-string-to-width
-                        (or (map-elt pr 'title) "")
-                        magit-dash-gh-pr-dashboard--title-width nil nil "…"))
+                       (let ((t-str (truncate-string-to-width
+                                     (or (map-elt pr 'title) "")
+                                     magit-dash-gh-pr-dashboard--title-width nil nil "…")))
+                         (if is-marked
+                             (propertize t-str 'face 'bold)
+                           t-str)))
                       ('ci
-                       (magit-dash-gh-pr-dashboard--format-ci
-                        (magit-dash-gh-pr--parse-status-rollup (map-elt pr 'statusCheckRollup))))
+                        (magit-dash-gh-pr-dashboard--format-ci
+                         (magit-dash-gh-pr--parse-status-rollup (map-elt pr 'statusCheckRollup))))
                       ('updated
                        (or (magit-dash-gh-pr-dashboard--format-age (map-elt pr 'updatedAt)) "?"))
                       ('age
@@ -619,10 +650,9 @@ Returns nil when OUTPUT is not a JSON array."
                    prs))))))
 
 (defun magit-dash-gh-pr-dashboard--merge-ci (buf repo output)
-  "Merge statusCheckRollup and headRefName values from OUTPUT into rows.
+  "Merge statusCheckRollup, headRefName, state, and mergedAt from OUTPUT into rows.
 Updates REPO's rows in BUF.
-OUTPUT is `gh pr list' JSON with `number', `statusCheckRollup', and
-`headRefName' fields."
+OUTPUT is `gh pr list' JSON."
   (when (buffer-live-p buf)
     (let ((trimmed (string-trim output)))
       (when (string-prefix-p "[" trimmed)
@@ -639,10 +669,15 @@ OUTPUT is `gh pr list' JSON with `number', `statusCheckRollup', and
                                (if match
                                    (let* ((rollup (map-elt match 'statusCheckRollup))
                                           (head-ref (map-elt match 'headRefName))
+                                          (st (map-elt match 'state))
+                                          (merged-at (map-elt match 'mergedAt))
                                           (pr-data (plist-get id :pr))
                                           (merged (append
                                                    (when rollup (list (cons 'statusCheckRollup rollup)))
                                                    (when head-ref (list (cons 'headRefName head-ref)))
+                                                   (when st (list (cons 'state st)))
+                                                   (when (and merged-at (not (eq merged-at :null)))
+                                                     (list (cons 'mergedAt merged-at)))
                                                    pr-data)))
                                      (magit-dash-gh-pr-dashboard--build-entry merged repo))
                                  entry)))
@@ -650,12 +685,13 @@ OUTPUT is `gh pr list' JSON with `number', `statusCheckRollup', and
             (tabulated-list-print t)))))))
 
 (defun magit-dash-gh-pr-dashboard--enrich-ci (buf state dir)
-  "Fetch CI status per repo and merge it into BUF's rows for STATE.
+  "Fetch CI status and PR metadata per repo and merge it into BUF's rows for STATE.
 Uses `gen-run-async'.  Used for aggregate (cross-repo) views, whose
-listing endpoint does not return `statusCheckRollup'.  DIR is the
+listing endpoint does not return `statusCheckRollup' or `mergedAt'.  DIR is the
 working directory for `gh'."
   (when (buffer-live-p buf)
-    (let* ((repos (delete-dups
+    (let* ((gh-state (if (equal state "closed") "all" state))
+           (repos (delete-dups
                    (with-current-buffer buf
                      (seq-remove #'null
                                  (seq-map (lambda (entry) (plist-get (car entry) :repo))
@@ -668,14 +704,14 @@ working directory for `gh'."
           (gen-run-async
            (lambda (repo done)
              (if (not (buffer-live-p buf))
-                 (funcall done)
-               (magit-dash-gh--run-process
-                (list "pr" "list" "-R" repo "--state" state
-                      "--json" "number,statusCheckRollup,headRefName" "--limit" "200")
-                dir
-                (lambda (output)
-                  (magit-dash-gh-pr-dashboard--merge-ci buf repo output)
-                  (funcall done))
+                  (funcall done)
+                (magit-dash-gh--run-process
+                 (list "pr" "list" "-R" repo "--state" gh-state
+                       "--json" "number,state,mergedAt,statusCheckRollup,headRefName" "--limit" "200")
+                 dir
+                 (lambda (output)
+                   (magit-dash-gh-pr-dashboard--merge-ci buf repo output)
+                   (funcall done))
                 (lambda (_output _code)
                   (funcall done)))))
            repos
@@ -683,8 +719,8 @@ working directory for `gh'."
            :delay (or (bound-and-true-p magit-dash-queue-yield-delay) 0.0))
         (dolist (repo repos)
           (magit-dash-gh--run-process
-           (list "pr" "list" "-R" repo "--state" state
-                 "--json" "number,statusCheckRollup,headRefName" "--limit" "200")
+           (list "pr" "list" "-R" repo "--state" gh-state
+                 "--json" "number,state,mergedAt,statusCheckRollup,headRefName" "--limit" "200")
            dir
            (lambda (output) (magit-dash-gh-pr-dashboard--merge-ci buf repo output))
            (lambda (_output _code) nil)))))))
@@ -721,6 +757,74 @@ working directory for `gh'."
   "Return the PR entry plist at point or signal `user-error'."
   (or (tabulated-list-get-id)
       (user-error "No pull request at point")))
+
+(defun magit-dash-gh-pr-dashboard--rebuild-entries ()
+  "Rebuild `tabulated-list-entries' in place to reflect current marks."
+  (when (derived-mode-p 'tabulated-list-mode)
+    (setq tabulated-list-entries
+          (seq-map (lambda (entry)
+                     (let ((id (car entry)))
+                       (magit-dash-gh-pr-dashboard--build-entry
+                        (plist-get id :pr)
+                        (plist-get id :repo))))
+                   tabulated-list-entries))
+    (tabulated-list-print t)))
+
+(defun magit-dash-gh-pr-dashboard-toggle-mark ()
+  "Toggle mark on the pull request at point and advance to the next line."
+  (interactive)
+  (let* ((entry (magit-dash-gh-pr-dashboard--entry-at-point))
+         (key (magit-dash-gh-pr-dashboard--entry-key entry)))
+    (setq magit-dash-gh-pr-dashboard--marked-entries
+          (if (member key magit-dash-gh-pr-dashboard--marked-entries)
+              (delete key magit-dash-gh-pr-dashboard--marked-entries)
+            (cons key magit-dash-gh-pr-dashboard--marked-entries)))
+    (magit-dash-gh-pr-dashboard--rebuild-entries)
+    (forward-line 1)))
+
+(defun magit-dash-gh-pr-dashboard-mark ()
+  "Mark the pull request at point and advance to the next line."
+  (interactive)
+  (let* ((entry (magit-dash-gh-pr-dashboard--entry-at-point))
+         (key (magit-dash-gh-pr-dashboard--entry-key entry)))
+    (unless (member key magit-dash-gh-pr-dashboard--marked-entries)
+      (push key magit-dash-gh-pr-dashboard--marked-entries))
+    (magit-dash-gh-pr-dashboard--rebuild-entries)
+    (forward-line 1)))
+
+(defun magit-dash-gh-pr-dashboard-unmark ()
+  "Unmark the pull request at point and advance to the next line."
+  (interactive)
+  (let* ((entry (magit-dash-gh-pr-dashboard--entry-at-point))
+         (key (magit-dash-gh-pr-dashboard--entry-key entry)))
+    (setq magit-dash-gh-pr-dashboard--marked-entries
+          (delete key magit-dash-gh-pr-dashboard--marked-entries))
+    (magit-dash-gh-pr-dashboard--rebuild-entries)
+    (forward-line 1)))
+
+(defun magit-dash-gh-pr-dashboard-unmark-all ()
+  "Clear all marks in the pull request dashboard."
+  (interactive)
+  (setq magit-dash-gh-pr-dashboard--marked-entries nil)
+  (magit-dash-gh-pr-dashboard--rebuild-entries)
+  (message "magit-gh: cleared all marks"))
+
+(defun magit-dash-gh-pr-dashboard-mark-all ()
+  "Mark all pull requests currently listed in the dashboard."
+  (interactive)
+  (setq magit-dash-gh-pr-dashboard--marked-entries
+        (seq-map (lambda (entry)
+                   (magit-dash-gh-pr-dashboard--entry-key (car entry)))
+                 tabulated-list-entries))
+  (magit-dash-gh-pr-dashboard--rebuild-entries)
+  (message "magit-gh: marked %d PR(s)" (length magit-dash-gh-pr-dashboard--marked-entries)))
+
+(defun magit-dash-gh-pr-dashboard--marked-or-at-point-entries ()
+  "Return list of marked PR entry plists, or nil if no entries are marked."
+  (when (and (bound-and-true-p magit-dash-gh-pr-dashboard--marked-entries)
+             tabulated-list-entries)
+    (seq-filter #'magit-dash-gh-pr-dashboard--entry-marked-p
+                (seq-map #'car tabulated-list-entries))))
 
 (defun magit-dash-gh-pr-dashboard-open-browser ()
   "Open the pull request at point in a web browser."
@@ -1075,19 +1179,51 @@ to \"pr-PR-NUM\" on failure."
                     name)))))))
       (format "pr-%d" pr-num)))
 
-(defun magit-dash-gh-pr--fetch-repo-prs (repo &optional state)
+(defun magit-dash-gh-pr--pr-merged-p (pr &optional repo pr-num dir)
+  "Return non-nil if PR alist (or PR-NUM in REPO) is merged.
+Handles `:null' from `json-parse-string', case-insensitive state strings,
+and queries `gh pr view' when state is ambiguous (e.g. `closed' from search)."
+  (let* ((state-raw (and pr (map-elt pr 'state)))
+         (state (if (and state-raw (stringp state-raw)) (upcase state-raw) ""))
+         (merged-at (and pr (map-elt pr 'mergedAt)))
+         (has-merged-at (and merged-at
+                             (not (eq merged-at :null))
+                             (stringp merged-at)
+                             (not (string-empty-p merged-at)))))
+    (cond
+     ((or (string= state "MERGED") has-merged-at) t)
+     ((string= state "OPEN") nil)
+     ;; When state is CLOSED (or unknown) without mergedAt, check via gh pr view if possible
+     ((and (or (plist-get pr :number) (map-elt pr 'number) pr-num)
+           repo
+           (executable-find "gh"))
+      (let ((num (or pr-num (map-elt pr 'number)))
+            (default-directory (or dir default-directory)))
+        (ignore-errors
+          (with-temp-buffer
+            (when (zerop (call-process "gh" nil (current-buffer) nil
+                                       "pr" "view" (number-to-string num)
+                                       "-R" repo
+                                       "--json" "state,mergedAt"))
+              (let ((data (json-parse-string (buffer-string) :object-type 'alist)))
+                (magit-dash-gh-pr--pr-merged-p data)))))))
+     (t nil))))
+
+(defun magit-dash-gh-pr--fetch-repo-prs (repo &optional state dir)
   "Fetch pull requests for REPO from GitHub CLI.
-STATE may be closed', or open').
+STATE may be `closed', `open', or `all'.
+DIR is optional working directory for `gh'.
 Returns a list of PR alists or nil on error."
   (when (executable-find "gh")
-    (with-temp-buffer
-      (when (zerop (call-process "gh" nil (current-buffer) nil
-                                 "pr" "list" "-R" repo
-                                 "--state" (or state "open")
-                                 "--limit" "100"
-                                 "--json" "number,title,headRefName,state,mergedAt"))
-        (ignore-errors
-          (json-parse-string (buffer-string) :object-type 'alist :array-type 'list))))))
+    (let ((default-directory (or dir default-directory)))
+      (with-temp-buffer
+        (when (zerop (call-process "gh" nil (current-buffer) nil
+                                   "pr" "list" "-R" repo
+                                   "--state" (or state "open")
+                                   "--limit" "100"
+                                   "--json" "number,title,headRefName,state,mergedAt"))
+          (ignore-errors
+            (json-parse-string (buffer-string) :object-type 'alist :array-type 'list)))))))
 
 (defun magit-dash-gh-pr--match-worktree-to-pr (wt prs)
   "Match git worktree WT to a pull request in PRS alist list.
@@ -1103,11 +1239,13 @@ Returns matching PR alist or nil."
                   (head (map-elt pr 'headRefName))
                   (pr-tag (when num (format "pr-%d" num))))
              (when (or (and head (or (equal wt-branch head)
-                                     (equal wt-branch (concat "wt/" head))))
+                                     (equal wt-branch (concat "wt/" head))
+                                     (equal wt-name head)
+                                     (string-suffix-p (concat "-" head) wt-name)))
                        (and pr-tag (or (equal wt-branch pr-tag)
                                        (equal wt-branch (concat "wt/" pr-tag))))
                        (and pr-tag (string-suffix-p pr-tag wt-name))
-                       (and num (string-match-p (format "\(?:^\|[^0-9]\)%d\(?:$\|[^0-9]\)" num) wt-name)))
+                       (and num (string-match-p (format "\\(?:^\\|[^0-9]\\)%d\\(?:$\\|[^0-9]\\)" num) wt-name)))
                pr)))
          prs)))))
 
@@ -1166,17 +1304,10 @@ Preserves the underlying branch until branch pruning."
             t)
         (user-error "Failed to remove worktree %s (git exit %d)" wt-path exit-code)))))
 
-;;;###autoload
-(defun magit-dash-gh-pr-dashboard-create-worktree (&optional entry switch)
-  "Create a git worktree for the pull request at point (or ENTRY).
-When SWITCH is non-nil, switches to the worktree's magit status buffer.
-If a worktree already exists, checks if its path matches configured
-PR format and prompts to rename it if it does not.
-If the worktree does not exist, fetches the PR branch, creates the worktree,
-and sets up configured symlinks."
-  (interactive)
-  (let* ((entry (or entry (magit-dash-gh-pr-dashboard--entry-at-point)))
-         (pr-num (plist-get entry :number))
+(defun magit-dash-gh-pr--create-worktree-for-entry (entry &optional switch)
+  "Create a git worktree for single PR ENTRY plist.
+When SWITCH is non-nil, switches to the worktree's magit status buffer."
+  (let* ((pr-num (plist-get entry :number))
          (repo (plist-get entry :repo))
          (pr-data (plist-get entry :pr))
          (local-path (or (magit-dash-gh-pr-dashboard--find-local-path repo)
@@ -1222,11 +1353,41 @@ and sets up configured symlinks."
                 (message "magit-gh: %s worktree for PR #%d at %s"
                          (if switch "opened" "created") pr-num wt-dir)
                 (when (derived-mode-p 'magit-dash-gh-pr-dashboard-mode)
-                  (tabulated-list-print t))
+                  (magit-dash-gh-pr-dashboard--rebuild-entries))
                 (if switch
                     (magit-status-setup-buffer wt-dir)
                   wt-dir))
             (user-error "Failed to create worktree at %s (exit %d)" wt-dir exit-code)))))))
+
+;;;###autoload
+(defun magit-dash-gh-pr-dashboard-create-worktree (&optional entry switch)
+  "Create a git worktree for the pull request at point (or ENTRY), or marked PRs.
+If PRs are marked in the dashboard and ENTRY is nil, creates worktrees for all
+marked PRs and clears marks.
+When SWITCH is non-nil, switches to the worktree's magit status buffer."
+  (interactive)
+  (let ((marked (and (null entry)
+                     (derived-mode-p 'magit-dash-gh-pr-dashboard-mode)
+                     (magit-dash-gh-pr-dashboard--marked-or-at-point-entries))))
+    (if marked
+        (let ((created 0)
+              (failed 0))
+          (dolist (m-entry marked)
+            (condition-case err
+                (progn
+                  (magit-dash-gh-pr--create-worktree-for-entry m-entry nil)
+                  (setq created (1+ created)))
+              (error
+               (message "magit-gh: failed to create worktree for PR #%d: %s"
+                        (plist-get m-entry :number) (error-message-string err))
+               (setq failed (1+ failed)))))
+          (setq magit-dash-gh-pr-dashboard--marked-entries nil)
+          (magit-dash-gh-pr-dashboard--rebuild-entries)
+          (message "magit-gh: created %d worktree(s) for marked PRs (%d failed)"
+                   created failed))
+      (magit-dash-gh-pr--create-worktree-for-entry
+       (or entry (magit-dash-gh-pr-dashboard--entry-at-point))
+       switch))))
 
 ;;;###autoload
 (defun magit-dash-gh-pr-dashboard-open-worktree (&optional entry)
@@ -1235,7 +1396,9 @@ If a worktree for this PR already exists, switches to its magit status buffer.
 Otherwise, fetches the remote PR branch into a local branch mirroring its remote
 name, creates the worktree directory, and opens its magit status buffer."
   (interactive)
-  (magit-dash-gh-pr-dashboard-create-worktree entry t))
+  (magit-dash-gh-pr--create-worktree-for-entry
+   (or entry (magit-dash-gh-pr-dashboard--entry-at-point))
+   t))
 
 ;;;###autoload
 (defalias 'magit-dash-gh-pr-create-worktree #'magit-dash-gh-pr-dashboard-create-worktree)
@@ -1264,39 +1427,50 @@ Returns a plist with :renamed, :deleted, :matching, and :skipped counts."
                      (let ((default-directory repo-dir))
                        (magit-dash-gh-pr-dashboard--current-repo-slug)))
                    (file-name-nondirectory (directory-file-name repo-dir))))
-         (prs (or prs (magit-dash-gh-pr--fetch-repo-prs slug "all")))
+         (prs (or prs (magit-dash-gh-pr--fetch-repo-prs slug "all" repo-dir)))
+         (def-branch (ignore-errors
+                       (let ((default-directory repo-dir))
+                         (magit-dash-gh--default-branch))))
+         (git-merged (and def-branch
+                          (fboundp 'magit-dash-gh--git-merged-branches)
+                          (magit-dash-gh--git-merged-branches def-branch repo-dir)))
          (git-wts (magit-dash-gh-pr--git-worktrees repo-dir))
          (counts (list :renamed 0 :deleted 0 :matching 0 :skipped 0)))
     (dolist (wt git-wts)
-      (let* ((wt-path (alist-get 'path wt)))
+      (let* ((wt-path (alist-get 'path wt))
+             (wt-branch (alist-get 'branch wt)))
         (unless (or (null wt-path)
                     (magit-dash-gh-pr--path-equal-p wt-path repo-dir)
                     (not (file-directory-p wt-path)))
           (let* ((wt-name (file-name-nondirectory (directory-file-name wt-path)))
-                 (matched (magit-dash-gh-pr--match-worktree-to-pr wt prs)))
+                 (matched (or (magit-dash-gh-pr--match-worktree-to-pr wt prs)
+                              (when (and wt-branch (member wt-branch git-merged))
+                                `((number . nil) (headRefName . ,wt-branch) (state . "MERGED"))))))
             (when matched
               (let* ((pr-num (map-elt matched 'number))
-                     (state (upcase (or (map-elt matched 'state) "")))
-                     (merged-p (or (string= state "MERGED")
-                                   (map-elt matched 'mergedAt))))
+                     (state-raw (map-elt matched 'state))
+                     (state (if (stringp state-raw) (upcase state-raw) ""))
+                     (merged-p (or (magit-dash-gh-pr--pr-merged-p matched slug pr-num repo-dir)
+                                   (and wt-branch (member wt-branch git-merged)))))
                 (cond
                  ;; Case 1: PR has merged
                  (merged-p
-                  (if (and (fboundp 'magit-dash-worktree-uncommitted-changes-p)
-                           (magit-dash-worktree-uncommitted-changes-p wt-path))
-                      (progn
-                        (message "magit-gh: worktree %s (PR #%d merged) has uncommitted changes; skipping"
-                                 wt-name pr-num)
-                        (plist-put counts :skipped (1+ (plist-get counts :skipped))))
-                    (if (or (not prompt-p)
-                            (y-or-n-p (format "PR #%d is merged and worktree '%s' has no uncommitted changes. Delete worktree? (branch preserved) "
-                                              pr-num wt-name)))
+                  (let ((pr-label (if pr-num (format "PR #%d" pr-num) (format "branch '%s'" wt-branch))))
+                    (if (and (fboundp 'magit-dash-worktree-uncommitted-changes-p)
+                             (magit-dash-worktree-uncommitted-changes-p wt-path))
                         (progn
-                          (magit-dash-gh-pr-delete-worktree wt-path repo-dir)
-                          (plist-put counts :deleted (1+ (plist-get counts :deleted))))
-                      (plist-put counts :skipped (1+ (plist-get counts :skipped))))))
+                          (message "magit-gh: worktree %s (%s merged) has uncommitted changes; skipping"
+                                   wt-name pr-label)
+                          (plist-put counts :skipped (1+ (plist-get counts :skipped))))
+                      (if (or (not prompt-p)
+                              (y-or-n-p (format "%s is merged and worktree '%s' has no uncommitted changes. Delete worktree? (branch preserved) "
+                                                pr-label wt-name)))
+                          (progn
+                            (magit-dash-gh-pr-delete-worktree wt-path repo-dir)
+                            (plist-put counts :deleted (1+ (plist-get counts :deleted))))
+                        (plist-put counts :skipped (1+ (plist-get counts :skipped)))))))
                  ;; Case 2: PR is open - check path match (skipped when merged-only)
-                 ((and (not merged-only) (string= state "OPEN"))
+                 ((and (not merged-only) (string= state "OPEN") pr-num)
                   (let ((target-path (magit-dash-gh-pr--compute-worktree-path
                                       repo-dir (format "pr-%d" pr-num))))
                     (if (magit-dash-gh-pr--path-equal-p wt-path target-path)
@@ -1331,11 +1505,44 @@ PROMPT-P specifies whether to prompt before deleting each clean worktree."
     (list :deleted (plist-get counts :deleted)
           :skipped (plist-get counts :skipped))))
 
+(defun magit-dash-gh-pr--clean-worktree-for-entry (entry &optional prompt-p)
+  "Clean worktree for single PR ENTRY plist if it exists and is clean.
+Returns `:deleted', `:skipped', or `:none'."
+  (require 'magit-dash-worktree nil t)
+  (let* ((pr-num (plist-get entry :number))
+         (repo (plist-get entry :repo))
+         (pr-data (plist-get entry :pr))
+         (local-path (magit-dash-gh-pr-dashboard--find-local-path repo))
+         (repo-dir (and local-path (expand-file-name local-path)))
+         (branch-name (or (and pr-data (map-elt pr-data 'headRefName))
+                          (plist-get entry :head-ref)))
+         (wt-path (and repo-dir
+                       (magit-dash-gh-pr--find-existing-worktree repo-dir pr-num branch-name))))
+    (if (not (and wt-path (file-directory-p wt-path)))
+        :none
+      (let* ((wt-name (file-name-nondirectory (directory-file-name wt-path)))
+             (merged-p (magit-dash-gh-pr--pr-merged-p pr-data repo pr-num repo-dir)))
+        (if (and (fboundp 'magit-dash-worktree-uncommitted-changes-p)
+                 (magit-dash-worktree-uncommitted-changes-p wt-path))
+            (progn
+              (message "magit-gh: worktree %s (PR #%d) has uncommitted changes; skipping"
+                       wt-name pr-num)
+              :skipped)
+          (if (or (not prompt-p)
+                  (y-or-n-p (format "PR #%d%s worktree '%s' has no uncommitted changes. Delete worktree? (branch preserved) "
+                                    pr-num
+                                    (if merged-p " is merged and" "")
+                                    wt-name)))
+              (progn
+                (magit-dash-gh-pr-delete-worktree wt-path repo-dir)
+                :deleted)
+            :skipped))))))
+
 ;;;###autoload
 (defun magit-dash-gh-pr-create-all-worktrees (&optional repo-dir)
   "Create worktrees for all open PRs in REPO-DIR.
 First reviews existing worktrees, prompting to rename any that do not match
-the canonical PR format, and prompting to delete any for merged PRs
+nthe canonical PR format, and prompting to delete any for merged PRs
 that are clean.
 Then creates worktrees for each open PR that does not yet have one.
 Establishes configured symlinks for all created worktrees."
@@ -1350,7 +1557,7 @@ Establishes configured symlinks for all created worktrees."
                      (let ((default-directory repo-dir))
                        (magit-dash-gh-pr-dashboard--current-repo-slug)))
                    (file-name-nondirectory (directory-file-name repo-dir))))
-         (all-prs (magit-dash-gh-pr--fetch-repo-prs slug "all"))
+         (all-prs (magit-dash-gh-pr--fetch-repo-prs slug "all" repo-dir))
          (open-prs (seq-filter
                     (lambda (pr)
                       (string= (upcase (or (map-elt pr 'state) "")) "OPEN"))
@@ -1394,10 +1601,35 @@ Signals `user-error' when not found."
   (magit-dash-gh-pr-dashboard-refresh))
 
 (defun magit-dash-gh-pr-dashboard-clean-merged-worktrees ()
-  "Clean worktrees for merged PRs for the repository at point in dashboard."
+  "Clean worktrees for marked PRs, the selected PR at point, or merged PRs in repo."
   (interactive)
-  (magit-dash-gh-pr-clean-merged-worktrees (magit-dash-gh-pr-dashboard--repo-path-at-point) t)
-  (magit-dash-gh-pr-dashboard-refresh))
+  (let ((marked (and (derived-mode-p 'magit-dash-gh-pr-dashboard-mode)
+                     (magit-dash-gh-pr-dashboard--marked-or-at-point-entries))))
+    (cond
+     ;; 1. Marked PRs exist: clean worktrees for all marked PRs
+     (marked
+      (let ((deleted 0)
+            (skipped 0))
+        (dolist (m-entry marked)
+          (pcase (magit-dash-gh-pr--clean-worktree-for-entry m-entry t)
+            (:deleted (setq deleted (1+ deleted)))
+            (:skipped (setq skipped (1+ skipped)))))
+        (setq magit-dash-gh-pr-dashboard--marked-entries nil)
+        (magit-dash-gh-pr-dashboard--rebuild-entries)
+        (message "magit-gh: cleaned marked PR worktrees — %d deleted, %d skipped"
+                 deleted skipped)))
+     ;; 2. No marked PRs: check selected PR at point and also scan repo merged worktrees
+     (t
+      (let* ((entry (ignore-errors (magit-dash-gh-pr-dashboard--entry-at-point)))
+             (repo-path (magit-dash-gh-pr-dashboard--repo-path-at-point))
+             (pr-data (and entry (plist-get entry :pr))))
+        (if (and entry
+                 pr-data
+                 (magit-dash-gh-pr-dashboard--worktree-exists-p entry)
+                 (magit-dash-gh-pr--pr-merged-p pr-data (plist-get entry :repo) (plist-get entry :number) repo-path))
+            (magit-dash-gh-pr--clean-worktree-for-entry entry t)
+          (magit-dash-gh-pr-clean-merged-worktrees repo-path t))
+        (magit-dash-gh-pr-dashboard-refresh))))))
 
 (defun magit-dash-gh-pr-dashboard-create-all-worktrees ()
   "Create worktrees for all open PRs in the current dashboard view.
@@ -1452,8 +1684,13 @@ Otherwise prompts or processes open PRs in the dashboard."
   "Actions for the PR dashboard."
   [["Pull Request"
     ("b"   "Open in browser"          magit-dash-gh-pr-dashboard-open-browser)]
+   ["Mark / Bulk"
+    ("m"   "Toggle mark"              magit-dash-gh-pr-dashboard-toggle-mark)
+    ("u"   "Unmark"                   magit-dash-gh-pr-dashboard-unmark)
+    ("ua"  "Unmark all"               magit-dash-gh-pr-dashboard-unmark-all)
+    ("ma"  "Mark all"                 magit-dash-gh-pr-dashboard-mark-all)]
    ["Worktree"
-    ("cw"  "Create worktree"          magit-dash-gh-pr-dashboard-create-worktree)
+    ("cw"  "Create worktree(s)"       magit-dash-gh-pr-dashboard-create-worktree)
     ("ca"  "Create all worktrees"     magit-dash-gh-pr-dashboard-create-all-worktrees)
     ("r"   "Review / rename worktrees" magit-dash-gh-pr-dashboard-review-worktrees)
     ("k"   "Clean merged worktrees"   magit-dash-gh-pr-dashboard-clean-merged-worktrees)
