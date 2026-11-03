@@ -1145,7 +1145,7 @@ without real git repos or a live dashboard buffer."
       (should (equal "owner/myrepo" (plist-get id :repo)))
       (should (= 42 (plist-get id :number)))
       (should (equal "myrepo" (aref vec 0)))
-      (should (equal "42" (aref vec 2))))))
+      (should (equal "42" (aref vec 1))))))
 
 (ert-deftest magit-dash/parse-output-search-mode ()
   "Search mode extracts repo name from the `repository' field."
@@ -1184,9 +1184,9 @@ without real git repos or a live dashboard buffer."
          (vec (cadr entry)))
     (should (= 8 (length vec)))
     (should (equal "myrepo" (aref vec 0)))
-    (should (equal "10" (aref vec 2)))
+    (should (equal "10" (aref vec 1)))
+    (should (equal "✓" (substring-no-properties (aref vec 2))))
     (should (equal "My PR" (aref vec 3)))
-    (should (equal "✓" (substring-no-properties (aref vec 4))))
     (should (equal "approved" (substring-no-properties (aref vec 7))))
     (should (equal 10 (plist-get id :number)))
     (should (equal "myorg/myrepo" (plist-get id :repo))))
@@ -1204,7 +1204,7 @@ without real git repos or a live dashboard buffer."
     (should (= 9 (length vec)))
     (should (equal "myorg" (aref vec 0)))
     (should (equal "myrepo" (aref vec 1)))
-    (should (equal "10" (aref vec 3)))))
+    (should (equal "10" (aref vec 2)))))
 
 (ert-deftest magit-dash/build-entry-truncates-long-title ()
   "Titles longer than 36 chars are truncated with an ellipsis."
@@ -1214,7 +1214,7 @@ without real git repos or a live dashboard buffer."
                (comments . 0)))
          (entry (magit-dash-gh-pr-dashboard--build-entry pr "r"))
          (vec (cadr entry)))
-    (should (<= (length (aref vec 2)) 37))))
+    (should (<= (length (aref vec 3)) 37))))
 
 ;;;; magit-dash-mode-map RET binding
 
