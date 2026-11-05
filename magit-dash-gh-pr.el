@@ -1555,52 +1555,11 @@ Returns `:deleted', `:skipped', or `:none'."
          (t :skipped))))))
 
 ;;;###autoload
-(defun magit-dash-gh-pr-create-all-worktrees (&optional repo-dir)
-  "Create worktrees for all open PRs in REPO-DIR.
-First reviews existing worktrees, prompting to rename any that do not match
-nthe canonical PR format, and prompting to delete any for merged PRs
-that are clean.
-Then creates worktrees for each open PR that does not yet have one.
-Establishes configured symlinks for all created worktrees."
+(defun magit-dash-gh-pr-create-all-worktrees (&optional _repo-dir)
+  "Create worktrees for PRs in the current PR dashboard view.
+_REPO-DIR is retained for compatibility; the dashboard view determines scope."
   (interactive)
-  (let* ((repo-dir (expand-file-name
-                    (or repo-dir
-                        (if (fboundp 'magit-dash-worktree-main-dir)
-                            (magit-dash-worktree-main-dir)
-                          (magit-toplevel))
-                        default-directory)))
-         (slug (or (ignore-errors
-                     (let ((default-directory repo-dir))
-                       (magit-dash-gh-pr-dashboard--current-repo-slug)))
-                   (file-name-nondirectory (directory-file-name repo-dir))))
-         (all-prs (magit-dash-gh-pr--fetch-repo-prs slug "all" repo-dir))
-         (open-prs (seq-filter
-                    (lambda (pr)
-                      (string= (upcase (or (map-elt pr 'state) "")) "OPEN"))
-                    all-prs)))
-    ;; 1. Review existing worktrees first (prompting to rename mismatches / clean merged)
-    (magit-dash-gh-pr-review-worktrees repo-dir t all-prs)
-    ;; 2. Create worktree for every open PR without one
-    (let ((created 0)
-          (existing 0)
-          (failed 0))
-      (dolist (pr open-prs)
-        (let* ((pr-num (map-elt pr 'number))
-               (head-ref (map-elt pr 'headRefName))
-               (wt-existing (magit-dash-gh-pr--find-existing-worktree repo-dir pr-num head-ref)))
-          (if wt-existing
-              (setq existing (1+ existing))
-            (condition-case err
-                (let ((entry (list :number pr-num :repo slug :pr pr)))
-                  (magit-dash-gh-pr-dashboard-create-worktree entry nil)
-                  (setq created (1+ created)))
-              (error
-               (message "magit-gh: failed to create worktree for PR #%d: %s"
-                        pr-num (error-message-string err))
-               (setq failed (1+ failed)))))))
-      (message "magit-gh: created %d worktree(s) for %s (%d existing, %d failed)"
-               created slug existing failed)
-      (list :created created :existing existing :failed failed))))
+  (magit-dash-gh-pr-dashboard-create-all-worktrees))
 
 (defun magit-dash-gh-pr-dashboard--repo-path-at-point ()
   "Return registered local repository path for PR at point.
@@ -1648,45 +1607,57 @@ Signals `user-error' when not found."
         (magit-dash-gh-pr-dashboard-refresh))))))
 
 (defun magit-dash-gh-pr-dashboard-create-all-worktrees ()
-  "Create worktrees for all open PRs in the current dashboard view.
-If filtered to a single repository, creates worktrees for that repository.
-Otherwise prompts or processes open PRs in the dashboard."
+  "Confirm and create worktrees for PRs in the current dashboard view."
   (interactive)
-  (let* ((entries (or tabulated-list-entries nil))
-         (repo-filter (plist-get magit-dash-gh-pr-dashboard--filters :repo)))
-    (if repo-filter
-        (let ((path (magit-dash-gh-pr-dashboard--find-local-path repo-filter)))
-          (unless path
-            (user-error "No registered local checkout for %s" repo-filter))
-          (magit-dash-gh-pr-create-all-worktrees path)
-          (magit-dash-gh-pr-dashboard-refresh))
-      (let ((created 0)
-            (existing 0)
-            (failed 0))
-        (dolist (item entries)
-          (let* ((entry (car item))
-                 (pr-num (plist-get entry :number))
-                 (repo (plist-get entry :repo))
-                 (pr-data (plist-get entry :pr))
-                 (local-path (magit-dash-gh-pr-dashboard--find-local-path repo)))
-            (when (and local-path (file-directory-p local-path))
-              (let* ((repo-dir (expand-file-name local-path))
-                     (branch-name (or (and pr-data (map-elt pr-data 'headRefName))
-                                      (plist-get entry :head-ref)))
-                     (wt-exists (magit-dash-gh-pr--find-existing-worktree repo-dir pr-num branch-name)))
-                (if wt-exists
-                    (setq existing (1+ existing))
-                  (condition-case err
-                      (progn
-                        (magit-dash-gh-pr-dashboard-create-worktree entry nil)
-                        (setq created (1+ created)))
-                    (error
-                     (message "magit-gh: failed to create worktree for PR #%d: %s"
-                              pr-num (error-message-string err))
-                     (setq failed (1+ failed)))))))))
-        (message "magit-gh: batch creation complete — %d created, %d existing, %d failed"
-                 created existing failed)
-        (magit-dash-gh-pr-dashboard-refresh)))))
+  (unless (derived-mode-p 'magit-dash-gh-pr-dashboard-mode)
+    (user-error "Open a PR dashboard and run this command in its buffer"))
+  (let ((targets nil) (existing 0) (missing 0) (created 0) (failed 0))
+    (dolist (item tabulated-list-entries)
+      (let* ((entry (car item))
+             (repo (plist-get entry :repo))
+             (number (plist-get entry :number))
+             (path (magit-dash-gh-pr-dashboard--find-local-path repo)))
+        (if (not (and path (file-directory-p path)))
+            (setq missing (1+ missing))
+          (let* ((pr (plist-get entry :pr))
+                 (branch (or (plist-get entry :head-ref)
+                             (and pr (map-elt pr 'headRefName))
+                             (magit-dash-gh-pr--resolve-remote-branch repo number pr path)))
+                 (prepared (copy-sequence entry)))
+            (if (magit-dash-gh-pr--find-existing-worktree path number branch)
+                (setq existing (1+ existing))
+              ;; Preserve the reviewed branch for the actual creation.
+              (setq prepared (plist-put prepared :pr
+                                        (cons (cons 'headRefName branch) pr)))
+              (push (cons prepared branch) targets))))))
+    (setq targets (nreverse targets))
+    (if (null targets)
+        (message "magit-gh: no worktrees to create (%d existing, %d without local checkout)"
+                 existing missing)
+      (with-output-to-temp-buffer "*PR worktrees to create*"
+        (princ "Worktrees to create from the current PR view:\n\n")
+        (dolist (target targets)
+          (let ((entry (car target)))
+            (princ (format "%s #%s  %s\n" (plist-get entry :repo)
+                           (plist-get entry :number) (cdr target)))))
+        (princ (format "\n%d existing; %d without local checkout.\n" existing missing)))
+      (when (yes-or-no-p (format "Create %d worktree(s) listed in *PR worktrees to create*? "
+                                 (length targets)))
+        (dolist (target targets)
+          (let ((entry (car target)))
+            (condition-case err
+                (progn
+                  (magit-dash-gh-pr-dashboard-create-worktree entry nil)
+                  (setq created (1+ created)))
+              (error
+               (message "magit-gh: failed to create worktree for %s #%s: %s"
+                        (plist-get entry :repo) (plist-get entry :number)
+                        (error-message-string err))
+               (setq failed (1+ failed))))))
+        (magit-dash-gh-pr-dashboard--rebuild-entries)
+        (message "magit-gh: batch creation complete — %d created, %d existing, %d without local checkout, %d failed"
+                 created existing missing failed)))
+    (list :created created :existing existing :missing missing :failed failed)))
 
 (defun magit-dash-gh-pr-dashboard-fetch-ci ()
   "Fetch GitHub Actions CI logs for the pull request at point."

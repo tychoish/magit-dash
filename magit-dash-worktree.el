@@ -376,10 +376,8 @@ to the current repository or repository at point)."
 
 ;;;###autoload
 (defun magit-dash-worktree-create-for-all-prs (&optional repo-dir)
-  "Create worktrees for all open PRs in REPO-DIR.
-Reviews existing worktrees first, prompting to rename any that do not match
-the canonical PR format, and prompting to delete any for merged PRs that are clean.
-Establishes configured symlinks for all created worktrees."
+  "Confirm and create worktrees for PRs in the current PR dashboard view.
+REPO-DIR is retained for compatibility; the dashboard view determines scope."
   (interactive)
   (require 'magit-dash-gh-pr)
   (magit-dash-gh-pr-create-all-worktrees repo-dir))
