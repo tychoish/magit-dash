@@ -766,6 +766,15 @@ Format is controlled by `magit-dash-gh-collect-index-format'."
      (with-temp-file (expand-file-name "index.json" dir)
        (insert (json-serialize data :false-object :false :null-object nil))))))
 
+(defun magit-dash-gh--call-process (args dir)
+  "Run `gh' synchronously with ARGS in DIR using its configured account.
+Return (EXIT-CODE . OUTPUT)."
+  (with-magit-gh-account (magit-dash-gh--repo-account dir)
+    (let ((default-directory dir))
+      (with-temp-buffer
+        (let ((code (apply #'call-process "gh" nil (current-buffer) nil args)))
+          (cons code (buffer-string)))))))
+
 (defun magit-dash-gh--run-process (args dir on-success &optional on-error)
   "Run `gh' with ARGS in DIR asynchronously.
 ON-SUCCESS is called with the output string when the process exits 0.

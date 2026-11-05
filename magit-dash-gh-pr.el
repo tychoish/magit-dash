@@ -53,6 +53,9 @@
 (defvar magit-dash-gh-pr-thread-limit 100
   "Maximum number of review threads to fetch per pull request.")
 
+(defvar magit-dash-gh-pr--pending-worktrees (make-hash-table :test #'equal)
+  "PR worktrees currently being created, keyed by (REPO . NUMBER).")
+
 ;;; Internal helpers
 
 (defun magit-dash-gh-pr--parse-threads (graphql-response)
@@ -606,9 +609,12 @@ Uses active columns."
                            (propertize short-repo 'face 'bold)
                          short-repo))
                       ('worktree
-                       (if (magit-dash-gh-pr-dashboard--worktree-exists-p entry-id)
-                           (propertize "✓" 'face 'success)
-                         (propertize "·" 'face 'shadow)))
+                       (cond
+                        ((gethash (cons repo-name number) magit-dash-gh-pr--pending-worktrees)
+                         (propertize "?" 'face 'shadow))
+                        ((magit-dash-gh-pr-dashboard--worktree-exists-p entry-id)
+                         (propertize "✓" 'face 'success))
+                        (t (propertize "·" 'face 'shadow))))
                       ('pr
                        (let ((s (number-to-string number)))
                          (if is-marked
@@ -1163,80 +1169,54 @@ If the worktree does not exist yet, creates it first."
           (dired dir))))))
 
 (defun magit-dash-gh-pr--resolve-remote-branch (repo pr-num &optional pr-data dir)
-  "Resolve remote head branch name for PR-NUM in REPO.
-Checks PR-DATA first, then queries GitHub via `gh pr view', falling back
-to \"pr-PR-NUM\" on failure."
+  "Resolve the head branch for PR-NUM in REPO from PR-DATA or GitHub."
   (or (and pr-data (map-elt pr-data 'headRefName))
       (when (executable-find "gh")
-        (let ((default-directory (or dir default-directory)))
-          (ignore-errors
-            (with-temp-buffer
-              (when (zerop (call-process "gh" nil (current-buffer) nil
-                                         "pr" "view" (number-to-string pr-num)
-                                         "-R" repo
-                                         "--json" "headRefName"
-                                         "--jq" ".headRefName"))
-                (let ((name (string-trim (buffer-string))))
-                  (unless (string-empty-p name)
-                    name)))))))
+        (ignore-errors
+          (let* ((result (magit-dash-gh--call-process
+                          (list "pr" "view" (number-to-string pr-num) "-R" repo
+                                "--json" "headRefName" "--jq" ".headRefName")
+                          (or dir default-directory)))
+                 (name (string-trim (cdr result))))
+            (and (zerop (car result)) (not (string-empty-p name)) name))))
       (format "pr-%d" pr-num)))
 
 (defun magit-dash-gh-pr--pr-merged-p (pr &optional repo pr-num dir)
-  "Return non-nil if PR alist (or PR-NUM in REPO) is merged.
-Handles `:null' from `json-parse-string', case-insensitive state strings,
-and queries `gh pr view' when state is ambiguous (e.g. `closed' from search)."
+  "Return non-nil if PR alist (or PR-NUM in REPO) is merged."
   (let* ((state-raw (and pr (map-elt pr 'state)))
-         (state (if (and state-raw (stringp state-raw)) (upcase state-raw) ""))
-         (merged-at (and pr (map-elt pr 'mergedAt)))
-         (has-merged-at (and merged-at
-                             (not (eq merged-at :null))
-                             (stringp merged-at)
-                             (not (string-empty-p merged-at)))))
+         (state (if (stringp state-raw) (upcase state-raw) ""))
+         (merged-at (and pr (map-elt pr 'mergedAt))))
     (cond
-     ((or (string= state "MERGED") has-merged-at) t)
+     ((or (string= state "MERGED")
+          (and (stringp merged-at) (not (string-empty-p merged-at)))) t)
      ((string= state "OPEN") nil)
-     ;; When state is CLOSED (or unknown) without mergedAt, check via gh pr view if possible
-     ((and (or (plist-get pr :number) (map-elt pr 'number) pr-num)
-           repo
-           (executable-find "gh"))
-      (let ((num (or pr-num (map-elt pr 'number)))
-            (default-directory (or dir default-directory)))
-        (ignore-errors
-          (with-temp-buffer
-            (when (zerop (call-process "gh" nil (current-buffer) nil
-                                       "pr" "view" (number-to-string num)
-                                       "-R" repo
-                                       "--json" "state,mergedAt"))
-              (let ((data (json-parse-string (buffer-string) :object-type 'alist)))
-                (magit-dash-gh-pr--pr-merged-p data)))))))
+     ((and (or pr-num (map-elt pr 'number)) repo (executable-find "gh"))
+      (when-let* ((data (magit-dash-gh-pr--fetch-pr
+                         repo (or pr-num (map-elt pr 'number))
+                         (or dir default-directory))))
+        (magit-dash-gh-pr--pr-merged-p data)))
      (t nil))))
 
 (defun magit-dash-gh-pr--fetch-repo-prs (repo &optional state dir)
-  "Fetch pull requests for REPO from GitHub CLI.
-STATE may be `closed', `open', or `all'.
-DIR is optional working directory for `gh'.
-Returns a list of PR alists or nil on error."
+  "Fetch PRs for REPO and STATE in DIR, or return nil on error."
   (when (executable-find "gh")
-    (let ((default-directory (or dir default-directory)))
-      (with-temp-buffer
-        (when (zerop (call-process "gh" nil (current-buffer) nil
-                                   "pr" "list" "-R" repo
-                                   "--state" (or state "open")
-                                   "--limit" "100"
-                                   "--json" "number,title,headRefName,state,mergedAt"))
-          (ignore-errors
-            (json-parse-string (buffer-string) :object-type 'alist :array-type 'list)))))))
+    (ignore-errors
+      (let ((result (magit-dash-gh--call-process
+                     (list "pr" "list" "-R" repo "--state" (or state "open")
+                           "--limit" "100" "--json" "number,title,headRefName,state,mergedAt")
+                     (or dir default-directory))))
+        (when (zerop (car result))
+          (json-parse-string (cdr result) :object-type 'alist :array-type 'list))))))
 
 (defun magit-dash-gh-pr--fetch-pr (repo number dir)
   "Fetch PR NUMBER in REPO using DIR, or return nil on failure."
   (when (executable-find "gh")
-    (let ((default-directory dir))
-      (with-temp-buffer
-        (when (zerop (call-process "gh" nil (current-buffer) nil
-                                   "pr" "view" (number-to-string number)
-                                   "-R" repo "--json"
-                                   "number,title,headRefName,state,mergedAt"))
-          (ignore-errors (json-parse-string (buffer-string) :object-type 'alist)))))))
+    (ignore-errors
+      (let ((result (magit-dash-gh--call-process
+                     (list "pr" "view" (number-to-string number) "-R" repo "--json"
+                           "number,title,headRefName,state,mergedAt") dir)))
+        (when (zerop (car result))
+          (json-parse-string (cdr result) :object-type 'alist))))))
 
 (defun magit-dash-gh-pr--match-worktree-to-pr (wt prs)
   "Match git worktree WT to a pull request in PRS alist list.
@@ -1354,7 +1334,7 @@ When SWITCH is non-nil, switches to the worktree's magit status buffer."
       (let ((default-directory repo-dir))
         (let ((refspec (format "pull/%d/head:%s" pr-num branch-name)))
           (unless (= 0 (magit-call-git "fetch" "origin" refspec))
-            (magit-call-git "fetch" "origin" (concat "+" refspec))))
+            (user-error "Failed to fetch PR #%d into %s" pr-num branch-name)))
         (let ((parent (file-name-directory (directory-file-name wt-dir))))
           (when parent
             (ignore-errors (make-directory parent t))))
@@ -1606,12 +1586,82 @@ Signals `user-error' when not found."
           (magit-dash-gh-pr-clean-merged-worktrees repo-path t))
         (magit-dash-gh-pr-dashboard-refresh))))))
 
+(defun magit-dash-gh-pr--run-git-async (dir args callback)
+  "Run git ARGS in DIR and call CALLBACK with exit code and output."
+  (let ((default-directory dir)
+        (buffer (generate-new-buffer " *magit-dash-pr-git*")))
+    (condition-case err
+        (make-process
+         :name "magit-dash-pr-git" :buffer buffer :noquery t :connection-type 'pipe
+         :command (cons "git" args)
+         :sentinel (lambda (process _event)
+                     (when (memq (process-status process) '(exit signal))
+                       (let ((output (with-current-buffer (process-buffer process) (buffer-string)))
+                             (code (process-exit-status process)))
+                         (kill-buffer (process-buffer process))
+                         (funcall callback code output)))))
+      (error (kill-buffer buffer) (funcall callback 1 (error-message-string err))))))
+
+(defun magit-dash-gh-pr--create-batch-async (targets buffer existing missing)
+  "Create TARGETS sequentially, updating BUFFER and reporting batch counts."
+  (let ((created 0) (failed 0))
+    (cl-labels
+        ((refresh ()
+           (when (buffer-live-p buffer)
+             (with-current-buffer buffer (magit-dash-gh-pr-dashboard--rebuild-entries))))
+         (next (remaining)
+           (if (null remaining)
+               (progn (refresh)
+                      (message "magit-gh: batch creation complete — %d created, %d existing, %d without local checkout, %d failed"
+                               created existing missing failed))
+             (let* ((target (car remaining)) (entry (car target)) (branch (cdr target))
+                    (repo (plist-get entry :repo)) (number (plist-get entry :number))
+                    (key (cons repo number))
+                    (dir (magit-dash-gh-pr-dashboard--find-local-path repo))
+                    (path (and dir (magit-dash-gh-pr--compute-worktree-path
+                                    dir (format "pr-%d" number) entry))))
+               (cl-labels ((finish (error-message)
+                             (remhash key magit-dash-gh-pr--pending-worktrees)
+                             (if error-message
+                                 (progn (cl-incf failed)
+                                        (message "magit-gh: failed to create %s #%d: %s" repo number error-message))
+                               (cl-incf created)
+                               (message "magit-gh: created worktree for %s #%d" repo number))
+                             (refresh)
+                             (next (cdr remaining))))
+                 (cond
+                  ((not (and dir (file-directory-p dir))) (finish "local checkout unavailable"))
+                  ((magit-dash-gh-pr--find-existing-worktree dir number branch)
+                   (remhash key magit-dash-gh-pr--pending-worktrees)
+                   (cl-incf existing) (refresh) (next (cdr remaining)))
+                  (t
+                   (message "magit-gh: fetching %s #%d (%s)…" repo number branch)
+                   (magit-dash-gh-pr--run-git-async
+                    dir (list "fetch" "origin" (format "pull/%d/head:%s" number branch))
+                    (lambda (code output)
+                      (if (not (zerop code)) (finish (string-trim output))
+                        (condition-case err
+                            (progn
+                              (make-directory (file-name-directory path) t)
+                              (magit-dash-gh-pr--run-git-async
+                               dir (list "worktree" "add" path branch)
+                               (lambda (add-code add-output)
+                                 (if (not (zerop add-code)) (finish (string-trim add-output))
+                                   (condition-case symlink-error
+                                       (progn
+                                         (when (fboundp 'magit-dash-worktree-symlink-worktree)
+                                           (magit-dash-worktree-symlink-worktree path dir))
+                                         (finish nil))
+                                     (error (finish (error-message-string symlink-error))))))))
+                          (error (finish (error-message-string err))))))))))))))
+      (next targets))))
+
 (defun magit-dash-gh-pr-dashboard-create-all-worktrees ()
   "Confirm and create worktrees for PRs in the current dashboard view."
   (interactive)
   (unless (derived-mode-p 'magit-dash-gh-pr-dashboard-mode)
     (user-error "Open a PR dashboard and run this command in its buffer"))
-  (let ((targets nil) (existing 0) (missing 0) (created 0) (failed 0))
+  (let ((targets nil) (existing 0) (missing 0) (queued 0))
     (dolist (item tabulated-list-entries)
       (let* ((entry (car item))
              (repo (plist-get entry :repo))
@@ -1624,7 +1674,8 @@ Signals `user-error' when not found."
                              (and pr (map-elt pr 'headRefName))
                              (magit-dash-gh-pr--resolve-remote-branch repo number pr path)))
                  (prepared (copy-sequence entry)))
-            (if (magit-dash-gh-pr--find-existing-worktree path number branch)
+            (if (or (gethash (cons repo number) magit-dash-gh-pr--pending-worktrees)
+                    (magit-dash-gh-pr--find-existing-worktree path number branch))
                 (setq existing (1+ existing))
               ;; Preserve the reviewed branch for the actual creation.
               (setq prepared (plist-put prepared :pr
@@ -1643,21 +1694,14 @@ Signals `user-error' when not found."
         (princ (format "\n%d existing; %d without local checkout.\n" existing missing)))
       (when (yes-or-no-p (format "Create %d worktree(s) listed in *PR worktrees to create*? "
                                  (length targets)))
+        (setq queued (length targets))
         (dolist (target targets)
           (let ((entry (car target)))
-            (condition-case err
-                (progn
-                  (magit-dash-gh-pr-dashboard-create-worktree entry nil)
-                  (setq created (1+ created)))
-              (error
-               (message "magit-gh: failed to create worktree for %s #%s: %s"
-                        (plist-get entry :repo) (plist-get entry :number)
-                        (error-message-string err))
-               (setq failed (1+ failed))))))
+            (puthash (cons (plist-get entry :repo) (plist-get entry :number))
+                     t magit-dash-gh-pr--pending-worktrees)))
         (magit-dash-gh-pr-dashboard--rebuild-entries)
-        (message "magit-gh: batch creation complete — %d created, %d existing, %d without local checkout, %d failed"
-                 created existing missing failed)))
-    (list :created created :existing existing :missing missing :failed failed)))
+        (magit-dash-gh-pr--create-batch-async targets (current-buffer) existing missing)))
+    (list :queued queued :existing existing :missing missing)))
 
 (defun magit-dash-gh-pr-dashboard-fetch-ci ()
   "Fetch GitHub Actions CI logs for the pull request at point."
