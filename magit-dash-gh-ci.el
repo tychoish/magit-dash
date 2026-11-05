@@ -145,6 +145,7 @@ different branch than their cached stats reflect.
 Caches the result as :ci-status in the shared magit-dash-gh cache."
   (when (magit-dash-repo-include-ci repo)
     (let* ((path (magit-dash-repo-path repo))
+           (token (magit-dash-gh--cache-request path :ci-status))
            (current (magit-dash--current-branch path))
            (branch (if (string-empty-p current)
                        (magit-dash-repo-branch repo)
@@ -164,7 +165,7 @@ Caches the result as :ci-status in the shared magit-dash-gh cache."
                                                :object-type 'alist)
                           (error nil)))
                   (ci-status (magit-dash-gh-ci--parse-runs runs)))
-             (magit-dash-gh--cache-set path :ci-status ci-status)
+             (magit-dash-gh--cache-set-if-current path :ci-status ci-status token)
              (funcall callback ci-status)))
          (lambda (_ _)
            (funcall callback nil)))))))
@@ -179,7 +180,8 @@ ARGS may contain an optional positional ON-DONE callback or keyword arguments:
   :concurrency INTEGER
   :delay FLOAT
 Returns a cancellation handle."
-  (let* ((on-done (when (and (car args) (not (keywordp (car args))))
+  (let* ((guards (bound-and-true-p magit-dash--refresh-guards))
+         (on-done (when (and (car args) (not (keywordp (car args))))
                     (pop args)))
          (on-done (or (plist-get args :on-done) on-done))
          (on-repo-done (plist-get args :on-repo-done))
@@ -200,16 +202,18 @@ Returns a cancellation handle."
           (lambda (&rest _) nil))
       (gen-run-async
        (lambda (repo done)
-         (magit-dash-gh-ci-fetch
-          repo
-          (lambda (ci-status)
-            (when (and buf (buffer-live-p buf))
-              (with-current-buffer buf
-                (when (fboundp 'magit-dash--update-entry)
-                  (magit-dash--update-entry repo))))
-            (when on-repo-done
-              (funcall on-repo-done repo ci-status))
-            (funcall done))))
+         (if (not (magit-dash-gh--refresh-current-p guards (magit-dash-repo-path repo)))
+             (funcall done)
+           (magit-dash-gh-ci-fetch
+            repo
+            (lambda (ci-status)
+              (when (and buf (buffer-live-p buf))
+		(with-current-buffer buf
+                  (when (fboundp 'magit-dash--update-entry)
+                    (magit-dash--update-entry repo))))
+              (when on-repo-done
+		(funcall on-repo-done repo ci-status))
+              (funcall done)))))
        ci-repos
        :concurrency limit
        :delay yield

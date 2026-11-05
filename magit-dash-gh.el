@@ -60,6 +60,27 @@
   "Global cache for repository-specific data, keyed by repository path.
 Each value is a plist containing data like :stats, :pr-counts, etc.")
 
+(defvar magit-dash-gh--cache-requests (make-hash-table :test #'equal)
+  "Latest asynchronous cache request, keyed by path and field.")
+
+(defun magit-dash-gh--cache-request (path key)
+  "Register and return a new request token for PATH and KEY."
+  (let ((token (cons nil nil)))
+    (puthash (cons path key) token magit-dash-gh--cache-requests)
+    token))
+
+(defun magit-dash-gh--cache-set-if-current (path key value token)
+  "Cache VALUE for PATH and KEY if TOKEN is still current."
+  (when (eq token (gethash (cons path key) magit-dash-gh--cache-requests))
+    (magit-dash-gh--cache-set path key value)))
+
+(defun magit-dash-gh--refresh-current-p (guards path)
+  "Return non-nil when PATH's scheduled refresh in GUARDS is current.
+Nil GUARDS means that the work was not scheduled by a refresh."
+  (or (null guards)
+      (eq (gethash path guards)
+          (gethash (cons path :refresh) magit-dash-gh--cache-requests))))
+
 (defun magit-dash-gh--cache-get (path key)
   "Return the value for KEY in the cache for repo at PATH."
   (plist-get (map-elt magit-dash-gh--cache path) key))
@@ -71,6 +92,12 @@ Each value is a plist containing data like :stats, :pr-counts, etc.")
 
 (defun magit-dash-gh--cache-remove (path &optional key)
   "Remove data for repo at PATH. If KEY is nil, remove all data."
+  (if key
+      (remhash (cons path key) magit-dash-gh--cache-requests)
+    (maphash (lambda (request-key _token)
+               (when (equal (car request-key) path)
+                 (remhash request-key magit-dash-gh--cache-requests)))
+             magit-dash-gh--cache-requests))
   (if key
       (setf (map-elt magit-dash-gh--cache path)
             (seq-mapcat (lambda (pair) (unless (eq (car pair) key) pair))

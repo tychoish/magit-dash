@@ -25,6 +25,32 @@ passes nil explicitly to exercise the disabled case."
 
 ;;; magit-dash-gh-ci-fetch
 
+(ert-deftest magit-dash-gh-ci/fetch-ignores-older-results ()
+  "An older CI response cannot overwrite a more recent response."
+  (let* ((repo (magit-dash-repo--make :name "r" :path "/tmp/r" :include-ci t))
+         (magit-dash-gh--cache (make-hash-table :test #'equal))
+         (magit-dash-gh--cache-requests (make-hash-table :test #'equal))
+         callbacks)
+    (cl-letf (((symbol-function 'magit-dash--current-branch) (lambda (_) "main"))
+              ((symbol-function 'magit-dash-gh--run-process)
+               (lambda (_args _path success _failure) (push success callbacks)))
+              ((symbol-function 'magit-dash-gh-ci--parse-runs) #'identity))
+      (magit-dash-gh-ci-fetch repo #'ignore)
+      (magit-dash-gh-ci-fetch repo #'ignore)
+      (funcall (car callbacks) "[{\"name\":\"new\"}]")
+      (funcall (cadr callbacks) "[{\"name\":\"old\"}]")
+      (should (equal (alist-get 'name (car (magit-dash-gh--cache-get "/tmp/r" :ci-status)))
+                     "new")))))
+
+(ert-deftest magit-dash-gh-ci/cache-invalidation-rejects-pending-result ()
+  "Clearing a field invalidates requests that were already in flight."
+  (let ((magit-dash-gh--cache (make-hash-table :test #'equal))
+        (magit-dash-gh--cache-requests (make-hash-table :test #'equal)))
+    (let ((token (magit-dash-gh--cache-request "/tmp/r" :stats)))
+      (magit-dash-gh--cache-remove "/tmp/r" :stats)
+      (magit-dash-gh--cache-set-if-current "/tmp/r" :stats 'stale token)
+      (should-not (magit-dash-gh--cache-get "/tmp/r" :stats)))))
+
 (ert-deftest magit-dash-gh-ci/fetch-uses-live-checked-out-branch ()
   "Queries the branch currently checked out at REPO's path, not a stale cached one."
   (let* ((repo (magit-dash-gh-ci-test/make-repo "test" "/tmp/test" "stale-cached-branch"))

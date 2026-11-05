@@ -3686,6 +3686,33 @@ The bug was that add-text-properties returns t, not the modified string."
 
 ;;;; Single Row and Scoped Refresh tests
 
+(ert-deftest magit-dash/old-refresh-sync-recollects-after-completion ()
+  "A superseded sync completion recollects after changing the repo."
+  (let* ((repo (magit-dash-repo--make :name "r" :path "/tmp/r"
+                                      :sync-on-refresh t :include-ci t))
+         (magit-dash-gh--cache-requests (make-hash-table :test #'equal))
+         (magit-dash--refresh-guards (make-hash-table :test #'equal))
+         (magit-dash--repo-last-sync-attempts (make-hash-table :test #'equal))
+         (magit-dash--repo-last-fetch-attempts (make-hash-table :test #'equal))
+         callback queried done)
+    (puthash "/tmp/r" (magit-dash-gh--cache-request "/tmp/r" :refresh)
+             magit-dash--refresh-guards)
+    (cl-letf (((symbol-function 'file-directory-p) (lambda (_) t))
+              ((symbol-function 'gen-run-async)
+               (lambda (worker items &rest _)
+                 (funcall worker (car items) (lambda () (setq done t)))))
+              ((symbol-function 'magit-dash--auto-sync-async)
+               (lambda (_repo cb) (setq callback cb)))
+              ((symbol-function 'magit-dash--collect-stats-async)
+               (lambda (&rest _) (setq queried t)))
+              ((symbol-function 'magit-dash-gh-ci-fetch)
+               (lambda (&rest _) (setq queried t))))
+      (magit-dash--refresh-fetch-or-sync-async (list repo))
+      (magit-dash-gh--cache-request "/tmp/r" :refresh)
+      (funcall callback 'ok)
+      (should done)
+      (should queried))))
+
 (ert-deftest magit-dash/refresh-repo-clears-cache-and-populates-stats ()
   "Refresh-repo clears cache only for the target repo and repopulates stats."
   (let* ((r1 (magit-dash-repo--make :name "r1" :path "/tmp/r1"))
