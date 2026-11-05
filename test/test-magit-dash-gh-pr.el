@@ -666,6 +666,16 @@
       (should (string-match-p "magit-dash-gh-pr-dashboard-toggle-mark" flat))
       (should (string-match-p "magit-dash-gh-pr-dashboard-unmark-all" flat)))))
 
+(ert-deftest magit-dash-gh-pr/dashboard-menu-opens ()
+  "The dashboard transient can set up its complete keymap."
+  (with-temp-buffer
+    (unwind-protect
+        (progn
+          (magit-dash-gh-pr-dashboard-menu)
+          (should (eq (lookup-key transient--transient-map (kbd "m c"))
+                      #'magit-dash-gh-pr-dashboard-unmark-all)))
+      (when transient--prefix (transient-quit-all)))))
+
 (ert-deftest magit-dash-gh-pr/delete-worktree-refuses-on-uncommitted ()
   "delete-worktree refuses to remove worktree if uncommitted changes exist."
   (cl-letf (((symbol-function 'magit-dash-worktree-uncommitted-changes-p)

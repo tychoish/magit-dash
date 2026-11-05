@@ -1681,9 +1681,9 @@ Otherwise prompts or processes open PRs in the dashboard."
   [["Pull Request"
     ("b"   "Open in browser"          magit-dash-gh-pr-dashboard-open-browser)]
    ["Mark / Bulk"
-    ("m"   "Toggle mark"              magit-dash-gh-pr-dashboard-toggle-mark)
-    ("u"   "Unmark"                   magit-dash-gh-pr-dashboard-unmark)
-    ("ua"  "Unmark all"               magit-dash-gh-pr-dashboard-unmark-all)
+    ("mm"  "Toggle mark"              magit-dash-gh-pr-dashboard-toggle-mark)
+    ("mu"  "Unmark"                   magit-dash-gh-pr-dashboard-unmark)
+    ("mc"  "Unmark all"               magit-dash-gh-pr-dashboard-unmark-all)
     ("ma"  "Mark all"                 magit-dash-gh-pr-dashboard-mark-all)]
    ["Worktree"
     ("cw"  "Create worktree(s)"       magit-dash-gh-pr-dashboard-create-worktree)
