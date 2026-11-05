@@ -279,7 +279,7 @@ or when the worktree contains uncommitted changes."
       (when (magit-dash-worktree-uncommitted-changes-p path)
         (user-error "Cannot delete worktree %s: contains uncommitted changes" path)))
     (magit-dash-gh--with-repo-dir (magit-dash-repo-path repo)
-      (call-interactively #'magit-worktree-delete))
+      (magit-worktree-delete (magit-dash-repo-path repo)))
     (magit-dash-refresh)))
 
 ;;;###autoload

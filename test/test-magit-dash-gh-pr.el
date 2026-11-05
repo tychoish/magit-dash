@@ -652,8 +652,7 @@
     (should (eq (lookup-key m (kbd "m a")) #'magit-dash-gh-pr-dashboard-mark-all))
     (should (eq (lookup-key m (kbd "SPC")) #'magit-dash-gh-pr-dashboard-toggle-mark))
     (should (eq (lookup-key m (kbd "*")) #'magit-dash-gh-pr-dashboard-mark-all))
-    ;; Ensure capital C is not bound
-    (should-not (lookup-key m (kbd "C")))))
+    (should (eq (lookup-key m (kbd "a")) #'magit-dash-gh-pr-dashboard-create-all-worktrees))))
 
 (ert-deftest magit-dash-gh-pr/dashboard-menu-includes-worktree-options ()
   "magit-dash-gh-pr-dashboard-menu contains create, create-all, review, clean, and mark commands."
@@ -798,6 +797,30 @@
         (should (equal (list (expand-file-name "/tmp/myrepo/.wt/pr-1")) deleted-paths))
         (should (= 1 (plist-get res :deleted)))
         (should (= 1 (plist-get res :skipped)))))))
+
+(ert-deftest magit-dash-gh-pr/clean-merged-protects-open-pr-on-reused-branch ()
+  "An open PR protects its worktree even when an older PR was merged."
+  (let ((prs '(((number . 1) (headRefName . "shared") (state . "MERGED"))
+               ((number . 2) (headRefName . "shared") (state . "OPEN"))))
+        (wts '(((path . "/tmp/wt") (branch . "shared"))))
+        deleted)
+    (cl-letf (((symbol-function 'magit-dash-gh-pr--fetch-repo-prs) (lambda (&rest _) prs))
+              ((symbol-function 'magit-dash-gh-pr--git-worktrees) (lambda (_) wts))
+              ((symbol-function 'file-directory-p) (lambda (_) t))
+              ((symbol-function 'magit-dash-gh-pr-delete-worktree) (lambda (&rest _) (setq deleted t))))
+      (magit-dash-gh-pr-clean-merged-worktrees "/tmp/repo" nil)
+      (should-not deleted))))
+
+(ert-deftest magit-dash-gh-pr/clean-entry-skips-open-pr ()
+  "Marked open PRs are never deleted by merged cleanup."
+  (let ((entry '(:number 2 :repo "o/r" :pr ((number . 2) (state . "OPEN"))))
+        deleted)
+    (cl-letf (((symbol-function 'magit-dash-gh-pr-dashboard--find-local-path) (lambda (_) "/tmp/repo"))
+              ((symbol-function 'magit-dash-gh-pr--find-existing-worktree) (lambda (&rest _) "/tmp/wt"))
+              ((symbol-function 'file-directory-p) (lambda (_) t))
+              ((symbol-function 'magit-dash-gh-pr-delete-worktree) (lambda (&rest _) (setq deleted t))))
+      (should (eq :skipped (magit-dash-gh-pr--clean-worktree-for-entry entry nil)))
+      (should-not deleted))))
 
 (ert-deftest magit-dash-gh-pr/create-all-worktrees ()
   "create-all-worktrees reviews worktrees and creates worktree for each open PR."

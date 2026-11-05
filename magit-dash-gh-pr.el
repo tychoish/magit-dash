@@ -423,6 +423,7 @@ Uses active columns.  WIDTH is available window width; when nil,
     (keymap-set m "w"   #'magit-dash-gh-pr-dashboard-open-worktree)
     (keymap-set m "c w" #'magit-dash-gh-pr-dashboard-create-worktree)
     (keymap-set m "c a" #'magit-dash-gh-pr-dashboard-create-all-worktrees)
+    (keymap-set m "a"   #'magit-dash-gh-pr-dashboard-create-all-worktrees)
     (keymap-set m "c i" #'magit-dash-gh-pr-dashboard-fetch-ci)
     (keymap-set m "k"   #'magit-dash-gh-pr-dashboard-clean-merged-worktrees)
     (keymap-set m "d"   #'magit-dash-gh-pr-dashboard-open-dired)
@@ -449,6 +450,7 @@ Uses active columns.  WIDTH is available window width; when nil,
   "Major mode for the pull request dashboard."
   (setq tabulated-list-format (magit-dash-gh-pr-dashboard--build-format))
   (setq tabulated-list-sort-key nil)
+  (setq-local mode-line-process " [a: create all worktrees, ?: menu]")
   (tabulated-list-init-header)
   (setq-local magit-dash-gh-pr-dashboard--filters
               (list :state "open" :author nil :repo nil :org nil))
@@ -1428,34 +1430,30 @@ Returns a plist with :renamed, :deleted, :matching, and :skipped counts."
                        (magit-dash-gh-pr-dashboard--current-repo-slug)))
                    (file-name-nondirectory (directory-file-name repo-dir))))
          (prs (or prs (magit-dash-gh-pr--fetch-repo-prs slug "all" repo-dir)))
-         (def-branch (ignore-errors
-                       (let ((default-directory repo-dir))
-                         (magit-dash-gh--default-branch))))
-         (git-merged (and def-branch
-                          (fboundp 'magit-dash-gh--git-merged-branches)
-                          (magit-dash-gh--git-merged-branches def-branch repo-dir)))
          (git-wts (magit-dash-gh-pr--git-worktrees repo-dir))
          (counts (list :renamed 0 :deleted 0 :matching 0 :skipped 0)))
     (dolist (wt git-wts)
-      (let* ((wt-path (alist-get 'path wt))
-             (wt-branch (alist-get 'branch wt)))
+      (let* ((wt-path (alist-get 'path wt)))
         (unless (or (null wt-path)
                     (magit-dash-gh-pr--path-equal-p wt-path repo-dir)
                     (not (file-directory-p wt-path)))
           (let* ((wt-name (file-name-nondirectory (directory-file-name wt-path)))
-                 (matched (or (magit-dash-gh-pr--match-worktree-to-pr wt prs)
-                              (when (and wt-branch (member wt-branch git-merged))
-                                `((number . nil) (headRefName . ,wt-branch) (state . "MERGED"))))))
+                 (matched (or (magit-dash-gh-pr--match-worktree-to-pr
+                               wt (seq-filter (lambda (pr)
+                                                (let ((state (map-elt pr 'state)))
+                                                  (and (stringp state)
+                                                       (string-equal (upcase state) "OPEN"))))
+                                              prs))
+                              (magit-dash-gh-pr--match-worktree-to-pr wt prs))))
             (when matched
               (let* ((pr-num (map-elt matched 'number))
                      (state-raw (map-elt matched 'state))
                      (state (if (stringp state-raw) (upcase state-raw) ""))
-                     (merged-p (or (magit-dash-gh-pr--pr-merged-p matched slug pr-num repo-dir)
-                                   (and wt-branch (member wt-branch git-merged)))))
+                     (merged-p (magit-dash-gh-pr--pr-merged-p matched slug pr-num repo-dir)))
                 (cond
                  ;; Case 1: PR has merged
                  (merged-p
-                  (let ((pr-label (if pr-num (format "PR #%d" pr-num) (format "branch '%s'" wt-branch))))
+                  (let ((pr-label (if pr-num (format "PR #%d" pr-num) "PR")))
                     (if (and (fboundp 'magit-dash-worktree-uncommitted-changes-p)
                              (magit-dash-worktree-uncommitted-changes-p wt-path))
                         (progn
@@ -1522,21 +1520,19 @@ Returns `:deleted', `:skipped', or `:none'."
         :none
       (let* ((wt-name (file-name-nondirectory (directory-file-name wt-path)))
              (merged-p (magit-dash-gh-pr--pr-merged-p pr-data repo pr-num repo-dir)))
-        (if (and (fboundp 'magit-dash-worktree-uncommitted-changes-p)
-                 (magit-dash-worktree-uncommitted-changes-p wt-path))
-            (progn
-              (message "magit-gh: worktree %s (PR #%d) has uncommitted changes; skipping"
-                       wt-name pr-num)
-              :skipped)
-          (if (or (not prompt-p)
-                  (y-or-n-p (format "PR #%d%s worktree '%s' has no uncommitted changes. Delete worktree? (branch preserved) "
-                                    pr-num
-                                    (if merged-p " is merged and" "")
-                                    wt-name)))
-              (progn
-                (magit-dash-gh-pr-delete-worktree wt-path repo-dir)
-                :deleted)
-            :skipped))))))
+        (cond
+         ((not merged-p) :skipped)
+         ((and (fboundp 'magit-dash-worktree-uncommitted-changes-p)
+               (magit-dash-worktree-uncommitted-changes-p wt-path))
+          (message "magit-gh: worktree %s (PR #%d) has uncommitted changes; skipping"
+                   wt-name pr-num)
+          :skipped)
+         ((or (not prompt-p)
+              (y-or-n-p (format "PR #%d is merged and worktree '%s' has no uncommitted changes. Delete worktree? (branch preserved) "
+                                pr-num wt-name)))
+          (magit-dash-gh-pr-delete-worktree wt-path repo-dir)
+          :deleted)
+         (t :skipped))))))
 
 ;;;###autoload
 (defun magit-dash-gh-pr-create-all-worktrees (&optional repo-dir)

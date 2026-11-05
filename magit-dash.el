@@ -3561,7 +3561,7 @@ or when the worktree contains uncommitted changes."
                  (magit-dash-worktree-uncommitted-changes-p path))
         (user-error "Cannot delete worktree %s: contains uncommitted changes" path)))
     (magit-dash--with-repo repo
-      (call-interactively #'magit-worktree-delete))
+      (magit-worktree-delete (magit-dash-repo-path repo)))
     (magit-dash-refresh)))
 
 (defun magit-dash-agent-shell ()

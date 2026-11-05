@@ -1971,6 +1971,17 @@ they are not consulted even when their own auto-* flags are set."
              (lambda () (magit-dash-repo--make :name "r" :path "/tmp/r"))))
     (should-error (magit-dash-worktree-delete) :type 'user-error)))
 
+(ert-deftest magit-dash/worktree-delete-uses-row-path ()
+  "Delete passes the selected path to Magit without selecting another worktree."
+  (let ((repo (magit-dash-repo--make :name "wt" :path "/tmp/wt" :worktree t))
+        deleted)
+    (cl-letf (((symbol-function 'magit-dash--repo-at-point) (lambda () repo))
+              ((symbol-function 'magit-dash-worktree-uncommitted-changes-p) (lambda (_) nil))
+              ((symbol-function 'magit-worktree-delete) (lambda (path) (setq deleted path)))
+              ((symbol-function 'magit-dash-refresh) #'ignore))
+      (magit-dash-worktree-delete)
+      (should (equal deleted "/tmp/wt")))))
+
 (ert-deftest magit-dash/worktree-add-user-error-when-at-worktree ()
   "worktree-add signals user-error when the entry is itself a worktree."
   (cl-letf (((symbol-function 'magit-dash--repo-at-point)
