@@ -1227,6 +1227,17 @@ Returns a list of PR alists or nil on error."
           (ignore-errors
             (json-parse-string (buffer-string) :object-type 'alist :array-type 'list)))))))
 
+(defun magit-dash-gh-pr--fetch-pr (repo number dir)
+  "Fetch PR NUMBER in REPO using DIR, or return nil on failure."
+  (when (executable-find "gh")
+    (let ((default-directory dir))
+      (with-temp-buffer
+        (when (zerop (call-process "gh" nil (current-buffer) nil
+                                   "pr" "view" (number-to-string number)
+                                   "-R" repo "--json"
+                                   "number,title,headRefName,state,mergedAt"))
+          (ignore-errors (json-parse-string (buffer-string) :object-type 'alist)))))))
+
 (defun magit-dash-gh-pr--match-worktree-to-pr (wt prs)
   "Match git worktree WT to a pull request in PRS alist list.
 Matches by branch name (headRefName, pr-NUM, wt/...) or worktree directory name.
@@ -1438,13 +1449,22 @@ Returns a plist with :renamed, :deleted, :matching, and :skipped counts."
                     (magit-dash-gh-pr--path-equal-p wt-path repo-dir)
                     (not (file-directory-p wt-path)))
           (let* ((wt-name (file-name-nondirectory (directory-file-name wt-path)))
+                 (number (when (string-match "\\(?:\\`\\|-\\)pr-\\([0-9]+\\)\\'" wt-name)
+                           (string-to-number (match-string 1 wt-name))))
                  (matched (or (magit-dash-gh-pr--match-worktree-to-pr
                                wt (seq-filter (lambda (pr)
                                                 (let ((state (map-elt pr 'state)))
                                                   (and (stringp state)
                                                        (string-equal (upcase state) "OPEN"))))
                                               prs))
-                              (magit-dash-gh-pr--match-worktree-to-pr wt prs))))
+                              (if number
+                                  (or (seq-find (lambda (pr) (equal (map-elt pr 'number) number)) prs)
+                                      (magit-dash-gh-pr--fetch-pr slug number repo-dir)
+                                      (progn
+                                        (message "magit-gh: could not find PR #%d for worktree %s; skipping" number wt-name)
+                                        (plist-put counts :skipped (1+ (plist-get counts :skipped)))
+                                        nil))
+                                (magit-dash-gh-pr--match-worktree-to-pr wt prs)))))
             (when matched
               (let* ((pr-num (map-elt matched 'number))
                      (state-raw (map-elt matched 'state))
