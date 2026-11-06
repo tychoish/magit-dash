@@ -42,6 +42,9 @@
 (declare-function magit-dash-repo-name "magit-dash")
 (declare-function magit-dash-repo-repo "magit-dash")
 (declare-function magit-dash-repo-upstream-repo "magit-dash")
+(declare-function magit-dash-repo-pr "magit-dash")
+(declare-function magit-dash-repo-path "magit-dash")
+(defvar magit-dash-repo-list)
 (declare-function magit-dash--repo-at-point "magit-dash")
 (declare-function magit-dash--repo-at-point-p "magit-dash")
 (declare-function magit-dash-worktree-uncommitted-changes-p "magit-dash-worktree")
@@ -52,6 +55,38 @@
 
 (defvar magit-dash-gh-pr-thread-limit 100
   "Maximum number of review threads to fetch per pull request.")
+
+(defconst magit-dash-gh-pr-known-options '(:required-approvals)
+  "Keys accepted in the `:pr' plist of `magit-dash-register'.
+:required-approvals  approvals needed before a PR is ready to merge.")
+
+(defun magit-dash-gh-pr-check-options (name opts)
+  "Warn about problems in OPTS, the `:pr' plist registered for repo NAME.
+Unknown keys and a `:required-approvals' that is not a natural number are
+reported; consumers fall back to their defaults for the latter."
+  (cl-loop for (k _) on opts by #'cddr
+           unless (memq k magit-dash-gh-pr-known-options)
+           do (display-warning 'magit-dash
+                               (format "Unknown :pr option %S for %s" k name)))
+  (when (and (plist-member opts :required-approvals)
+             (not (natnump (plist-get opts :required-approvals))))
+    (display-warning
+     'magit-dash
+     (format ":pr :required-approvals for %s must be a natural number; using the default"
+             name))))
+
+(defun magit-dash-gh-pr-repo-option (slug key default &optional dir)
+  "Return option KEY from the `:pr' plist of the repo registered as SLUG.
+SLUG is an owner/name string.  Return DEFAULT when the repo is not
+registered or does not set KEY.  DIR identifies the registered checkout."
+  (let* ((repo (seq-find (lambda (r)
+                           (or (equal (magit-dash-repo-repo r) slug)
+                               (and dir (magit-dash-repo-path r)
+                                    (equal (file-truename dir)
+                                           (file-truename (magit-dash-repo-path r))))))
+                         magit-dash-repo-list))
+         (opts (and repo (magit-dash-repo-pr repo))))
+    (if (plist-member opts key) (plist-get opts key) default)))
 
 (defvar magit-dash-gh-pr--pending-worktrees (make-hash-table :test #'equal)
   "PR worktrees currently being created, keyed by (REPO . NUMBER).")

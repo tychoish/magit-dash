@@ -25,6 +25,7 @@ local git repositories from a single buffer.  Includes integration with GitHub
 - [[#example-configurations][Example Configurations]]
   - [[#declarative-remote-host-sync][Declarative Remote Host Sync]]
   - [[#full-auto-sync-with-bootstrapping-and-ci][Full Auto-Sync with Bootstrapping and CI]]
+- [[#pr-status][PR Status]]
 - [[#user-guides][User Guides]]
 - [[#api-reference][API Reference]]
 - [[#related-packages][Related Packages]]
@@ -315,6 +316,51 @@ To run remote sync automatically during repo sync, you can wire a generated targ
  :include-ci t
  :sort-hint 10)
 #+END_SRC
+
+* PR Status
+:PROPERTIES:
+:CUSTOM_ID: pr-status
+:END:
+=magit-dash-gh-pr-status= collects your open PRs in the current repository
+with one GraphQL query, classifies each into its next step, and regenerates
+an org file with a summary table and one TODO per next step. Buckets are
+checked in order, so a PR is never ready with a failing check:
+
+1. =fix CI=: at least one failing check (names and URLs only).
+2. =address threads=: unresolved, non-outdated review threads or requested changes.
+3. =needs N reviews=: fewer approvals than required. Only the latest
+   decisive review per human counts; bots and ignored reviewers do not.
+4. =check merge blockers=: draft PRs, pending CI, or blocked merge states.
+5. =ready to merge=.
+
+The query rejects incomplete results when GitHub reports additional pages.
+Re-running is idempotent. The summary is rewritten, missing tasks are added,
+tasks for PRs that are no longer open are marked DONE, and every other task
+is left as you edited it (tasks are keyed by =:REPO:=, =:PR:= and =:STEP:=).
+An empty result does not close tasks, since an empty search can be transient.
+The summary reflects the most recently refreshed repository.
+An existing hand-written file is kept under an =Archive= heading. Add the
+file to =org-agenda-files= to see the tasks in your agenda.
+
+#+BEGIN_SRC emacs-lisp
+(setq magit-dash-gh-pr-status-file "~/org/pr-review-status.org")
+(setq magit-dash-gh-pr-status-required-approvals 1) ; default for all repos
+(magit-dash-register :name "monorepo" :path "~/src/monorepo"
+                     :repo "org/monorepo"
+                     :pr '(:required-approvals 2))  ; per-repo override
+#+END_SRC
+
+Run it interactively with =M-x magit-dash-gh-pr-status=, from cron or a
+script with
+
+#+BEGIN_SRC sh
+emacs --batch -l magit-dash -f magit-dash-gh-pr-status-batch [REPO-DIR]
+#+END_SRC
+
+which exits non-zero with the error on stderr when =gh= fails, or through
+the =magit_dash_pr_status= MCP tool. Other options:
+=magit-dash-gh-pr-status-author= (default =@me=) and
+=magit-dash-gh-pr-status-ignored-reviewers= (default =("claude")=).
 
 * User Guides
 :PROPERTIES:

@@ -43,6 +43,7 @@
 
 (require 'magit-dash-gh-ci)
 (require 'magit-dash-gh-pr)
+(require 'magit-dash-gh-pr-status)
 (require 'magit-dash-gh)
 (require 'magit-dash-open)
 (require 'magit-dash-submodules)
@@ -111,7 +112,8 @@
   (sync-on-refresh nil)
   (fetch-on-refresh nil)
   (gh-account nil)
-  (gh-host "github.com"))
+  (gh-host "github.com")
+  (pr nil))
 
 (defalias 'magit-dash-repo-account #'magit-dash-repo-gh-account)
 (defalias 'magit-dash-repo-host #'magit-dash-repo-gh-host)
@@ -463,7 +465,7 @@ first)."
       (expand-file-name path-or-url)
     path-or-url))
 
-(cl-defun magit-dash-register (&key name path repo include-prs include-ci auto-fetch auto-pull auto-commit auto-push auto-sync-command hooks tags commands sort-hint worktree sync-branches timer clone-url remote-url worktree-symlinks symlinks remote-sync sync-on-refresh auto-sync-on-refresh refresh-sync fetch-on-refresh gh-account gh-host)
+(cl-defun magit-dash-register (&key name path repo include-prs include-ci auto-fetch auto-pull auto-commit auto-push auto-sync-command hooks tags commands sort-hint worktree sync-branches timer clone-url remote-url worktree-symlinks symlinks remote-sync sync-on-refresh auto-sync-on-refresh refresh-sync fetch-on-refresh gh-account gh-host pr)
   "Register or replace a repository with NAME at absolute PATH.
 REPO is the upstream repository path or URL for bootstrapping.
 INCLUDE-PRS, INCLUDE-CI, AUTO-FETCH, AUTO-PULL, AUTO-COMMIT, AUTO-PUSH,
@@ -477,6 +479,9 @@ Keyword arguments:
   :repo           path (or URL) of upstream repository for bootstrapping.
   :include-prs    include in PR dashboard fetches.
   :include-ci     include in CI status column fetches (GitHub Actions).
+  :pr             plist of per-repository PR tooling options, read through
+                  `magit-dash-gh-pr-repo-option'; see
+                  `magit-dash-gh-pr-known-options'.
   :auto-fetch     non-nil — run git fetch --all during auto-sync.
   :auto-pull      non-nil — run git pull during auto-sync (implies fetch).
                   Respects :sync-branches.
@@ -549,6 +554,8 @@ Keyword arguments:
   (magit-dash--validate-hooks hooks t)
   (when remote-sync
     (magit-dash--validate-remote-sync remote-sync))
+  (when pr
+    (magit-dash-gh-pr-check-options name pr))
 
   (let* ((abs-path (expand-file-name path))
          (upstream (when repo (magit-dash--expand-repo-path repo)))
@@ -602,7 +609,8 @@ Keyword arguments:
                            :sync-on-refresh sync-refresh
                            :fetch-on-refresh fetch-on-refresh
                            :gh-account gh-account
-                           :gh-host (or gh-host magit-dash-multi-github-host "github.com")))))))
+                           :gh-host (or gh-host magit-dash-multi-github-host "github.com")
+                           :pr pr))))))
   (when (and timer (fboundp 'magit-dash-register-sync-timer))
     (apply #'magit-dash-register-sync-timer :name name :repos (list name) timer)))
 

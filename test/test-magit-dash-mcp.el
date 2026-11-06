@@ -20,7 +20,8 @@
     (should (gethash "manage_worktrees" tools))
     (should (gethash "create_worktree_for_pr" tools))
     (should (gethash "clean_merged_worktrees" tools))
-    (should (gethash "prune_branches" tools))))
+    (should (gethash "prune_branches" tools))
+    (should (gethash "magit_dash_pr_status" tools))))
 
 (ert-deftest magit-dash-mcp/manage-worktrees-actions ()
   "Test `manage_worktrees' tool for list, create, delete, and review actions."
@@ -171,6 +172,53 @@
             (should (= (plist-get res :deleted_count) 2))
             (should (= (plist-get res :worktrees_cleaned) 2))))
       (delete-directory tmp-repo t))))
+
+
+(defun magit-dash-mcp-test--status-response ()
+  "Return a GraphQL response with one PR (#7) holding one approval."
+  `((data . ((search . ((nodes . (((number . 7) (title . "t") (headRefName . "b")
+                                   (baseRefName . "main")
+                                   (reviews . ((nodes . (((state . "APPROVED")
+                                                          (author . ((login . "a")
+                                                                     (__typename . "User"))))))))
+                                   (reviewThreads . ((nodes . nil))))))))))))
+
+(defun magit-dash-mcp-test--status-bucket (repo-list)
+  "Run `magit_dash_pr_status' with REPO-LIST registered; return its result."
+  (let ((tmp-repo (make-temp-file "md-mcp-status-" t))
+        (file (make-temp-file "md-mcp-status" nil ".org")))
+    (unwind-protect
+        (let ((magit-dash-gh-pr-status-file file)
+              (magit-dash-gh-pr-status-required-approvals 2)
+              (magit-dash-repo-list repo-list))
+          (cl-letf (((symbol-function 'magit-dash-mcp--resolve-repo-slug)
+                     (lambda (_repo _dir) "org/repo"))
+                    ((symbol-function 'magit-dash-gh-pr-status--fetch)
+                     (lambda (_slug _dir) (magit-dash-mcp-test--status-response))))
+            (let ((res (magit-dash-mcp-call-tool
+                        "magit_dash_pr_status" (list :repo tmp-repo))))
+              (should (equal file (plist-get res :file)))
+              (should (string-match-p "^:PR: 7$"
+                                      (with-temp-buffer (insert-file-contents file)
+                                                        (buffer-string))))
+              res)))
+      (delete-directory tmp-repo t)
+      (delete-file file))))
+
+(ert-deftest magit-dash-mcp/pr-status-tool ()
+  "Test `magit_dash_pr_status' regenerates the file and reports buckets."
+  (let ((res (magit-dash-mcp-test--status-bucket nil)))
+    (should (= 1 (plist-get res :count)))
+    ;; One approval of the default two required.
+    (should (equal "reviews" (plist-get (aref (plist-get res :prs) 0) :bucket)))))
+
+(ert-deftest magit-dash-mcp/pr-status-tool-per-repo-override ()
+  "A per-repo `:pr' override changes the reported bucket."
+  (let ((res (magit-dash-mcp-test--status-bucket
+              (list (magit-dash-repo--make :name "m" :path "/tmp/m" :repo "org/repo"
+                                           :pr '(:required-approvals 1))))))
+    (should (= 1 (plist-get res :count)))
+    (should (equal "ready" (plist-get (aref (plist-get res :prs) 0) :bucket)))))
 
 (provide 'test-magit-dash-mcp)
 

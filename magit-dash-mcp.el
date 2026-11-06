@@ -17,6 +17,7 @@
 ;;   - `create_worktree_for_pr'
 ;;   - `clean_merged_worktrees'
 ;;   - `prune_branches'
+;;   - `magit_dash_pr_status'
 
 ;;; Code:
 
@@ -27,6 +28,7 @@
 (require 'mcpkit)
 (require 'magit-dash-gh)
 (require 'magit-dash-gh-pr)
+(require 'magit-dash-gh-pr-status)
 (require 'magit-dash-worktree)
 
 (declare-function magit-dash-repo-name "magit-dash")
@@ -367,6 +369,27 @@
           :deleted_count (if dry-run 0 (or (plist-get del-res :deleted) 0))
           :skipped_count (if dry-run 0 (or (plist-get del-res :skipped) 0))
           :worktrees_cleaned (if wt-res (or (plist-get wt-res :deleted) 0) 0))))
+
+;;;; Tool 5: magit_dash_pr_status
+
+(mcpkit-register-tool "magit_dash_pr_status" 'magit-dash
+  :description "Regenerate the PR review status org file: classify the author's open PRs into next-step buckets and add a TODO per next step."
+  :input-schema
+  '(:type "object"
+    :properties (:repo (:type "string"
+                        :description "Local repository path, owner/repo slug, or registered repo name."))
+    :required ["repo"])
+  (let* ((repo (plist-get args :repo))
+         (repo-dir (magit-dash-mcp--resolve-repo-dir repo))
+         (repo-slug (or (magit-dash-mcp--resolve-repo-slug repo repo-dir) repo))
+         (result (magit-dash-gh-pr-status-run repo-slug repo-dir)))
+    (list :file (plist-get result :file)
+          :count (length (plist-get result :prs))
+          :prs (vconcat
+                (mapcar (lambda (pr)
+                          (list :number (plist-get pr :number)
+                                :bucket (symbol-name (plist-get pr :bucket))))
+                        (plist-get result :prs))))))
 
 (provide 'magit-dash-mcp)
 
