@@ -1919,8 +1919,12 @@ they are not consulted even when their own auto-* flags are set."
 
 (ert-deftest magit-dash/savehist-additional-variables ()
   "magit-dash-columns is included in savehist-additional-variables."
-  (magit-dash-global-mode 1)
-  (should (memq 'magit-dash-columns savehist-additional-variables)))
+  (unwind-protect
+      (progn
+        (magit-dash-global-mode 1)
+        (should (memq 'magit-dash-columns savehist-additional-variables))
+        (should (memq #'magit-dash--which-key-register-replacements which-key-mode-hook)))
+    (magit-dash-global-mode -1)))
 
 (ert-deftest magit-dash/column-disabled ()
   "A disabled column is excluded from active-columns."
