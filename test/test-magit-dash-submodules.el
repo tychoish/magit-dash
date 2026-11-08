@@ -333,5 +333,20 @@
           (should (magit-dash-bump--only-submodule-changes-p dir nil)))
       (delete-directory dir t))))
 
+(ert-deftest magit-dash-submodules/pull-submodules-invokes-git ()
+  "Verify `magit-dash-pull-submodules' invokes git with submodule foreach pull."
+  (let ((git-args nil)
+        (git-path nil))
+    (cl-letf (((symbol-function 'magit-dash--run-git)
+               (lambda (path args success-cb _err-cb)
+                 (setq git-path path
+                       git-args args)
+                 (funcall success-cb "output"))))
+      (let ((result nil))
+        (magit-dash-pull-submodules "/test/repo" (lambda (status) (setq result status)))
+        (should (equal git-path "/test/repo"))
+        (should (equal git-args '("submodule" "foreach" "git" "pull")))
+        (should (eq result 'ok))))))
+
 (provide 'test-magit-dash-submodules)
 ;;; test-magit-dash-submodules.el ends here

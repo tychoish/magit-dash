@@ -386,5 +386,15 @@ children are committed and pushed before their parents record the new hashes."
                           (tabulated-list-get-id))))
     ("a" "Bump all registered repos" magit-dash-bump-submodules-all)]])
 
+(defun magit-dash-pull-submodules (path on-complete)
+  "Run `git submodule foreach git pull' asynchronously in PATH.
+Calls ON-COMPLETE with `ok' on success, or `error' with message on failure."
+  (magit-dash--run-git
+   path
+   '("submodule" "foreach" "git" "pull")
+   (lambda (_) (funcall on-complete 'ok))
+   (lambda (output code)
+     (funcall on-complete 'error (format "submodule pull exit %d: %s" code output)))))
+
 (provide 'magit-dash-submodules)
 ;;; magit-dash-submodules.el ends here

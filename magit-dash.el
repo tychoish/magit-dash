@@ -1116,6 +1116,16 @@ Calls ON-COMPLETE with `ok' on success or `error' with message on failure."
    (lambda (output code)
      (funcall on-complete 'error (format "exit %d: %s" code output)))))
 
+(defun magit-dash--submodule-pull-async (repo on-complete)
+  "Run git submodule foreach git pull for REPO asynchronously.
+Calls ON-COMPLETE with `ok' on success or `error' with message on failure."
+  (magit-dash--run-git
+   (magit-dash-repo-path repo)
+   '("submodule" "foreach" "git" "pull")
+   (lambda (_) (funcall on-complete 'ok))
+   (lambda (output code)
+     (funcall on-complete 'error (format "submodule pull exit %d: %s" code output)))))
+
 (defun magit-dash--push-async (repo on-complete)
   "Run git push for REPO asynchronously.
 Calls ON-COMPLETE with symbol `ok' on success or `error' and error text
@@ -3949,6 +3959,18 @@ When disabled, only explicitly marked repos are targeted."
      "magit-dash submodule-update"
      (lambda (_) (magit-dash--maybe-refresh repos)))))
 
+(defun magit-dash-submodule-pull-all ()
+  "Run git submodule foreach git pull for marked or all visible repos."
+  (interactive)
+  (let ((repos (magit-dash--effective-repos)))
+    (unless repos
+      (user-error "No repositories to update"))
+    (magit-dash--batch-run
+     repos
+     #'magit-dash--submodule-pull-async
+     "magit-dash submodule-pull"
+     (lambda (_) (magit-dash--maybe-refresh repos)))))
+
 ;;;; Transient menus
 
 (defun magit-dash--agent-shell-project-buffers-p ()
@@ -4066,6 +4088,8 @@ Indicates whether batch operations target all repos or marked repos."
     ("aa"  "Autosync all"    magit-dash-auto-sync
      :inapt-if-not magit-dash--batch-enabled-p)
     ("su"  "Update submodules" magit-dash-submodule-update-all
+     :inapt-if-not magit-dash--batch-enabled-p)
+    ("sp"  "Pull submodules"   magit-dash-submodule-pull-all
      :inapt-if-not magit-dash--batch-enabled-p)
     ("ba"  (lambda () (if (magit-dash--has-marks-p) "Bootstrap marked" "Bootstrap all"))
      magit-dash-bootstrap-marked
