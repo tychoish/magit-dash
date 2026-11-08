@@ -73,6 +73,22 @@ Applied for `magit-dash-mode'.  Does nothing if
           (when (fboundp 'magit-dash-refresh-repo)
             (magit-dash-refresh-repo repo nil t)))))))
 
+(defun magit-dash-global--setup-magit ()
+  "Configure Magit keybindings and hooks for `magit-dash'."
+  (when (boundp 'magit-mode-map)
+    (keymap-set magit-mode-map "C-c C-d" #'magit-dash-open-other-window)
+    (keymap-set magit-mode-map "." #'magit-dash-dispatch))
+  (add-hook 'magit-post-refresh-hook #'magit-dash--on-magit-post-refresh)
+  (add-hook 'magit-post-worktree-add-hook #'magit-dash-worktree-post-add-hook-function))
+
+(defun magit-dash-global--teardown-magit ()
+  "Remove Magit keybindings and hooks for `magit-dash'."
+  (when (boundp 'magit-mode-map)
+    (keymap-unset magit-mode-map "C-c C-d" t)
+    (keymap-unset magit-mode-map "." t))
+  (remove-hook 'magit-post-refresh-hook #'magit-dash--on-magit-post-refresh)
+  (remove-hook 'magit-post-worktree-add-hook #'magit-dash-worktree-post-add-hook-function))
+
 ;;;###autoload
 (define-minor-mode magit-dash-global-mode
   "Global minor mode for `magit-dash' integrations.
@@ -82,20 +98,14 @@ Sets up keybindings, savehist variables, and hooks while leaving the main
   :group 'magit-dash
   (if magit-dash-global-mode
       (progn
-        (with-eval-after-load 'magit
-          (keymap-set magit-mode-map "C-c C-d" #'magit-dash-open-other-window)
-          (keymap-set magit-mode-map "." #'magit-dash-dispatch)
-          (add-hook 'magit-post-refresh-hook #'magit-dash--on-magit-post-refresh)
-          (add-hook 'magit-post-worktree-add-hook #'magit-dash-worktree-post-add-hook-function))
+        (magit-dash-global--setup-magit)
+        (add-hook 'magit-mode-hook #'magit-dash-global--setup-magit)
         (add-hook 'which-key-mode-hook #'magit-dash--which-key-register-replacements)
         (when (boundp 'savehist-additional-variables)
           (add-to-list 'savehist-additional-variables 'magit-dash-columns)
           (add-to-list 'savehist-additional-variables 'magit-dash-gh-pr-columns)))
-    (with-eval-after-load 'magit
-      (keymap-unset magit-mode-map "C-c C-d" t)
-      (keymap-unset magit-mode-map "." t)
-      (remove-hook 'magit-post-refresh-hook #'magit-dash--on-magit-post-refresh)
-      (remove-hook 'magit-post-worktree-add-hook #'magit-dash-worktree-post-add-hook-function))
+    (remove-hook 'magit-mode-hook #'magit-dash-global--setup-magit)
+    (magit-dash-global--teardown-magit)
     (remove-hook 'which-key-mode-hook #'magit-dash--which-key-register-replacements)))
 
 (provide 'magit-dash-global)

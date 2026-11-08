@@ -4259,10 +4259,17 @@ KILL and WINDOW are passed through to `quit-window'."
 
 ;; `magit-dash-global-mode' is defined in `magit-dash-global.el'.
 
-(with-eval-after-load 'nerd-icons
-  (add-to-list 'nerd-icons-mode-icon-alist '(magit-dash-mode nerd-icons-devicon "nf-dev-git" :face nerd-icons-orange))
-  (add-to-list 'nerd-icons-mode-icon-alist '(magit-dash-gh-pr-dashboard-mode nerd-icons-octicon "nf-oct-git_pull_request" :face nerd-icons-orange))
-  (add-to-list 'nerd-icons-mode-icon-alist '(magit-dash-gh-actions-log-mode nerd-icons-octicon "nf-oct-workflow" :face nerd-icons-orange)))
+;;;###autoload
+(defun magit-dash-install-nerd-icons ()
+  "Register `magit-dash' mode icons in `nerd-icons-mode-icon-alist'."
+  (interactive)
+  (when (boundp 'nerd-icons-mode-icon-alist)
+    (add-to-list 'nerd-icons-mode-icon-alist '(magit-dash-mode nerd-icons-devicon "nf-dev-git" :face nerd-icons-orange))
+    (add-to-list 'nerd-icons-mode-icon-alist '(magit-dash-gh-pr-dashboard-mode nerd-icons-octicon "nf-oct-git_pull_request" :face nerd-icons-orange))
+    (add-to-list 'nerd-icons-mode-icon-alist '(magit-dash-gh-actions-log-mode nerd-icons-octicon "nf-oct-workflow" :face nerd-icons-orange))))
+
+(when (boundp 'nerd-icons-mode-icon-alist)
+  (magit-dash-install-nerd-icons))
 
 (provide 'magit-dash)
 
