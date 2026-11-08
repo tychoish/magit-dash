@@ -286,7 +286,7 @@ Signals `user-error' when not inside a git repository."
             (seq-filter (lambda (b) (not (string-empty-p b)))
                         (split-string (buffer-string) "\n" t "[ \t\n]+"))))))))
 
-(defvar magit-dash-gh-prune-pr-limit 100
+(defvar magit-dash-gh-prune-pr-limit 50
   "Maximum number of PRs to fetch from GitHub on each incremental scan.")
 
 (defvar magit-dash-gh-prune-cache-dir nil

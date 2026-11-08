@@ -1905,7 +1905,7 @@ Name and Branch widths are computed dynamically in `magit-dash--build-format'.")
         (not (magit-dash--column-enabled-p col)))
   (magit-dash-refresh))
 
-(defvar magit-dash-show-discovered-submodules t
+(defvar magit-dash-show-discovered-submodules nil
   "When non-nil, auto-discovered submodules appear below their parent.")
 
 (defun magit-dash-toggle-discovered-submodules ()
@@ -1929,7 +1929,7 @@ in the dashboard.")
 
 ;;;; Formatting helpers
 
-(defvar magit-dash-render-branch-name-as-basename nil
+(defvar magit-dash-render-branch-name-as-basename t
   "When non-nil, the Branch column shows only the basename of a branch.
 Everything up to and including the final \"/\" is dropped (e.g.
 \"feature/some/thing\" displays as \"thing\").  Purely cosmetic — git
@@ -4234,6 +4234,11 @@ KILL and WINDOW are passed through to `quit-window'."
       (delete-window (or window (selected-window))))))
 
 ;; `magit-dash-global-mode' is defined in `magit-dash-global.el'.
+
+(with-eval-after-load 'nerd-icons
+  (add-to-list 'nerd-icons-mode-icon-alist '(magit-dash-mode nerd-icons-devicon "nf-dev-git" :face nerd-icons-orange))
+  (add-to-list 'nerd-icons-mode-icon-alist '(magit-dash-gh-pr-dashboard-mode nerd-icons-octicon "nf-oct-git_pull_request" :face nerd-icons-orange))
+  (add-to-list 'nerd-icons-mode-icon-alist '(magit-dash-gh-actions-log-mode nerd-icons-octicon "nf-oct-workflow" :face nerd-icons-orange)))
 
 (provide 'magit-dash)
 
