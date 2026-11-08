@@ -27,7 +27,6 @@
 (require 'magit-process)
 (require 'magit-worktree)
 (require 'magit-dash-gh)
-(require 'agent-shell-queue nil t)
 
 (declare-function asq-worktree-create "agent-shell-queue")
 (declare-function asq-worktree-dispatch-task "agent-shell-queue")
