@@ -685,6 +685,11 @@ in-memory cache is already populated."
           (magit-dash-gh--cache-set path :prune-state
                                (plist-put state :closed-prs table)))))))
 
+;;;###autoload
+(defun magit-dash-gh-prune-lazy-prefetch ()
+  "Seed the closed-PR cache for the current repo via a 3-second idle timer."
+  (run-with-idle-timer 3 nil #'magit-dash-gh-prune-prefetch))
+
 ;;; Shared utilities
 
 
