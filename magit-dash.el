@@ -2060,8 +2060,8 @@ Returns an empty string when nothing is set."
   "Return the tabulated-list format vector for REPOS using enabled columns.
 Name and Branch columns are elastic: Name is capped at the longest
 display name + 2 (minimum 4 for header), and Branch is wide enough
-for its longest value.  When both together exceed the available window
-space they split it proportionally."
+for its longest value.  The two are sized independently; only when
+together they exceed the available window space is the wider one trimmed."
   (let* ((raw-name (seq-reduce
                     (lambda (w r)
                       (max w (length (or (and magit-dash--submodule-path-set
@@ -2086,23 +2086,20 @@ space they split it proportionally."
                            acc))
                        magit-dash--column-defs 0))
          (available (max 20 (- (or (ignore-errors (window-width)) 97) fixed-width)))
-         (name-cap (max (length "Name") (+ raw-name 2)))
-         (name-need name-cap)
+         (name-need (max (length "Name") (+ raw-name 2)))
          (branch-need (max 8 (1+ raw-branch)))
-         (widths (cond
-                  ((<= (+ name-need branch-need) available)
-                   (list name-need branch-need))
-                  ((<= branch-need (- available (length "Name")))
-                   (list (min name-cap (max (length "Name") (- available branch-need))) branch-need))
-                  ((<= name-need (- available 8))
-                   (list name-need (max 8 (- available name-need))))
-                  (t
-                   (let ((nw (min name-cap
-                                  (max (length "Name")
-                                       (floor (* available
-                                                 (/ (float name-need)
-                                                    (+ name-need branch-need))))))))
-                     (list nw (max 8 (- available nw)))))))
+         (widths (let ((nw name-need) (bw branch-need))
+                   ;; Each column is sized to its own content.  Only when
+                   ;; the sum overflows do we trim, always shaving the
+                   ;; currently wider column so neither is penalized
+                   ;; for the other's length.
+                   (while (and (> (+ nw bw) available)
+                               (or (> nw (length "Name")) (> bw 8)))
+                     (if (or (and (>= nw bw) (> nw (length "Name")))
+                             (<= bw 8))
+                         (setq nw (1- nw))
+                       (setq bw (1- bw))))
+                   (list nw bw)))
          (name-width (car widths))
          (branch-width (cadr widths))
          (active (magit-dash--active-columns)))
