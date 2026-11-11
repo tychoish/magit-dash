@@ -1099,5 +1099,23 @@
           (should (equal '(20 10) cleaned-nums))
           (should (null magit-dash-gh-pr-dashboard--marked-entries)))))))
 
+(ert-deftest magit-dash-gh-pr/tracking-cache-roundtrip ()
+  (let ((magit-dash-gh-pr--tracking-cache (make-hash-table :test #'equal))
+        (pr (list :number 3 :repo "o/r" :bucket 'ready :threads-open 0
+                  :approvals 1 :failing nil :stack-parent 2 :ticket "FND-1")))
+    (let ((tr (plist-get (magit-dash-gh-pr-attach-tracking pr) :tracking)))
+      (should (eq 'new (plist-get tr :delta-type)))
+      (should (equal "ready to merge" (plist-get tr :action-summary)))
+      (should (= 2 (plist-get tr :stack-parent)))
+      (should (equal "FND-1" (plist-get tr :ticket))))
+    (should (zerop (hash-table-count magit-dash-gh-pr--tracking-cache)))
+    (magit-dash-gh-pr-commit-tracking (list pr))
+    (should (equal '(:bucket ready) (list :bucket (plist-get (gethash "o/r#3" magit-dash-gh-pr--tracking-cache) :bucket))))
+    (let ((tr (plist-get (magit-dash-gh-pr-attach-tracking
+                          (plist-put (copy-sequence pr) :bucket 'blocked))
+                         :tracking)))
+      (should (eq 'bucket-changed (plist-get tr :delta-type)))
+      (should (eq 'ready (plist-get tr :previous-bucket))))))
+
 (provide 'test-magit-dash-gh-pr)
 ;;; test-magit-dash-gh-pr.el ends here
