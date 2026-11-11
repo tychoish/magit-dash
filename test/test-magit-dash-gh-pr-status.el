@@ -58,30 +58,6 @@
 (defun magit-dash-gh-pr-status-test/without (prs number)
   (seq-remove (lambda (pr) (= number (plist-get pr :number))) prs))
 
-(defun magit-dash-gh-pr-status-test/rendered (existing prs &optional date)
-  "Return the status text rendering PRS into EXISTING."
-  (magit-dash-gh-pr-status--render
-   existing prs magit-dash-gh-pr-status-test/slug
-   magit-dash-gh-pr-status-test/required (or date "2026-11-04 Wed")))
-
-(defun magit-dash-gh-pr-status-test/task-p (text keyword number)
-  "Return non-nil when TEXT has a task heading with KEYWORD for PR NUMBER."
-  (string-match-p (format "^\\*\\* %s %d: " keyword number) text))
-
-(defun magit-dash-gh-pr-status-test/count (regexp text)
-  (with-temp-buffer (insert text) (count-matches regexp (point-min) (point-max))))
-
-(defmacro magit-dash-gh-pr-status-test/with-status-file (var &rest body)
-  "Run BODY with VAR bound to a temp status file used as the status file."
-  (declare (indent 1))
-  `(let* ((,var (make-temp-file "pr-status" nil ".org"))
-          (magit-dash-gh-pr-status-file ,var))
-     (unwind-protect (progn ,@body)
-       (when-let* ((buf (find-buffer-visiting ,var)))
-         (with-current-buffer buf (set-buffer-modified-p nil))
-         (kill-buffer buf))
-       (delete-file ,var))))
-
 (defun magit-dash-gh-pr-status-test/user (login state)
   `((state . ,state) (author . ((login . ,login) (__typename . "User")))))
 
@@ -119,21 +95,19 @@
     (should (= 2 (magit-dash-gh-pr-status--changes-requested reviews)))
     (should (= 1 (magit-dash-gh-pr-status--approvals reviews)))))
 
-(ert-deftest magit-dash-gh-pr-status/changes-requested-task-heading ()
+(ert-deftest magit-dash-gh-pr-status/changes-requested-is-threads-bucket ()
   (let* ((node `((number . 5) (title . "t") (headRefName . "b") (baseRefName . "main")
                  (reviews . ((nodes . (,(magit-dash-gh-pr-status-test/user "a" "CHANGES_REQUESTED")
                                        ,(magit-dash-gh-pr-status-test/user "b" "APPROVED")
                                        ,(magit-dash-gh-pr-status-test/user "c" "APPROVED")))))
                  (reviewThreads . ((nodes . nil)))))
-         (prs (magit-dash-gh-pr-status--parse
-               `((data . ((search . ((nodes . (,node))))))) 1))
-         (pr (car prs))
-         (text (magit-dash-gh-pr-status-test/rendered nil prs)))
+         (pr (car (magit-dash-gh-pr-status--parse
+                   `((data . ((search . ((nodes . (,node))))))) 1))))
     (should (= 1 (plist-get pr :changes-requested)))
     (should (eq 'threads (plist-get pr :bucket)))
-    (should (string-match-p "^\\*\\* TODO 5: address changes requested by 1 reviewer$" text))
-    (should (string-match-p "address threads" text))
-    (should (string-match-p "^:STEP: threads" text))))
+    (should (string-match-p "changes requested by 1 reviewer"
+                            (plist-get (plist-get (magit-dash-gh-pr-attach-tracking pr) :tracking)
+                                       :action-summary)))))
 
 (ert-deftest magit-dash-gh-pr-status/required-approvals-per-repo ()
   (let ((magit-dash-repo-list
@@ -238,188 +212,6 @@
   (should (equal "FND-1269" (magit-dash-gh-pr-status--ticket "tycho/fnd-1269-top")))
   (should (null (magit-dash-gh-pr-status--ticket "tycho/cleanup"))))
 
-;;; Rendering
-
-(ert-deftest magit-dash-gh-pr-status/render-fresh-file ()
-  (let ((text (magit-dash-gh-pr-status-test/rendered nil (magit-dash-gh-pr-status-test/prs))))
-    (should (string-match-p "^\\* Summary$" text))
-    (should (string-match-p "^| 11005 " text))
-    (should (string-match-p "needs 2 reviews" text))
-    (should (string-match-p "reviewDecision is empty for 9921, 11053, 11193" text))
-    (should (= 10 (magit-dash-gh-pr-status-test/count "^:STEP: " text)))
-    (should (string-match-p "^:PR: 11192\n:STEP: fix-ci" text))))
-
-(ert-deftest magit-dash-gh-pr-status/render-idempotent ()
-  (let* ((prs (magit-dash-gh-pr-status-test/prs))
-         (once (magit-dash-gh-pr-status-test/rendered nil prs))
-         (twice (magit-dash-gh-pr-status-test/rendered once prs)))
-    (should (equal once twice))))
-
-(ert-deftest magit-dash-gh-pr-status/render-preserves-edits ()
-  (let* ((prs (magit-dash-gh-pr-status-test/prs))
-         (once (magit-dash-gh-pr-status-test/rendered nil prs))
-         (edited (replace-regexp-in-string
-                  "\\*\\* TODO 9921: merge\\(\\(?:.\\|\n\\)*?:END:\\)"
-                  "** DONE 9921: merged by hand\\1\nMy note." once))
-         (again (magit-dash-gh-pr-status-test/rendered edited prs)))
-    (should (string-match-p "\\*\\* DONE 9921: merged by hand" again))
-    (should (string-match-p "My note\\." again))
-    (should (equal edited again))))
-
-(ert-deftest magit-dash-gh-pr-status/render-closes-vanished-pr ()
-  (let* ((prs (magit-dash-gh-pr-status-test/prs))
-         (once (magit-dash-gh-pr-status-test/rendered nil prs))
-         (again (magit-dash-gh-pr-status-test/rendered
-                 once (magit-dash-gh-pr-status-test/without prs 9921) "2026-11-05 Thu")))
-    (should (string-match-p
-             "^\\*\\* DONE 9921: merge\nCLOSED: \\[2026-11-05 Thu\\]\n:PROPERTIES:"
-             again))
-    (should-not (string-match-p "^| 9921 " again))
-    (should (magit-dash-gh-pr-status-test/task-p again "TODO" 11005))))
-
-(ert-deftest magit-dash-gh-pr-status/close-task-keywords ()
-  (let* ((prs (magit-dash-gh-pr-status-test/prs))
-         (once (magit-dash-gh-pr-status-test/rendered nil prs))
-         (rest (magit-dash-gh-pr-status-test/without prs 9921)))
-    (dolist (keyword magit-dash-gh-pr-status--open-keywords)
-      (let* ((edited (replace-regexp-in-string
-                      "^\\*\\* TODO 9921:" (format "** %s 9921:" keyword) once))
-             (again (magit-dash-gh-pr-status-test/rendered edited rest)))
-        (should (magit-dash-gh-pr-status-test/task-p again "DONE" 9921))
-        (should (string-match-p "^CLOSED: " again))))))
-
-(ert-deftest magit-dash-gh-pr-status/close-task-leaves-finished-tasks-alone ()
-  (let* ((prs (magit-dash-gh-pr-status-test/prs))
-         (once (magit-dash-gh-pr-status-test/rendered nil prs))
-         (rest (magit-dash-gh-pr-status-test/without prs 9921)))
-    (dolist (keyword '("DONE" "CANCELED"))
-      (let* ((edited (replace-regexp-in-string
-                      "^\\*\\* TODO 9921:" (format "** %s 9921:" keyword) once))
-             (again (magit-dash-gh-pr-status-test/rendered edited rest)))
-        (should (magit-dash-gh-pr-status-test/task-p again keyword 9921))
-        (should-not (string-match-p "CLOSED:" again))))))
-
-(ert-deftest magit-dash-gh-pr-status/close-task-appends-to-planning-line ()
-  (let* ((prs (magit-dash-gh-pr-status-test/prs))
-         (once (magit-dash-gh-pr-status-test/rendered nil prs))
-         (scheduled (replace-regexp-in-string
-                     "^\\(\\*\\* TODO 9921: merge\n\\)"
-                     "\\1SCHEDULED: <2026-11-10 Tue>\n" once))
-         (again (magit-dash-gh-pr-status-test/rendered
-                 scheduled (magit-dash-gh-pr-status-test/without prs 9921)
-                 "2026-11-05 Thu")))
-    (should (string-match-p
-             (concat "^\\*\\* DONE 9921: merge\n"
-                     "SCHEDULED: <2026-11-10 Tue> CLOSED: \\[2026-11-05 Thu\\]\n"
-                     ":PROPERTIES:")
-             again))
-    (should (= 1 (magit-dash-gh-pr-status-test/count "^CLOSED:\\|CLOSED: \\[" again)))
-    ;; The drawer is still attached, so the task is still found by key.
-    (should (equal again (magit-dash-gh-pr-status-test/rendered
-                          again (magit-dash-gh-pr-status-test/without prs 9921)
-                          "2026-11-05 Thu")))))
-
-(ert-deftest magit-dash-gh-pr-status/render-adds-next-step-task ()
-  (let* ((prs (magit-dash-gh-pr-status-test/prs))
-         (once (magit-dash-gh-pr-status-test/rendered nil prs))
-         (fixed (magit-dash-gh-pr-status-test/replace-pr prs 11006 :failing nil))
-         (again (magit-dash-gh-pr-status-test/rendered once fixed)))
-    ;; The earlier fix-CI task is left alone; the new next step is added.
-    (should (= 2 (magit-dash-gh-pr-status-test/count "^:PR: 11006$" again)))
-    (should (string-match-p "^\\*\\* TODO 11006: fix koalaty" again))
-    (should (string-match-p "^\\*\\* TODO 11006: get 1 more approval" again))
-    (should (string-match-p "^:PR: 11006\n:STEP: reviews" again))))
-
-(ert-deftest magit-dash-gh-pr-status/render-archives-handwritten-file ()
-  (let* ((legacy "#+title: Old\n#+filetags: :agent:\n\n* Current snapshot\n** Needs fixing\n*** TODO 1: x\n")
-         (text (magit-dash-gh-pr-status-test/rendered legacy (magit-dash-gh-pr-status-test/prs))))
-    (should (string-match-p "^\\* Archive$" text))
-    (should (string-match-p "^\\*\\*\\* Current snapshot$" text))
-    (should (string-match-p "^\\*\\*\\*\\*\\* TODO 1: x$" text))
-    (should-not (string-match-p "^#\\+title: Old" text))
-    ;; Archived TODOs are not generated tasks and are never touched.
-    (should (equal text (magit-dash-gh-pr-status-test/rendered
-                         text (magit-dash-gh-pr-status-test/prs))))))
-
-(ert-deftest magit-dash-gh-pr-status/archive-with-only-keyword-lines ()
-  (dolist (text '("#+title: Old\n#+filetags: :agent:\n" "#+title: Old\n#+filetags: :agent:"))
-    (let ((archived (magit-dash-gh-pr-status--archive text "2026-11-04")))
-      (should (equal (concat "\n* Archive\n"
-                             "** Hand-written file before automation (archived 2026-11-04)\n")
-                     archived)))
-    (should (magit-dash-gh-pr-status--legacy-p text))
-    (should (string-match-p "^\\* Archive$"
-                            (magit-dash-gh-pr-status-test/rendered
-                             text (magit-dash-gh-pr-status-test/prs))))))
-
-(ert-deftest magit-dash-gh-pr-status/legacy-file-with-tasks-heading-is-kept ()
-  (let* ((existing "#+title: Mine\n\n* Tasks\n** TODO my own thing\n")
-         (text (magit-dash-gh-pr-status-test/rendered
-                existing (magit-dash-gh-pr-status-test/prs))))
-    (should-not (magit-dash-gh-pr-status--legacy-p existing))
-    (should-not (string-match-p "^\\* Archive" text))
-    (should (= 1 (magit-dash-gh-pr-status-test/count "^\\* Tasks" text)))
-    (should (string-match-p "^\\*\\* TODO my own thing$" text))
-    (should (= 10 (magit-dash-gh-pr-status-test/count "^:STEP: " text)))
-    (should (equal text (magit-dash-gh-pr-status-test/rendered
-                         text (magit-dash-gh-pr-status-test/prs))))))
-
-(ert-deftest magit-dash-gh-pr-status/render-no-prs ()
-  (let ((text (magit-dash-gh-pr-status-test/rendered nil nil)))
-    (should (string-match-p "No open PRs\\." text))))
-
-(ert-deftest magit-dash-gh-pr-status/decorated-tasks-heading-is-not-legacy ()
-  (let* ((prs (magit-dash-gh-pr-status-test/prs))
-         (once (magit-dash-gh-pr-status-test/rendered nil prs))
-         (tagged (replace-regexp-in-string "^\\* Tasks$" "* Tasks :agenda:" once)))
-    (should (equal tagged (magit-dash-gh-pr-status-test/rendered tagged prs)))))
-
-(ert-deftest magit-dash-gh-pr-status/decorated-summary-heading-is-replaced ()
-  (let* ((prs (magit-dash-gh-pr-status-test/prs))
-         (once (magit-dash-gh-pr-status-test/rendered nil prs))
-         (tagged (replace-regexp-in-string "^\\* Summary$" "* Summary :auto: (daily)" once))
-         (again (magit-dash-gh-pr-status-test/rendered tagged prs)))
-    (should (= 1 (magit-dash-gh-pr-status-test/count "^\\* Summary" again)))
-    (should (string-match-p "^\\* Summary :auto: (daily)$" again))
-    (should (equal tagged again))))
-
-(ert-deftest magit-dash-gh-pr-status/full-page-does-not-close-tasks ()
-  (let* ((prs (magit-dash-gh-pr-status-test/prs))
-         (once (magit-dash-gh-pr-status-test/rendered nil prs))
-         (magit-dash-gh-pr-status-max-prs 9)
-         (again (magit-dash-gh-pr-status-test/rendered
-                 once (magit-dash-gh-pr-status-test/without prs 9921))))
-    (should (magit-dash-gh-pr-status-test/task-p again "TODO" 9921))
-    (should-not (string-match-p "^CLOSED:" again))))
-
-(ert-deftest magit-dash-gh-pr-status/empty-result-does-not-close-tasks ()
-  (let* ((once (magit-dash-gh-pr-status-test/rendered
-                nil (magit-dash-gh-pr-status-test/prs)))
-         (again (magit-dash-gh-pr-status-test/rendered once nil "2026-11-05 Thu")))
-    (should (string-match-p "No open PRs\\." again))
-    (should (= 10 (magit-dash-gh-pr-status-test/count "^\\*\\* TODO " again)))
-    (should-not (string-match-p "CLOSED:" again))))
-
-(ert-deftest magit-dash-gh-pr-status/other-repo-tasks-are-not-closed ()
-  (let* ((prs (magit-dash-gh-pr-status-test/prs))
-         (once (magit-dash-gh-pr-status--render nil prs "other/repo" 2 "2026-11-04 Wed"))
-         (again (magit-dash-gh-pr-status-test/rendered once (list (car prs)))))
-    (should-not (string-match-p "^CLOSED:" again))))
-
-(ert-deftest magit-dash-gh-pr-status/untrusted-text-is-escaped ()
-  (let* ((prs (magit-dash-gh-pr-status-test/replace-pr
-               (magit-dash-gh-pr-status-test/prs) 9921
-               :title "* pwn\n* second" :failing '(("a|b" . "https://x/y"))))
-         (text (magit-dash-gh-pr-status-test/rendered nil prs)))
-    (should-not (string-match-p "^\\* pwn" text))
-    (should-not (string-match-p "^\\* second" text))
-    (should (string-match-p "^- \\* pwn \\* second$" text))
-    (should (string-match-p "a\\\\vert{}b" text))
-    (should-not (string-match-p "| *a|b" text))
-    ;; The table keeps its seven columns on the 9921 row.
-    (should (string-match-p "^| 9921 [^\n]*a\\\\vert{}b[^\n]* |$" text))
-    (should (= 10 (magit-dash-gh-pr-status-test/count "^\\*\\* " text)))))
-
 (ert-deftest magit-dash-gh-pr-status/pending-statuscontext-and-no-rollup ()
   (let* ((node '((number . 1) (title . "t") (headRefName . "b") (baseRefName . "main")
                  (commits . ((nodes . (((commit . ((statusCheckRollup . nil))))))))
@@ -474,57 +266,10 @@
   (dolist (slug '("o/r" "casaphq/go-monorepo" "o/.github" "o/a.b_c-d"))
     (magit-dash-gh-pr-status--check-slug slug)))
 
-(ert-deftest magit-dash-gh-pr-status/run-rejects-bad-slug-before-collecting ()
-  (magit-dash-gh-pr-status-test/with-status-file file
-    (cl-letf (((symbol-function 'magit-dash-gh-pr-status--collect)
-               (lambda (&rest _) (ert-fail "collect called"))))
-      (should-error (magit-dash-gh-pr-status-run "/tmp/path" "/tmp") :type 'user-error))))
-
-;;; Files
-
-(ert-deftest magit-dash-gh-pr-status/refuses-unsaved-buffer ()
-  (magit-dash-gh-pr-status-test/with-status-file file
-    (with-current-buffer (find-file-noselect file)
-      (insert "dirty")
-      (should-error (magit-dash-gh-pr-status--check-unsaved) :type 'user-error))))
-
-(ert-deftest magit-dash-gh-pr-status/write-rechecks-unsaved-buffer ()
-  (magit-dash-gh-pr-status-test/with-status-file file
-    (with-current-buffer (find-file-noselect file)
-      (insert "dirty")
-      (should-error (magit-dash-gh-pr-status--write "new text") :type 'user-error)
-      (should (equal "" (with-temp-buffer (insert-file-contents file) (buffer-string)))))))
-
-(ert-deftest magit-dash-gh-pr-status/write-is-atomic-and-leaves-no-temp-files ()
-  (magit-dash-gh-pr-status-test/with-status-file file
-    (let (renamed)
-      (cl-letf* ((orig (symbol-function 'rename-file))
-                 ((symbol-function 'rename-file)
-                  (lambda (from to ok)
-                    (setq renamed (list from to ok))
-                    (should (equal (file-name-directory from) (file-name-directory to)))
-                    (should (equal "new text"
-                                   (with-temp-buffer (insert-file-contents from)
-                                                     (buffer-string))))
-                    (funcall orig from to ok))))
-        (magit-dash-gh-pr-status--write "new text"))
-      (should (equal file (cadr renamed)))
-      (should (eq t (nth 2 renamed)))
-      (should-not (file-exists-p (car renamed)))
-      (should (equal "new text" (with-temp-buffer (insert-file-contents file)
-                                                  (buffer-string)))))))
-
-(ert-deftest magit-dash-gh-pr-status/run-writes-file-and-reverts-buffer ()
-  (magit-dash-gh-pr-status-test/with-status-file file
-    (let ((prs (magit-dash-gh-pr-status-test/prs)))
-      (cl-letf (((symbol-function 'magit-dash-gh-pr-status--collect)
-                 (lambda (_slug _dir _required) prs)))
-        (let ((buf (find-file-noselect file)))
-          (let ((res (magit-dash-gh-pr-status-run "casaphq/go-monorepo" "/tmp")))
-            (should (= 10 (length (plist-get res :prs))))
-            (with-current-buffer buf
-              (should (string-match-p "^| 11005 " (buffer-string)))
-              (should-not (buffer-modified-p)))))))))
+(ert-deftest magit-dash-gh-pr-status/collect-rejects-bad-slug-before-fetching ()
+  (cl-letf (((symbol-function 'magit-dash-gh-pr-status--fetch-search)
+             (lambda (&rest _) (ert-fail "fetched"))))
+    (should-error (magit-dash-gh-pr-status-collect "/tmp/path" "/tmp") :type 'user-error)))
 
 (ert-deftest magit-dash-gh-pr-status/registered-checkout-override ()
   (let ((magit-dash-repo-list nil)
@@ -545,19 +290,253 @@
                   "{\"data\":{\"search\":{\"nodes\":[{\"number\":1,\"reviewThreads\":{\"pageInfo\":{\"hasNextPage\":true}}}]}}}"))
     (should-error (magit-dash-gh-pr-status-test/fetch-with 0 json) :type 'user-error)))
 
-(ert-deftest magit-dash-gh-pr-status/write-preserves-mode-and-symlink ()
-  (magit-dash-gh-pr-status-test/with-status-file file
-    (let ((link (concat file "-link")))
-      (unwind-protect
-          (progn
-            (set-file-modes file #o644)
-            (make-symbolic-link file link)
-            (let ((magit-dash-gh-pr-status-file link))
-              (magit-dash-gh-pr-status--write "updated"))
-            (should (file-symlink-p link))
-            (should (= #o644 (file-modes file)))
-            (should (equal "updated" (with-temp-buffer (insert-file-contents file) (buffer-string)))))
-        (when (file-exists-p link) (delete-file link))))))
+;;; Multi-repo collection and tracking
+
+(defun magit-dash-gh-pr-status-test/node (repo number &rest extra)
+  "Return a minimal GraphQL PR node for REPO and NUMBER, with EXTRA alist entries."
+  `(,@extra
+    (number . ,number) (title . "t") (headRefName . ,(format "b%d" number))
+    (baseRefName . "main") (mergeStateStatus . "CLEAN")
+    (repository . ((nameWithOwner . ,repo)))
+    (reviews . ((nodes . nil)))
+    (reviewThreads . ((nodes . nil)))))
+
+(defun magit-dash-gh-pr-status-test/search (&rest nodes)
+  `((data . ((search . ((nodes . ,nodes)))))))
+
+(defun magit-dash-gh-pr-status-test/approved-by (&rest logins)
+  `(reviews . ((nodes . ,(mapcar (lambda (l) (magit-dash-gh-pr-status-test/user l "APPROVED"))
+                                 logins)))))
+
+(ert-deftest magit-dash-gh-pr-status/query-includes-repository ()
+  (should (string-match-p "repository{ nameWithOwner }" (magit-dash-gh-pr-status--query))))
+
+(ert-deftest magit-dash-gh-pr-status/node-has-repo ()
+  (let ((pr (magit-dash-gh-pr-status--node-to-pr
+             (magit-dash-gh-pr-status-test/node "o/r" 1))))
+    (should (equal "o/r" (plist-get pr :repo)))))
+
+(ert-deftest magit-dash-gh-pr-status/collect-all-multi-repo ()
+  (let ((magit-dash-repo-list
+         (list (magit-dash-repo--make :name "a" :path "/tmp/a" :repo "o/a"
+                                      :pr '(:required-approvals 2))))
+        (magit-dash-gh-pr-status-required-approvals 1)
+        (seen nil))
+    (cl-letf (((symbol-function 'magit-dash-gh--call-process)
+               (lambda (args _dir)
+                 (setq seen args)
+                 (cons 0 (json-encode
+                          (magit-dash-gh-pr-status-test/search
+                           (magit-dash-gh-pr-status-test/node
+                            "o/b" 4 (magit-dash-gh-pr-status-test/approved-by "x"))
+                           (magit-dash-gh-pr-status-test/node
+                            "o/a" 9 (magit-dash-gh-pr-status-test/approved-by "x"))))))))
+      (let ((prs (magit-dash-gh-pr-status-collect-all "/tmp")))
+        (should (cl-some (lambda (a) (string-match-p "is:pr is:open author:@me\\'" a)) seen))
+        (should-not (cl-some (lambda (a) (string-match-p "repo:" a)) seen))
+        (should (equal '("o/b" "o/a") (mapcar (lambda (p) (plist-get p :repo)) prs)))
+        ;; o/a requires 2 approvals, o/b falls back to 1.
+        (should (eq 'ready (plist-get (nth 0 prs) :bucket)))
+        (should (eq 'reviews (plist-get (nth 1 prs) :bucket)))))))
+
+(ert-deftest magit-dash-gh-pr-status/collect-single-repo-sets-repo ()
+  (cl-letf (((symbol-function 'magit-dash-gh-pr-status--fetch)
+             (lambda (_s _d)
+               (magit-dash-gh-pr-status-test/search
+                (let ((n (magit-dash-gh-pr-status-test/node "x/y" 3)))
+                  (assq-delete-all 'repository n))))))
+    (should (equal "o/r" (plist-get (car (magit-dash-gh-pr-status-collect "o/r" "/tmp"))
+                                    :repo)))))
+
+(ert-deftest magit-dash-gh-pr-status/collect-is-pure-and-failure-preserves-cache ()
+  (let ((magit-dash-gh-pr--tracking-cache (make-hash-table :test #'equal)))
+    (puthash "o/r#1" '(:bucket ready) magit-dash-gh-pr--tracking-cache)
+    (cl-letf (((symbol-function 'magit-dash-gh--call-process)
+               (lambda (_a _d) (cons 1 "network down"))))
+      (should-error (magit-dash-gh-pr-status-collect-all "/tmp") :type 'user-error))
+    (should (= 1 (hash-table-count magit-dash-gh-pr--tracking-cache)))
+    (cl-letf (((symbol-function 'magit-dash-gh--call-process)
+               (lambda (_a _d)
+                 (cons 0 (json-encode (magit-dash-gh-pr-status-test/search
+                                       (magit-dash-gh-pr-status-test/node "o/r" 2)))))))
+      (let ((prs (magit-dash-gh-pr-status-collect-all "/tmp")))
+        (should-not (plist-member (car prs) :tracking))
+        (should (= 1 (hash-table-count magit-dash-gh-pr--tracking-cache)))))))
+
+(defmacro magit-dash-gh-pr-status-test/with-clean-cache (&rest body)
+  (declare (indent 0))
+  `(let ((magit-dash-gh-pr--tracking-cache (make-hash-table :test #'equal)))
+     ,@body))
+
+(defun magit-dash-gh-pr-status-test/tracking (pr)
+  (plist-get (magit-dash-gh-pr-attach-tracking pr) :tracking))
+
+(ert-deftest magit-dash-gh-pr-status/tracking-new-then-unchanged ()
+  (magit-dash-gh-pr-status-test/with-clean-cache
+    (let ((pr (magit-dash-gh-pr-status-test/pr 11006)))
+      (let ((tr (magit-dash-gh-pr-status-test/tracking pr)))
+        (should (eq 'new (plist-get tr :delta-type)))
+        (should (null (plist-get tr :previous-bucket)))
+        (should (string-match-p "\\`\\[[0-9-]+ [A-Za-z]+ [0-9:]+\\]\\'" (plist-get tr :last-seen)))
+        (should (equal "fix failing CI: koalaty" (plist-get tr :action-summary)))
+        (should (equal '("koalaty") (plist-get tr :failing-checks))))
+      ;; Attaching alone does not commit.
+      (should (eq 'new (plist-get (magit-dash-gh-pr-status-test/tracking pr) :delta-type)))
+      (should-not (plist-member pr :tracking))
+      (magit-dash-gh-pr-commit-tracking (list pr))
+      (should (eq 'unchanged (plist-get (magit-dash-gh-pr-status-test/tracking pr) :delta-type))))))
+
+(ert-deftest magit-dash-gh-pr-status/tracking-deltas ()
+  (magit-dash-gh-pr-status-test/with-clean-cache
+    (let* ((base (list :number 1 :repo "o/r" :bucket 'threads :threads-open 2
+                       :approvals 0 :failing nil :required 1 :changes-requested 0))
+           (delta (lambda (&rest props)
+                    (let ((pr (copy-sequence base)))
+                      (while props (setq pr (plist-put pr (pop props) (pop props))))
+                      (plist-get (magit-dash-gh-pr-status-test/tracking pr) :delta-type)))))
+      (magit-dash-gh-pr-commit-tracking (list base))
+      (should (eq 'unchanged (funcall delta)))
+      (should (eq 'threads-changed (funcall delta :threads-open 1)))
+      (should (eq 'bucket-changed (funcall delta :bucket 'reviews :threads-open 0)))
+      (should (eq 'ci-changed (funcall delta :failing '(("a" . "u")))))
+      (should (equal "address 2 open review threads"
+                     (plist-get (magit-dash-gh-pr-status-test/tracking base) :action-summary)))
+      (should (equal "address 1 open review thread"
+                     (plist-get (magit-dash-gh-pr-status-test/tracking
+                                 (plist-put (copy-sequence base) :threads-open 1))
+                                :action-summary)))
+      (should (equal "threads"
+                     (symbol-name (plist-get (magit-dash-gh-pr-status-test/tracking
+                                              (plist-put (copy-sequence base) :bucket 'reviews))
+                                             :previous-bucket)))))))
+
+(ert-deftest magit-dash-gh-pr-status/tracking-action-summaries ()
+  (magit-dash-gh-pr-status-test/with-clean-cache
+    (let ((pr (list :number 1 :repo "o/r" :threads-open 0 :approvals 0 :required 1)))
+      (dolist (case '((reviews . "needs 1 review") (blocked . "check merge blockers")
+                      (ready . "ready to merge")))
+        (should (equal (cdr case)
+                       (plist-get (magit-dash-gh-pr-status-test/tracking
+                                   (plist-put (copy-sequence pr) :bucket (car case)))
+                                  :action-summary)))))))
+
+(ert-deftest magit-dash-gh-pr-status/tracking-fingerprint ()
+  (let* ((prs (magit-dash-gh-pr-status-test/prs))
+         (fp (magit-dash-gh-pr-tracking-fingerprint prs)))
+    (should (stringp fp))
+    (should (= 32 (length fp)))
+    (should (equal fp (magit-dash-gh-pr-tracking-fingerprint (reverse prs))))
+    ;; Non-volatile fields do not matter.
+    (should (equal fp (magit-dash-gh-pr-tracking-fingerprint
+                       (mapcar (lambda (p) (plist-put (copy-sequence p) :title "other")) prs))))
+    (dolist (change '((:threads-open . 99) (:approvals . 9) (:bucket . blocked)
+                      (:state . "MERGED") (:failing . (("z" . "u"))) (:repo . "o/z")))
+      (should-not (equal fp (magit-dash-gh-pr-tracking-fingerprint
+                             (cons (plist-put (copy-sequence (car prs)) (car change) (cdr change))
+                                   (cdr prs))))))))
+
+;;; End-to-end mock GraphQL
+
+(defun magit-dash-gh-pr-status-test/e2e-response (a1-threads a2-fail)
+  "Mock GraphQL response: o/a#1 (A1-THREADS unresolved threads), o/a#2, o/b#7.
+When A2-FAIL, o/a#2 has a failing check run."
+  (let* ((threads (lambda (n)
+                    `(reviewThreads . ((nodes . ,(cl-loop repeat n collect
+                                                          '((isResolved . :false) (isOutdated . :false))))))))
+         (checks (lambda (conclusion)
+                   `(commits . ((nodes . (((commit . ((statusCheckRollup .
+                                   ((contexts . ((nodes . (((__typename . "CheckRun") (name . "lint")
+                                                            (conclusion . ,conclusion) (status . "COMPLETED")
+                                                            (detailsUrl . "http://ci/lint"))))))))))))))))))
+    (magit-dash-gh-pr-status-test/search
+     (magit-dash-gh-pr-status-test/node "o/a" 1 (funcall threads a1-threads))
+     (magit-dash-gh-pr-status-test/node "o/a" 2 (funcall checks (if a2-fail "FAILURE" "SUCCESS")))
+     (magit-dash-gh-pr-status-test/node "o/b" 7 (magit-dash-gh-pr-status-test/approved-by "x")))))
+
+(defun magit-dash-gh-pr-status-test/e2e-cycle ()
+  "Collect, attach tracking to every PR, commit, and return the attached PRs."
+  (let ((prs (magit-dash-gh-pr-status-collect-all "/tmp")))
+    (prog1 (mapcar #'magit-dash-gh-pr-attach-tracking prs)
+      (magit-dash-gh-pr-commit-tracking prs))))
+
+(defun magit-dash-gh-pr-status-test/delta (prs repo number)
+  (plist-get (plist-get (cl-find-if (lambda (p) (and (equal repo (plist-get p :repo))
+                                                     (= number (plist-get p :number))))
+                                    prs)
+                        :tracking)
+             :delta-type))
+
+(ert-deftest magit-dash-gh-pr-status/e2e-collect-attach-commit-recollect ()
+  (magit-dash-gh-pr-status-test/with-clean-cache
+    (let ((magit-dash-repo-list nil)
+          (magit-dash-gh-pr-status-required-approvals 1)
+          (resp (magit-dash-gh-pr-status-test/e2e-response 2 t)))
+      (cl-letf (((symbol-function 'magit-dash-gh--call-process)
+                 (lambda (_a _d) (cons 0 (json-encode resp)))))
+        (let ((first (magit-dash-gh-pr-status-test/e2e-cycle)))
+          (should (equal '(threads fix-ci ready) (mapcar (lambda (p) (plist-get p :bucket)) first)))
+          (should (equal '("lint") (mapcar #'car (plist-get (nth 1 first) :failing))))
+          (should (= 2 (plist-get (nth 0 first) :threads-open)))
+          (dolist (p first) (should (eq 'new (plist-get (plist-get p :tracking) :delta-type))))
+          ;; Same data: all unchanged.
+          (let ((second (magit-dash-gh-pr-status-test/e2e-cycle)))
+            (dolist (p second) (should (eq 'unchanged (plist-get (plist-get p :tracking) :delta-type))))
+            ;; o/a#1 resolves its threads (threads -> reviews), o/a#2 CI goes green.
+            (setq resp (magit-dash-gh-pr-status-test/e2e-response 0 nil))
+            (let ((third (magit-dash-gh-pr-status-test/e2e-cycle)))
+              (should (eq 'bucket-changed (magit-dash-gh-pr-status-test/delta third "o/a" 1)))
+              (should (eq 'bucket-changed (magit-dash-gh-pr-status-test/delta third "o/a" 2)))
+              (should (eq 'unchanged (magit-dash-gh-pr-status-test/delta third "o/b" 7)))
+              (should (eq 'threads (plist-get (plist-get (nth 0 third) :tracking) :previous-bucket))))))))))
+
+(ert-deftest magit-dash-gh-pr-status/e2e-same-number-different-repo-tracked-separately ()
+  (magit-dash-gh-pr-status-test/with-clean-cache
+    (let ((magit-dash-repo-list nil))
+      (cl-letf (((symbol-function 'magit-dash-gh--call-process)
+                 (lambda (_a _d)
+                   (cons 0 (json-encode (magit-dash-gh-pr-status-test/search
+                                         (magit-dash-gh-pr-status-test/node "o/a" 5)))))))
+        (magit-dash-gh-pr-status-test/e2e-cycle))
+      (cl-letf (((symbol-function 'magit-dash-gh--call-process)
+                 (lambda (_a _d)
+                   (cons 0 (json-encode (magit-dash-gh-pr-status-test/search
+                                         (magit-dash-gh-pr-status-test/node "o/b" 5)))))))
+        (should (eq 'new (magit-dash-gh-pr-status-test/delta
+                          (mapcar #'magit-dash-gh-pr-attach-tracking
+                                  (magit-dash-gh-pr-status-collect-all "/tmp"))
+                          "o/b" 5)))))))
+
+(defconst magit-dash-gh-pr-status-test/root
+  (file-name-directory (directory-file-name
+                        (file-name-directory (or load-file-name buffer-file-name)))))
+
+(defun magit-dash-gh-pr-status-test/emacs-eval (form)
+  "Run FORM in a fresh `emacs -Q --batch' with this tree on the load path; return stdout."
+  (let* ((root magit-dash-gh-pr-status-test/root)
+         (args (append '("-Q" "--batch" "-L") (list root)
+                       (cl-loop for p in load-path
+                                unless (equal p root) append (list "-L" p))
+                       (list "--eval" (prin1-to-string form)))))
+    (with-temp-buffer
+      (apply #'call-process (expand-file-name invocation-name invocation-directory)
+             nil t nil args)
+      (buffer-string))))
+
+(ert-deftest magit-dash-gh-pr-status/does-not-load-org-or-render ()
+  (let* ((root magit-dash-gh-pr-status-test/root)
+         (src (expand-file-name "magit-dash-gh-pr-status.el" root)))
+    ;; Source never requires org.
+    (with-temp-buffer
+      (insert-file-contents src)
+      (should-not (re-search-forward "(require 'org\\b" nil t)))
+    (let ((out (magit-dash-gh-pr-status-test/emacs-eval
+                '(progn (require 'magit-dash-gh-pr-status)
+                        (princ (format "RESULT org=%s render=%s"
+                                       (featurep 'org)
+                                       (and (apropos-internal "\\`magit-dash-gh-pr-status--render") t)))))))
+      (should (string-match "RESULT org=\\([a-z]+\\) render=\\([a-z]+\\)" out))
+      (should (equal "nil" (match-string 2 out)))
+      (should (equal "nil" (match-string 1 out))))))
 
 (provide 'test-magit-dash-gh-pr-status)
 ;;; test-magit-dash-gh-pr-status.el ends here
