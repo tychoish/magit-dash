@@ -1917,13 +1917,60 @@ Name and Branch widths are computed dynamically in `magit-dash--build-format'.")
   (magit-dash-refresh))
 
 (defvar magit-dash-show-discovered-submodules nil
-  "When non-nil, auto-discovered submodules appear below their parent.")
+  "When non-nil, auto-discovered submodules appear below their parent.
+Individual repositories may override this; see
+`magit-dash-submodule-visibility'.")
 
-(defun magit-dash-toggle-discovered-submodules ()
-  "Toggle visibility of discovered submodules in the dashboard and refresh."
+(defvar magit-dash-submodule-visibility nil
+  "Alist of (REPO-PATH . SHOW-P) overriding submodule visibility per repo.
+A present entry wins over `magit-dash-show-discovered-submodules'.
+Persisted across sessions via `savehist-additional-variables'.")
+
+(defun magit-dash--submodules-visible-p (repo)
+  "Return non-nil when discovered submodules of REPO should be displayed."
+  (if-let* ((entry (assoc (magit-dash-repo-path repo)
+                          magit-dash-submodule-visibility)))
+      (cdr entry)
+    magit-dash-show-discovered-submodules))
+
+(defun magit-dash--target-repos (&optional all)
+  "Return repos a bulk or per-repo command should act on.
+Marked repos win; with ALL (e.g. a prefix argument) every visible repo
+is used; otherwise just the repo at point."
+  (cond
+   (magit-dash--marked-paths (magit-dash--effective-repos))
+   (all (magit-dash--all-repos))
+   (t (list (magit-dash--repo-at-point)))))
+
+(defun magit-dash-toggle-discovered-submodules (&optional all)
+  "Toggle submodule visibility for the repo at point, or marked repos.
+With prefix argument ALL (and no marks) toggle every visible repo.
+Without a repo at point (or outside the dashboard) flip the global default
+and clear all per-repo overrides."
+  (interactive "P")
+  (if (not (or magit-dash--marked-paths all (ignore-errors (magit-dash--repo-at-point))))
+      (progn
+        (setq magit-dash-show-discovered-submodules
+              (not magit-dash-show-discovered-submodules)
+              magit-dash-submodule-visibility nil)
+        (message "Submodules: %s (global)"
+                 (if magit-dash-show-discovered-submodules "shown" "hidden")))
+    (let* ((repos (magit-dash--target-repos all))
+           (new (not (magit-dash--submodules-visible-p (car repos)))))
+      (dolist (repo repos)
+        (setf (alist-get (magit-dash-repo-path repo)
+                         magit-dash-submodule-visibility nil nil #'equal)
+              new))
+      (message "Submodules %s for %d repo(s)"
+               (if new "shown" "hidden") (length repos))))
+  (magit-dash-refresh))
+
+(defun magit-dash-toggle-all-discovered-submodules ()
+  "Flip the global submodule default and clear all per-repo overrides."
   (interactive)
   (setq magit-dash-show-discovered-submodules
-        (not magit-dash-show-discovered-submodules))
+        (not magit-dash-show-discovered-submodules)
+        magit-dash-submodule-visibility nil)
   (magit-dash-refresh))
 
 (defvar magit-dash-show-discovered-worktrees t
@@ -2215,6 +2262,7 @@ together they exceed the available window space is the wider one trimmed."
     (keymap-set m "t a" #'magit-dash-add-tag)
     (keymap-set m "t c" #'magit-dash-toggle-column)
     (keymap-set m "t s" #'magit-dash-toggle-discovered-submodules)
+    (keymap-set m "t S" #'magit-dash-toggle-all-discovered-submodules)
     (keymap-set m "t w" #'magit-dash-toggle-discovered-worktrees)
 
     ;; Hide prefix: h (preserved as-is)
@@ -2502,7 +2550,7 @@ registered entry is shown instead."
                   (cons repo
                         (append (when magit-dash-show-discovered-worktrees
                                   (magit-dash-gh--cache-get (magit-dash-repo-path repo) :worktrees))
-                                (when magit-dash-show-discovered-submodules
+                                (when (magit-dash--submodules-visible-p repo)
                                   (seq-remove
                                    (lambda (sm)
                                      (gethash (magit-dash-repo-path sm) registered-paths))
@@ -4152,7 +4200,8 @@ Indicates whether batch operations target all repos or marked repos."
      magit-dash-toggle-branch-basename
      :transient t)
     ("tc"  "Toggle column"   magit-dash-toggle-column)
-    ("ts"  "Toggle submodules" magit-dash-toggle-discovered-submodules)
+    ("ts"  "Toggle submodules (repo/marked, C-u all)" magit-dash-toggle-discovered-submodules)
+    ("tS"  "Toggle submodules (global default)" magit-dash-toggle-all-discovered-submodules)
     ("gg"  "Refresh"         magit-dash-refresh)
     ("q"   "Quit"            magit-dash-quit-window)]])
 

@@ -17,6 +17,8 @@
 
 (defvar savehist-additional-variables)
 (defvar magit-dash-columns)
+(defvar magit-dash-submodule-visibility)
+(defvar magit-dash-show-discovered-submodules)
 (defvar magit-dash-gh-pr-columns)
 (defvar which-key-mode)
 (defvar which-key-replacement-alist)
@@ -103,6 +105,8 @@ Sets up keybindings, savehist variables, and hooks while leaving the main
         (add-hook 'which-key-mode-hook #'magit-dash--which-key-register-replacements)
         (when (boundp 'savehist-additional-variables)
           (add-to-list 'savehist-additional-variables 'magit-dash-columns)
+          (add-to-list 'savehist-additional-variables 'magit-dash-submodule-visibility)
+          (add-to-list 'savehist-additional-variables 'magit-dash-show-discovered-submodules)
           (add-to-list 'savehist-additional-variables 'magit-dash-gh-pr-columns)))
     (remove-hook 'magit-mode-hook #'magit-dash-global--setup-magit)
     (magit-dash-global--teardown-magit)
