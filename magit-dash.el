@@ -615,6 +615,44 @@ Keyword arguments:
   (when (and timer (fboundp 'magit-dash-register-sync-timer))
     (apply #'magit-dash-register-sync-timer :name name :repos (list name) timer)))
 
+;;;; Batch registration
+
+(defun magit-dash--normalize-registration-spec (spec)
+  "Return a `magit-dash-register' keyword plist for batch registration SPEC.
+SPEC may be:
+  PATH                    name defaults to the directory's basename
+  (NAME PATH)             name and path
+  (NAME PATH UPSTREAM)    name, path and upstream repository
+  (:name N :path P ...)   a full plist, used as-is."
+  (pcase spec
+    ((pred stringp)
+     (list :name (file-name-nondirectory (directory-file-name spec))
+           :path spec))
+    (`(,(and (pred keywordp)) . ,_) (copy-sequence spec))
+    (`(,(and name (pred stringp)) ,(and path (pred stringp)))
+     (list :name name :path path))
+    (`(,(and name (pred stringp)) ,(and path (pred stringp)) ,upstream)
+     (list :name name :path path :repo upstream))
+    (_ (user-error "Magit-dash: invalid registration spec: %S" spec))))
+
+(defun magit-dash-register-many (specs &rest config)
+  "Register every repository in SPECS, applying CONFIG to each.
+SPECS is a list of forms accepted by
+`magit-dash--normalize-registration-spec'.  CONFIG is a keyword plist of
+`magit-dash-register' options shared by all repositories; keys given in an
+individual plist spec override CONFIG.  All specs are validated before any
+is registered.  Returns the list of registered names."
+  (let ((plists (seq-map (lambda (spec)
+                           (let ((own (magit-dash--normalize-registration-spec spec)))
+                             (append own config)))
+                         specs)))
+    (dolist (pl plists)
+      (unless (and (plist-get pl :name) (plist-get pl :path))
+        (user-error "Magit-dash: registration needs name and path: %S" pl)))
+    (dolist (pl plists)
+      (apply #'magit-dash-register pl))
+    (seq-map (lambda (pl) (plist-get pl :name)) plists)))
+
 ;;;; Registry helpers
 
 (defvar magit-dash-sync-trigger 'interactive
