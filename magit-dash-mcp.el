@@ -372,24 +372,71 @@
 
 ;;;; Tool 5: magit_dash_pr_status
 
+(defun magit-dash-mcp--json-value (value)
+  "Return VALUE converted for JSON: symbols to strings, nil to `:null'."
+  (cond ((null value) :null)
+        ((eq value t) t)
+        ((keywordp value) (substring (symbol-name value) 1))
+        ((symbolp value) (symbol-name value))
+        (t value)))
+
+(defun magit-dash-mcp--pr-json (pr)
+  "Return PR (a plist with `:tracking') as a JSON-serializable plist."
+  (let ((tr (plist-get pr :tracking)))
+    (list :number (plist-get pr :number)
+          :repo (magit-dash-mcp--json-value (plist-get pr :repo))
+          :title (magit-dash-mcp--json-value (plist-get pr :title))
+          :url (magit-dash-mcp--json-value (plist-get pr :url))
+          :branch (magit-dash-mcp--json-value (plist-get pr :branch))
+          :base (magit-dash-mcp--json-value (plist-get pr :base))
+          :state (magit-dash-mcp--json-value (plist-get pr :state))
+          :draft (if (plist-get pr :draft) t :false)
+          :bucket (magit-dash-mcp--json-value (plist-get pr :bucket))
+          :approvals (or (plist-get pr :approvals) 0)
+          :changes_requested (or (plist-get pr :changes-requested) 0)
+          :requested (vconcat (plist-get pr :requested))
+          :ci (magit-dash-mcp--json-value (plist-get pr :ci))
+          :failing (vconcat (mapcar (lambda (f) (if (consp f) (car f) f))
+                                    (plist-get pr :failing)))
+          :threads_open (or (plist-get pr :threads-open) 0)
+          :threads_outdated (or (plist-get pr :threads-outdated) 0)
+          :ticket (magit-dash-mcp--json-value (plist-get pr :ticket))
+          :tracking
+          (list :last_seen (magit-dash-mcp--json-value (plist-get tr :last-seen))
+                :previous_bucket (magit-dash-mcp--json-value (plist-get tr :previous-bucket))
+                :delta_type (magit-dash-mcp--json-value (plist-get tr :delta-type))
+                :delta_reason (magit-dash-mcp--json-value (plist-get tr :delta-reason))
+                :action_summary (magit-dash-mcp--json-value (plist-get tr :action-summary))
+                :failing_checks (vconcat (plist-get tr :failing-checks))
+                :threads_open (or (plist-get tr :threads-open) 0)
+                :approvals (or (plist-get tr :approvals) 0)
+                :stack_parent (magit-dash-mcp--json-value (plist-get tr :stack-parent))
+                :ticket (magit-dash-mcp--json-value (plist-get tr :ticket))))))
+
 (mcpkit-register-tool "magit_dash_pr_status" 'magit-dash
-  :description "Regenerate the PR review status org file: classify the author's open PRs into next-step buckets and add a TODO per next step."
+  :description "Return the author's open PRs classified into next-step buckets, with tracking deltas since the previous call. Without `repo', covers all repositories. Returns data only; writes no files. Read-only by default: the tracking cache is advanced (consuming deltas) only when `commit' is true."
   :input-schema
   '(:type "object"
     :properties (:repo (:type "string"
-                        :description "Local repository path, owner/repo slug, or registered repo name."))
-    :required ["repo"])
+                        :description "Optional local repository path, owner/repo slug, or registered repo name. Omit for all repositories.")
+                :commit (:type "boolean"
+                         :description "When true, record this snapshot so the next call reports deltas against it. Default false: inspection does not mutate tracking state."))
+    :required [])
   (let* ((repo (plist-get args :repo))
-         (repo-dir (magit-dash-mcp--resolve-repo-dir repo))
-         (repo-slug (or (magit-dash-mcp--resolve-repo-slug repo repo-dir) repo))
-         (result (magit-dash-gh-pr-status-run repo-slug repo-dir)))
-    (list :file (plist-get result :file)
-          :count (length (plist-get result :prs))
-          :prs (vconcat
-                (mapcar (lambda (pr)
-                          (list :number (plist-get pr :number)
-                                :bucket (symbol-name (plist-get pr :bucket))))
-                        (plist-get result :prs))))))
+         (all (or (null repo) (and (stringp repo) (string-empty-p (string-trim repo)))))
+         (repo-dir (and (not all) (magit-dash-mcp--resolve-repo-dir repo)))
+         (repo-slug (and (not all)
+                         (or (magit-dash-mcp--resolve-repo-slug repo repo-dir) repo)))
+         (prs (if all
+                  (magit-dash-gh-pr-status-collect-all)
+                (magit-dash-gh-pr-status-collect repo-slug repo-dir)))
+         (tracked (mapcar #'magit-dash-gh-pr-attach-tracking prs)))
+    (when (eq (plist-get args :commit) t)
+      (magit-dash-gh-pr-commit-tracking prs))
+    (list :repo (or repo-slug :null)
+          :count (length tracked)
+          :fingerprint (magit-dash-gh-pr-tracking-fingerprint prs)
+          :prs (vconcat (mapcar #'magit-dash-mcp--pr-json tracked)))))
 
 (provide 'magit-dash-mcp)
 

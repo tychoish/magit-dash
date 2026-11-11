@@ -183,34 +183,45 @@
                                                                      (__typename . "User"))))))))
                                    (reviewThreads . ((nodes . nil))))))))))))
 
-(defun magit-dash-mcp-test--status-bucket (repo-list)
-  "Run `magit_dash_pr_status' with REPO-LIST registered; return its result."
+(defun magit-dash-mcp-test--status-bucket (repo-list &optional all extra cache)
+  "Run `magit_dash_pr_status' with REPO-LIST registered; return its result.
+When ALL is non-nil omit `repo' so the author-wide collection is used."
   (let ((tmp-repo (make-temp-file "md-mcp-status-" t))
-        (file (make-temp-file "md-mcp-status" nil ".org")))
+        (magit-dash-gh-pr--tracking-cache (or cache (make-hash-table :test #'equal))))
     (unwind-protect
-        (let ((magit-dash-gh-pr-status-file file)
-              (magit-dash-gh-pr-status-required-approvals 2)
+        (let ((magit-dash-gh-pr-status-required-approvals 2)
               (magit-dash-repo-list repo-list))
           (cl-letf (((symbol-function 'magit-dash-mcp--resolve-repo-slug)
                      (lambda (_repo _dir) "org/repo"))
                     ((symbol-function 'magit-dash-gh-pr-status--fetch)
-                     (lambda (_slug _dir) (magit-dash-mcp-test--status-response))))
-            (let ((res (magit-dash-mcp-call-tool
-                        "magit_dash_pr_status" (list :repo tmp-repo))))
-              (should (equal file (plist-get res :file)))
-              (should (string-match-p "^:PR: 7$"
-                                      (with-temp-buffer (insert-file-contents file)
-                                                        (buffer-string))))
-              res)))
-      (delete-directory tmp-repo t)
-      (delete-file file))))
+                     (lambda (_slug _dir) (magit-dash-mcp-test--status-response)))
+                    ((symbol-function 'magit-dash-gh-pr-status--fetch-search)
+                     (lambda (_q _dir) (magit-dash-mcp-test--status-response))))
+            (magit-dash-mcp-call-tool
+             "magit_dash_pr_status" (append (if all nil (list :repo tmp-repo)) extra))))
+      (delete-directory tmp-repo t))))
 
 (ert-deftest magit-dash-mcp/pr-status-tool ()
-  "Test `magit_dash_pr_status' regenerates the file and reports buckets."
-  (let ((res (magit-dash-mcp-test--status-bucket nil)))
+  "Test `magit_dash_pr_status' returns structured data without files."
+  (let* ((res (magit-dash-mcp-test--status-bucket nil))
+         (pr (aref (plist-get res :prs) 0)))
     (should (= 1 (plist-get res :count)))
+    (should-not (plist-member res :file))
+    (should (stringp (plist-get res :fingerprint)))
     ;; One approval of the default two required.
-    (should (equal "reviews" (plist-get (aref (plist-get res :prs) 0) :bucket)))))
+    (should (equal "reviews" (plist-get pr :bucket)))
+    (should (= 7 (plist-get pr :number)))
+    (should (= 1 (plist-get pr :approvals)))
+    (should (vectorp (plist-get pr :failing)))
+    (should (equal "new" (plist-get (plist-get pr :tracking) :delta_type)))
+    (should (equal "needs 1 review" (plist-get (plist-get pr :tracking) :action_summary)))
+    (should (stringp (json-serialize res)))))
+
+(ert-deftest magit-dash-mcp/pr-status-tool-all-repos ()
+  "Omitting `repo' uses the author-wide collection."
+  (let ((res (magit-dash-mcp-test--status-bucket nil t)))
+    (should (= 1 (plist-get res :count)))
+    (should (eq :null (plist-get res :repo)))))
 
 (ert-deftest magit-dash-mcp/pr-status-tool-per-repo-override ()
   "A per-repo `:pr' override changes the reported bucket."
@@ -219,6 +230,37 @@
                                            :pr '(:required-approvals 1))))))
     (should (= 1 (plist-get res :count)))
     (should (equal "ready" (plist-get (aref (plist-get res :prs) 0) :bucket)))))
+
+(ert-deftest magit-dash-mcp/pr-status-tool-commit-flag ()
+  "Default call leaves the tracking cache unchanged; `commit' t updates it."
+  (let ((cache (make-hash-table :test #'equal)))
+    (let ((res (magit-dash-mcp-test--status-bucket nil t nil cache)))
+      (should (= 0 (hash-table-count cache)))
+      (should (equal "new" (plist-get (plist-get (aref (plist-get res :prs) 0) :tracking)
+                                      :delta_type))))
+    ;; Repeat inspection still reports "new" since nothing was consumed.
+    (let ((res (magit-dash-mcp-test--status-bucket nil t (list :commit :false) cache)))
+      (should (= 0 (hash-table-count cache)))
+      (should (equal "new" (plist-get (plist-get (aref (plist-get res :prs) 0) :tracking)
+                                      :delta_type))))
+    (magit-dash-mcp-test--status-bucket nil t (list :commit t) cache)
+    (should (= 1 (hash-table-count cache)))
+    (let ((res (magit-dash-mcp-test--status-bucket nil t nil cache)))
+      (should-not (equal "new" (plist-get (plist-get (aref (plist-get res :prs) 0) :tracking)
+                                          :delta_type))))))
+
+(ert-deftest magit-dash-mcp/fingerprint-nil-fields-and-json ()
+  "Fingerprint tolerates nil :repo/:state; omitted-repo result serializes."
+  (should (stringp (magit-dash-gh-pr-tracking-fingerprint
+                    (list (list :number 1 :repo nil :state nil :bucket nil)))))
+  (let* ((res (magit-dash-mcp-test--status-bucket nil t))
+         (json (json-serialize res)))
+    (should (stringp json))
+    (should (string-match-p "\"repo\":null" json))
+    (let ((parsed (json-parse-string json :object-type 'plist)))
+      (should (eq :null (plist-get parsed :repo))))
+    (let ((tool-schema '(:type "object" :properties (:repo (:type "string")) :required [])))
+      (should (string-match-p "\"required\":\\[\\]" (json-serialize tool-schema))))))
 
 (provide 'test-magit-dash-mcp)
 
