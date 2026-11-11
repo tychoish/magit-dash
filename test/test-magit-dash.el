@@ -4363,3 +4363,11 @@ The bug was that add-text-properties returns t, not the modified string."
         (magit-dash-mode)
         (should (memq 'magit-dash--which-key-sync-timer window-selection-change-functions))
         (should (alist-get 'magit-dash-mode which-key-replacement-alist))))))
+
+;;;; Batch registration, freshness column, per-repo submodule visibility
+
+(ert-deftest magit-dash/format-freshness ()
+  (should (equal "5m ⇒ 2h"
+                 (magit-dash--format-freshness '(:fetch-age 300 :updated-age 7200))))
+  (should (equal "┄ ⇒ ┄" (magit-dash--format-freshness nil))))
+

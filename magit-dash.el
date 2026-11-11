@@ -1871,19 +1871,20 @@ Returns a cancellation handle."
 ;;;; Column configuration
 
 (defvar magit-dash-columns
-  '((org . nil) (name . t) (branch . t) (fetched . t) (updated . nil) (ci . t) (status . t) (worktree . t) (sync . t) (cached . nil) (upstream . nil))
+  '((org . nil) (name . t) (branch . t) (fetched . t) (updated . nil) (freshness . nil) (ci . t) (status . t) (worktree . t) (sync . t) (cached . nil) (upstream . nil))
   "Alist of (COLUMN-SYMBOL . ENABLED) for the repository dashboard.
 Persisted across sessions via `savehist-additional-variables'.")
 
 
 (defconst magit-dash--all-columns
-  '(org name branch fetched updated ci status worktree sync cached upstream)
+  '(org name branch fetched updated freshness ci status worktree sync cached upstream)
   "All available dashboard columns in display order.")
 
 (defconst magit-dash--column-defs
   '((org      . ("Org"      12 nil))
     (fetched  . ("Fetched"  8 nil))
     (updated  . ("Updated"  8 nil))
+    (freshness . ("Fetched ⇒ Updated" 17 nil))
     (status   . ("Status"   8 nil))
     (worktree . ("Type"     8 nil))
     (sync     . ("Sync"     8 nil))
@@ -1966,6 +1967,12 @@ See `magit-dash-render-branch-name-as-basename'."
    ((< seconds 3600) (format "%dm" (round (/ seconds 60))))
    ((< seconds 86400) (format "%dh" (round (/ seconds 3600))))
    (t (format "%dd" (round (/ seconds 86400))))))
+
+(defun magit-dash--format-freshness (stats)
+  "Return \"<fetched> ⇒ <updated>\" ages from STATS as one string."
+  (format "%s ⇒ %s"
+          (magit-dash--format-age (plist-get stats :fetch-age))
+          (magit-dash--format-age (plist-get stats :updated-age))))
 
 (defun magit-dash--format-status (ahead behind dirty &optional untracked submodule-dirty is-pr)
   "Format AHEAD, BEHIND, and dirty states into a compact status indicator.
@@ -2355,6 +2362,8 @@ until `magit-dash--populate-stats-async' updates them."
                        (magit-dash--format-age (plist-get stats :fetch-age)))
                       ('updated
                        (magit-dash--format-age (plist-get stats :updated-age)))
+                      ('freshness
+                       (magit-dash--format-freshness stats))
                       ('status
                        (let ((uncommitted (plist-get stats :uncommitted))
                              (untracked (plist-get stats :untracked))
