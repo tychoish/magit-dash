@@ -1782,6 +1782,131 @@ Signals `user-error' when not found."
     ("h" "This repo — open PRs"  magit-dash-gh-pr-dash-here)
     ("n" "This repo — my PRs"    magit-dash-gh-pr-dash-mine-here)]])
 
+;;;; In-memory PR tracking
+
+;; Tracking metadata is computed against a session-local snapshot cache.
+;; Attaching never mutates the cache; callers commit explicitly once they
+;; have consumed the deltas.
+
+(defvar magit-dash-gh-pr--tracking-cache (make-hash-table :test #'equal)
+  "Map \"repo#number\" to the previous snapshot plist of that PR.
+A snapshot has `:bucket', `:threads-open', `:approvals', `:failing' (a
+list of check names) and `:last-seen' (a timestamp string).")
+
+(defun magit-dash-gh-pr--tracking-key (pr)
+  "Return the tracking cache key \"repo#number\" for PR."
+  (format "%s#%s" (or (plist-get pr :repo) "") (plist-get pr :number)))
+
+(defun magit-dash-gh-pr--tracking-timestamp ()
+  "Return the current time as an Org-style inactive timestamp string."
+  (format-time-string "[%Y-%m-%d %a %H:%M]"))
+
+(defun magit-dash-gh-pr--failing-names (pr)
+  "Return the sorted names of the failing checks of PR."
+  (sort (mapcar (lambda (f) (if (consp f) (car f) f)) (plist-get pr :failing))
+        #'string<))
+
+(defun magit-dash-gh-pr--tracking-snapshot (pr)
+  "Return the snapshot plist of PR for the tracking cache."
+  (list :bucket (plist-get pr :bucket)
+        :threads-open (or (plist-get pr :threads-open) 0)
+        :approvals (or (plist-get pr :approvals) 0)
+        :failing (magit-dash-gh-pr--failing-names pr)
+        :last-seen (magit-dash-gh-pr--tracking-timestamp)))
+
+(defun magit-dash-gh-pr--delta (pr previous)
+  "Return (TYPE . REASON) describing how PR changed since snapshot PREVIOUS."
+  (let ((bucket (plist-get pr :bucket))
+        (failing (magit-dash-gh-pr--failing-names pr))
+        (threads (or (plist-get pr :threads-open) 0)))
+    (cond
+     ((null previous) (cons 'new "newly seen"))
+     ((not (eq bucket (plist-get previous :bucket)))
+      (cons 'bucket-changed
+            (format "%s -> %s" (plist-get previous :bucket) bucket)))
+     ((not (equal failing (plist-get previous :failing)))
+      (cons 'ci-changed
+            (format "failing checks %d -> %d"
+                    (length (plist-get previous :failing)) (length failing))))
+     ((/= threads (plist-get previous :threads-open))
+      (cons 'threads-changed
+            (format "open threads %d -> %d"
+                    (plist-get previous :threads-open) threads)))
+     (t (cons 'unchanged "no change")))))
+
+(defun magit-dash-gh-pr--action-summary (pr)
+  "Return a short next-action string for PR."
+  (let* ((threads (or (plist-get pr :threads-open) 0))
+         (changes (or (plist-get pr :changes-requested) 0))
+         (names (magit-dash-gh-pr--failing-names pr))
+         (missing (max 0 (- (or (plist-get pr :required) 1)
+                            (or (plist-get pr :approvals) 0)))))
+    (pcase (plist-get pr :bucket)
+      ('fix-ci (concat "fix failing CI: " (string-join names ", ")))
+      ('threads
+       (string-join
+        (delq nil
+              (list (when (> threads 0)
+                      (format "address %d open review thread%s" threads
+                              (if (= threads 1) "" "s")))
+                    (when (> changes 0)
+                      (format "changes requested by %d reviewer%s" changes
+                              (if (= changes 1) "" "s")))))
+        "; "))
+      ('reviews (format "needs %d review%s" (max missing 1)
+                        (if (= (max missing 1) 1) "" "s")))
+      ('blocked "check merge blockers")
+      ('ready "ready to merge")
+      (_ "check merge blockers"))))
+
+(defun magit-dash-gh-pr-attach-tracking (pr)
+  "Return a copy of PR with a `:tracking' plist computed against the cache.
+The tracking plist holds `:last-seen', `:previous-bucket', `:delta-type'
+\(`new', `bucket-changed', `ci-changed', `threads-changed' or
+`unchanged'), `:delta-reason', `:action-summary', `:failing-checks'
+\(names), `:threads-open', `:approvals', `:stack-parent' and `:ticket'.
+The cache is not modified; see `magit-dash-gh-pr-commit-tracking'."
+  (let* ((previous (gethash (magit-dash-gh-pr--tracking-key pr)
+                            magit-dash-gh-pr--tracking-cache))
+         (delta (magit-dash-gh-pr--delta pr previous)))
+    (plist-put
+     (copy-sequence pr) :tracking
+     (list :last-seen (magit-dash-gh-pr--tracking-timestamp)
+           :previous-bucket (plist-get previous :bucket)
+           :delta-type (car delta)
+           :delta-reason (cdr delta)
+           :action-summary (magit-dash-gh-pr--action-summary pr)
+           :failing-checks (magit-dash-gh-pr--failing-names pr)
+           :threads-open (or (plist-get pr :threads-open) 0)
+           :approvals (or (plist-get pr :approvals) 0)
+           :stack-parent (plist-get pr :stack-parent)
+           :ticket (plist-get pr :ticket)))))
+
+(defun magit-dash-gh-pr-commit-tracking (prs)
+  "Record a snapshot of each PR in PRS in the tracking cache.
+Return PRS.  Call this after consuming `magit-dash-gh-pr-attach-tracking'
+deltas so the next collection compares against this state."
+  (dolist (pr prs)
+    (puthash (magit-dash-gh-pr--tracking-key pr)
+             (magit-dash-gh-pr--tracking-snapshot pr)
+             magit-dash-gh-pr--tracking-cache))
+  prs)
+
+(defun magit-dash-gh-pr-tracking-fingerprint (prs)
+  "Return a stable md5 hex string over the volatile fields of PRS.
+Covers repo, number, bucket, state, failing checks, open threads and
+approvals, independent of the order of PRS."
+  (let ((rows (mapcar
+               (lambda (pr)
+                 (format "%s#%s|%s|%s|%s|%s|%s"
+                         (or (plist-get pr :repo) "") (plist-get pr :number)
+                         (plist-get pr :bucket) (plist-get pr :state)
+                         (string-join (magit-dash-gh-pr--failing-names pr) ",")
+                         (or (plist-get pr :threads-open) 0)
+                         (or (plist-get pr :approvals) 0)))
+               prs)))
+    (secure-hash 'md5 (string-join (sort rows #'string<) "\n"))))
+
 (provide 'magit-dash-gh-pr)
 
 ;;; magit-gh-pr.el ends here
