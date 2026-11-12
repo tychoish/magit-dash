@@ -294,12 +294,16 @@
 
 (defun magit-dash-gh-pr-status-test/node (repo number &rest extra)
   "Return a minimal GraphQL PR node for REPO and NUMBER, with EXTRA alist entries."
-  `(,@extra
-    (number . ,number) (title . "t") (headRefName . ,(format "b%d" number))
-    (baseRefName . "main") (mergeStateStatus . "CLEAN")
-    (repository . ((nameWithOwner . ,repo)))
-    (reviews . ((nodes . nil)))
-    (reviewThreads . ((nodes . nil)))))
+  ;; Drop defaults that EXTRA overrides: duplicate JSON keys are resolved
+  ;; differently by `json-parse-string' across Emacs versions.
+  (append extra
+          (cl-remove-if (lambda (cell) (assq (car cell) extra))
+                        `((number . ,number) (title . "t")
+                          (headRefName . ,(format "b%d" number))
+                          (baseRefName . "main") (mergeStateStatus . "CLEAN")
+                          (repository . ((nameWithOwner . ,repo)))
+                          (reviews . ((nodes . nil)))
+                          (reviewThreads . ((nodes . nil)))))))
 
 (defun magit-dash-gh-pr-status-test/search (&rest nodes)
   `((data . ((search . ((nodes . ,nodes)))))))
