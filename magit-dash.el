@@ -3,7 +3,7 @@
 ;; Author: sam kleinman
 ;; Maintainer: tychoish
 ;; Version: 0.1
-;; Package-Requires: ((emacs "29.1") (magit "4.0") (projectile "2.0") (transient "0.4") (annotated-completing-read "0.1") (sprite "0.1") (gen "0.1"))
+;; Package-Requires: ((emacs "29.1") (magit "4.0") (projectile "2.0") (transient "0.4") (annotated-completing-read "0.1") (sprite "0.1") (gen "0.1") (hitl "0.1"))
 ;; Keywords: vc, tools, magit, github
 ;; URL: https://github.com/tychoish/dot-emacs
 
@@ -40,9 +40,11 @@
 
 (require 'annotated-completing-read)
 (require 'sprite)
+
 (require 'magit-dash-global)
 
 (require 'magit-dash-gh-ci)
+(require 'magit-dash-chain)
 (require 'magit-dash-gh-pr)
 (require 'magit-dash-gh-pr-status)
 (require 'magit-dash-gh)
@@ -4024,7 +4026,10 @@ Indicates whether batch operations target all repos or marked repos."
      :inapt-if-not magit-dash--at-worktree-p)
     ("ws"  "Sync symlinks"   magit-dash-worktree-sync-symlinks
      :inapt-if-not magit-dash--repo-at-point-p)
-    ("wt"  "Toggle"          magit-dash-toggle-discovered-worktrees)]
+    ("wt"  "Toggle"          magit-dash-toggle-discovered-worktrees)
+    ("wc"  "Plan PR chain merge" magit-dash-chain-plan
+     :inapt-if-not magit-dash--repo-at-point-p)
+    ("wC"  "Resume PR chain"  magit-dash-chain-resume)]
    ["Agent Shell"
     ("av"  "Actions needing attention" magit-dash-actionable-open)
     ("as"  "Open"           magit-dash-agent-shell

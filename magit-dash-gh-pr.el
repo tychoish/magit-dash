@@ -30,7 +30,12 @@
 (require 'tabulated-list)
 (require 'transient)
 (require 'savehist)
+
 (require 'magit-dash-gh)
+
+(declare-function magit-dash-chain-plan "magit-dash-chain")
+(declare-function magit-dash-chain-resume "magit-dash-chain")
+(declare-function magit-dash-chain-open "magit-dash-chain")
 
 (declare-function magit-toplevel "magit-git")
 (declare-function magit-get-current-branch "magit-git")
@@ -1762,6 +1767,10 @@ Signals `user-error' when not found."
     ("k"   "Clean merged worktrees"   magit-dash-gh-pr-dashboard-clean-merged-worktrees)
     ("w"   "Open Magit in worktree"   magit-dash-gh-pr-dashboard-open-worktree)
     ("d"   "Open Dired in worktree"   magit-dash-gh-pr-dashboard-open-dired)]
+   ["Chain"
+    ("pc"  "Plan chain merge (from PR)" magit-dash-chain-plan)
+    ("pr"  "Resume chain"             magit-dash-chain-resume)
+    ("po"  "Open chain plan"          magit-dash-chain-open)]
    ["CI"
     ("ci"  "Fetch CI logs"            magit-dash-gh-pr-dashboard-fetch-ci)]
    ["View & Filter"

@@ -3,7 +3,7 @@
 ;; Author: tycho garen
 ;; Maintainer: tychoish
 ;; Version: 0.1
-;; Package-Requires: ((emacs "29.1") (mcpkit "0.1"))
+;; Package-Requires: ((emacs "29.1") (mcpkit "0.1") (hitl "0.1"))
 ;; Keywords: vc, tools, magit, github, mcp
 ;; URL: https://github.com/tychoish/dot-emacs
 
@@ -18,6 +18,7 @@
 ;;   - `clean_merged_worktrees'
 ;;   - `prune_branches'
 ;;   - `magit_dash_pr_status'
+;;   - `chain_plan' and `chain_resume' (PR chain merge plans, see `magit-dash-chain')
 
 ;;; Code:
 
@@ -30,6 +31,7 @@
 (require 'magit-dash-gh-pr)
 (require 'magit-dash-gh-pr-status)
 (require 'magit-dash-worktree)
+(require 'magit-dash-chain)
 
 (declare-function magit-dash-repo-name "magit-dash")
 (declare-function magit-dash-repo-path "magit-dash")
@@ -437,6 +439,38 @@
           :count (length tracked)
           :fingerprint (magit-dash-gh-pr-tracking-fingerprint prs)
           :prs (vconcat (mapcar #'magit-dash-mcp--pr-json tracked)))))
+
+;;;; Tools 6-7: chain_plan, chain_resume
+
+(mcpkit-register-tool "chain_plan" 'magit-dash
+  :description "Discover and validate a chain or tree of dependent PRs (PR base -> head edges) under a root PR or branch, render it, and create a hitl-plan (domain magit-dash-chain) that merges parent/base branches into each child with --no-ff merge commits in topological order. Never rebases. Nothing is executed and nothing is pushed; with land=true the plan also contains separate push/merge-PR steps that need plan approval. No plan is created when validation fails. Execute with hitl plan_execute (needs approval) and resume after a conflict with chain_resume."
+  :input-schema
+  '(:type "object"
+    :properties (:repo (:type "string"
+                        :description "Local repository path, owner/repo slug, or registered repo name.")
+                :root (:type "string"
+                       :description "Root of the chain: PR number or branch name.")
+                :base (:type "string"
+                       :description "Optional branch the chain lands on (default: the root PR's base).")
+                :land (:type "boolean"
+                       :description "Also add explicit push + gh pr merge steps (default false)."))
+    :required ["repo" "root"])
+  (let* ((repo (plist-get args :repo))
+         (repo-dir (magit-dash-mcp--resolve-repo-dir repo))
+         (slug (magit-dash-mcp--resolve-repo-slug repo repo-dir))
+         (base (plist-get args :base)))
+    (magit-dash-chain-plan-json repo-dir slug (plist-get args :root)
+                                (and (stringp base) (not (string-empty-p base)) base)
+                                (eq (plist-get args :land) t)
+                                'mcp)))
+
+(mcpkit-register-tool "chain_resume" 'magit-dash
+  :description "Resume a chain plan after a halt (typically a merge conflict): retries failed/blocked steps, finishing an in-progress merge once its conflicts are resolved, then continues with the remaining steps. Subject to the same approval gating as plan_execute. Use hitl plan_status for read-only status."
+  :input-schema
+  '(:type "object"
+    :properties (:plan_id (:type "string" :description "Chain plan id."))
+    :required ["plan_id"])
+  (magit-dash-chain-resume-json (plist-get args :plan_id)))
 
 (provide 'magit-dash-mcp)
 
