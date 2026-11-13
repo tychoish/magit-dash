@@ -83,6 +83,7 @@
 (declare-function magit-dash-gh-workflow-run "magit-dash-gh-actions")
 (declare-function magit-gh-pr-dash "magit-dash-gh-pr")
 (declare-function magit-dash-gh-pr-views-menu "magit-dash-gh-pr")
+(autoload 'magit-dash-actionable-open "magit-dash-actionable" nil t)
 
 (defconst magit-dash-buffer-name "*magit-dash-repos*")
 
@@ -2195,6 +2196,7 @@ together they exceed the available window space is the wider one trimmed."
 
     ;; Agent Shell & Autosync prefix: a
     (keymap-set m "a"   (cons "agent/autosync" (make-sparse-keymap)))
+    (keymap-set m "a p" #'magit-dash-actionable-open)
     (keymap-set m "a a" #'magit-dash-auto-sync)
     (keymap-set m "a s" #'magit-dash-auto-sync)
     (keymap-set m "a o" #'magit-dash-agent-shell)
@@ -4024,6 +4026,7 @@ Indicates whether batch operations target all repos or marked repos."
      :inapt-if-not magit-dash--repo-at-point-p)
     ("wt"  "Toggle"          magit-dash-toggle-discovered-worktrees)]
    ["Agent Shell"
+    ("av"  "Actions needing attention" magit-dash-actionable-open)
     ("as"  "Open"           magit-dash-agent-shell
      :inapt-if-not magit-dash--agent-shell-project-buffers-p)
     ("an"  "New"            magit-dash-agent-shell-new)

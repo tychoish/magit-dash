@@ -424,3 +424,11 @@ Detailed API documentation for all modules, options, and commands is available i
 
 Copyright (C) sam kleinman (tychoish).  GPL-3.0 or later.  See the source file header
 for the full license text.
+
+* Actions needing attention
+
+Press ~a p~ in the repository dashboard to list unpushed and unpulled commits,
+uncommitted changes, and authored pull requests with failing checks, unresolved
+feedback, or merge blockers.  Press ~C-c C-c~ or ~RET~ on a row for its actions;
+~g~ refreshes the view.  Pull request status uses GitHub and reports query errors
+in the view.  Ahead and behind counts use the last fetched upstream state.
