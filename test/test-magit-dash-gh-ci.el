@@ -106,6 +106,23 @@ passes nil explicitly to exercise the disabled case."
                (lambda () '(:owner "owner" :repo "myrepo" :branch "main"))))
       (should (equal "owner/myrepo" (magit-dash-ci--repo-slug repo))))))
 
+(ert-deftest magit-dash-gh-ci/repo-slug-prefers-repo-over-upstream ()
+  "Fork's `:repo' attribute takes precedence over `:upstream-repo'."
+  (let ((repo (magit-dash-repo--make
+               :name "myfork"
+               :path "/tmp/myfork"
+               :repo "git@github.com:fork/myrepo.git"
+               :upstream-repo "git@github.com:upstream/myrepo.git"
+               :include-ci t)))
+    (should (equal "fork/myrepo" (magit-dash-ci--repo-slug repo)))))
+
+(ert-deftest magit-dash-gh-ci/parse-runs-prefers-target-sha ()
+  "When target SHA is provided, runs for that commit are selected over newer ones."
+  (let ((runs '(((databaseId . 200) (headSha . "sha-newer") (conclusion . "success") (status . "completed"))
+                ((databaseId . 100) (headSha . "sha-target") (conclusion . "failure") (status . "completed")))))
+    (should (equal 100 (plist-get (magit-dash-gh-ci--parse-runs runs "sha-target") :run-id)))
+    (should (equal "failure" (plist-get (magit-dash-gh-ci--parse-runs runs "sha-target") :conclusion)))))
+
 (ert-deftest magit-dash-gh-ci/repo-slug-errors-when-unresolvable ()
   (let ((repo (magit-dash-gh-ci-test/make-repo "bare-name" "/tmp/bare-name")))
     (cl-letf (((symbol-function 'magit-dash-gh--repo-info)

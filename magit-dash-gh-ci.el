@@ -74,16 +74,25 @@
   "Return non-nil when CONCLUSION string indicates a failed run."
   (member conclusion '("failure" "timed_out" "startup_failure")))
 
-(defun magit-dash-gh-ci--parse-runs (runs)
+(defun magit-dash-gh-ci--parse-runs (runs &optional target-sha)
   "Return a CI status plist summarising RUNS (list of alists from gh run list).
-Only runs for the newest commit (by `headSha') are considered, since a commit
+When TARGET-SHA is provided, prefer runs matching TARGET-SHA.
+Otherwise, only runs for the newest commit (by `headSha') are considered, since a commit
 triggers several workflows and the newest run alone may be a passing one while
 another workflow failed.  The overall :conclusion is \"failure\" if any such
 run failed, else :status is \"in_progress\" if any is still running, else the
 newest run's result.  :run-id and :url point at the first failing run when
 there is one.  Returns nil when RUNS is nil or empty."
   (when runs
-    (let* ((sha (map-elt (car runs) 'headSha))
+    (let* ((matched-sha (when (and target-sha (stringp target-sha))
+                          (seq-some (lambda (r)
+                                      (let ((r-sha (map-elt r 'headSha)))
+                                        (when (and (stringp r-sha)
+                                                   (or (string-prefix-p r-sha target-sha)
+                                                       (string-prefix-p target-sha r-sha)))
+                                          r-sha)))
+                                    runs)))
+           (sha (or matched-sha (map-elt (car runs) 'headSha)))
            (current (if sha
                         (seq-filter (lambda (r) (equal sha (map-elt r 'headSha)))
                                     runs)
@@ -124,9 +133,8 @@ querying GitHub."
          (default-directory (file-name-as-directory path)))
     (or (magit-dash-gh--cache-get path :repo-slug)
         (let ((slug
-               (or (when (and (not (stringp repo)) (fboundp 'magit-dash-repo-upstream-repo))
-                     (when-let* ((raw (or (magit-dash-repo-upstream-repo repo)
-                                          (and (fboundp 'magit-dash-repo-repo)
+               (or (when (not (stringp repo))
+                     (when-let* ((raw (or (and (fboundp 'magit-dash-repo-repo)
                                                (magit-dash-repo-repo repo))
                                           (and (fboundp 'magit-dash-repo-clone-url)
                                                (magit-dash-repo-clone-url repo))))
@@ -137,6 +145,10 @@ querying GitHub."
                                  (o (plist-get info :owner))
                                  (r (plist-get info :repo)))
                        (format "%s/%s" o r)))
+                   (when (and (not (stringp repo)) (fboundp 'magit-dash-repo-upstream-repo))
+                     (when-let* ((raw (magit-dash-repo-upstream-repo repo))
+                                 (pair (magit-dash-gh--owner-repo-from-url raw)))
+                       (format "%s/%s" (car pair) (cdr pair))))
                    (let ((name (if (stringp repo)
                                    (file-name-nondirectory (directory-file-name repo))
                                  (magit-dash-repo-name repo))))
@@ -182,7 +194,10 @@ Caches the result as :ci-status in the shared magit-dash-gh cache."
            (branch (if (string-empty-p current)
                        (magit-dash-repo-branch repo)
                      current))
-           (slug (ignore-errors (magit-dash-ci--repo-slug repo))))
+           (slug (ignore-errors (magit-dash-ci--repo-slug repo)))
+           (head-sha (ignore-errors
+                       (let ((default-directory (file-name-as-directory path)))
+                         (magit-git-string "rev-parse" "HEAD")))))
       (if (not branch)
           (funcall callback nil)
         (magit-dash-gh--run-process
@@ -201,7 +216,9 @@ Caches the result as :ci-status in the shared magit-dash-gh cache."
                                                :object-type 'alist)
                           (error (setq parsed-p nil) nil)))
                   (ci-status (when parsed-p
-                               (or (magit-dash-gh-ci--parse-runs runs)
+                               (or (if head-sha
+                                       (magit-dash-gh-ci--parse-runs runs head-sha)
+                                     (magit-dash-gh-ci--parse-runs runs))
                                    (list :none t)))))
              (when parsed-p
                (magit-dash-gh--cache-set-if-current path :ci-status ci-status token))
