@@ -572,11 +572,16 @@ digraph tycho_FND_1340 {
                                      (buffer-list)))
          (dir default-directory)
          (hooks (list after-load-alist)))
-    (cl-letf (((symbol-function 'call-process) (lambda (&rest _) (error "process at load")))
-              ((symbol-function 'process-file) (lambda (&rest _) (error "process at load")))
-              ((symbol-function 'start-process) (lambda (&rest _) (error "process at load")))
-              ((symbol-function 'make-process) (lambda (&rest _) (error "process at load"))))
-      (load magit-dash-stack-test--source nil t t))
+    ;; Coverage's load handler visits the source and invokes VC, which would
+    ;; otherwise be mistaken for effects of loading the module itself.
+    (let ((file-name-handler-alist
+           (rassq-delete-all 'undercover-file-handler
+                             (copy-sequence file-name-handler-alist))))
+      (cl-letf (((symbol-function 'call-process) (lambda (&rest _) (error "process at load")))
+                ((symbol-function 'process-file) (lambda (&rest _) (error "process at load")))
+                ((symbol-function 'start-process) (lambda (&rest _) (error "process at load")))
+                ((symbol-function 'make-process) (lambda (&rest _) (error "process at load"))))
+        (load magit-dash-stack-test--source nil t t)))
     (should (equal keymap-before global-map))
     (should (equal buffers-before
                    (seq-remove (lambda (b) (string-match-p "Native-compile" (buffer-name b)))
