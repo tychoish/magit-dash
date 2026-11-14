@@ -11,6 +11,8 @@
 (require 'ert)
 (require 'cl-lib)
 (require 'map)
+(require 'magit-dash)
+(require 'magit-dash-status)
 (require 'magit-dash-gh-ci)
 
 ;;; Test helpers
@@ -214,6 +216,48 @@ passes nil explicitly to exercise the disabled case."
         (should (eq 'fix-ci captured-prompt))
         (should (= 88888 (plist-get (plist-get captured-kwargs :args) :run-id)))
         (should (equal "/tmp/unregistered-repo/" (plist-get captured-kwargs :context-dir)))))))
+
+(ert-deftest magit-dash-gh-ci/fetch-passes-repo-slug ()
+  "Includes --repo <slug> when repo slug can be resolved."
+  (let* ((repo (magit-dash-gh-ci-test/make-repo "myrepo" "/tmp/myrepo" "main"))
+         (captured-args nil))
+    (cl-letf (((symbol-function 'magit-dash--current-branch) (lambda (_) "main"))
+              ((symbol-function 'magit-dash-ci--repo-slug) (lambda (_) "owner/myrepo"))
+              ((symbol-function 'magit-dash-gh--run-process)
+               (lambda (args _dir on-success &optional _on-error)
+                 (setq captured-args args)
+                 (funcall on-success "[]"))))
+      (magit-dash-gh-ci-fetch repo #'ignore)
+      (should (member "--repo" captured-args))
+      (should (equal "owner/myrepo" (nth (1+ (seq-position captured-args "--repo")) captured-args))))))
+
+(ert-deftest magit-dash-gh-ci/fetch-empty-runs-caches-none ()
+  "When gh returns 0 runs, cache :none status and format as —."
+  (let* ((repo (magit-dash-gh-ci-test/make-repo "myrepo" "/tmp/myrepo" "main"))
+         (magit-dash-gh--cache (make-hash-table :test #'equal))
+         (magit-dash-gh--cache-requests (make-hash-table :test #'equal))
+         (callback-result 'not-called))
+    (cl-letf (((symbol-function 'magit-dash--current-branch) (lambda (_) "main"))
+              ((symbol-function 'magit-dash-ci--repo-slug) (lambda (_) "owner/myrepo"))
+              ((symbol-function 'magit-dash-gh--run-process)
+               (lambda (_args _dir on-success &optional _on-error)
+                 (funcall on-success "[]"))))
+      (magit-dash-gh-ci-fetch repo (lambda (res) (setq callback-result res)))
+      ;; Callback receives nil (no error, but no active runs)
+      (should (null callback-result))
+      ;; Cache holds (:none t) so it is distinguished from uncached
+      (let ((cached (magit-dash-gh--cache-get "/tmp/myrepo" :ci-status)))
+        (should (equal '(:none t) cached))
+        (should (equal "—" (substring-no-properties (magit-dash-gh-ci--format-status cached)))))
+      ;; magit-dash--repo-has-ci-status-p returns nil for :none
+      (cl-letf (((symbol-function 'magit-dash--repo-at-point) (lambda () repo)))
+        (should-not (magit-dash--repo-has-ci-status-p))))))
+
+(ert-deftest magit-dash-gh-ci/repo-slug-resolves-from-string-path ()
+  "magit-dash-ci--repo-slug accepts a raw path string."
+  (cl-letf (((symbol-function 'magit-dash-gh--repo-info)
+             (lambda () (list :owner "owner" :repo "myrepo" :branch "main"))))
+    (should (equal "owner/myrepo" (magit-dash-ci--repo-slug "/tmp/myrepo")))))
 
 (provide 'test-magit-dash-gh-ci)
 ;;; test-magit-dash-gh-ci.el ends here

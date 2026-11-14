@@ -116,10 +116,31 @@ there is one.  Returns nil when RUNS is nil or empty."
 
 ;;; Display
 
+(defun magit-dash-ci--repo-slug (repo)
+  "Return OWNER/NAME slug for REPO struct or path."
+  (let* ((path (if (stringp repo) repo (magit-dash-repo-path repo)))
+         (default-directory (file-name-as-directory path)))
+    (or (ignore-errors
+          (when-let* ((info (magit-dash-gh--repo-info))
+                      (o (plist-get info :owner))
+                      (r (plist-get info :repo)))
+            (format "%s/%s" o r)))
+        (when (and (not (stringp repo)) (fboundp 'magit-dash-repo-repo))
+          (when-let* ((pair (or (magit-dash-gh--owner-repo-from-url (magit-dash-repo-repo repo))
+                               (magit-dash-gh--owner-repo-from-url (magit-dash-repo-clone-url repo)))))
+            (format "%s/%s" (car pair) (cdr pair))))
+        (let ((name (if (stringp repo)
+                        (file-name-nondirectory (directory-file-name repo))
+                      (magit-dash-repo-name repo))))
+          (if (string-match-p "/" name)
+              name
+            (user-error "Cannot determine GitHub owner/repo slug for %s" name))))))
+
 (defun magit-dash-gh-ci--format-status (ci-status)
   "Format CI-STATUS plist as a short propertized string for the dashboard column.
-Returns a shadow \"—\" when CI-STATUS is nil."
-  (if (null ci-status)
+Returns a shadow \"—\" when CI-STATUS is nil or indicates no runs."
+  (if (or (null ci-status)
+          (plist-get ci-status :none))
       (propertize "—" 'face 'shadow)
     (let ((conclusion (plist-get ci-status :conclusion))
           (status (plist-get ci-status :status)))
@@ -149,24 +170,31 @@ Caches the result as :ci-status in the shared magit-dash-gh cache."
            (current (magit-dash--current-branch path))
            (branch (if (string-empty-p current)
                        (magit-dash-repo-branch repo)
-                     current)))
+                     current))
+           (slug (ignore-errors (magit-dash-ci--repo-slug repo))))
       (if (not branch)
           (funcall callback nil)
         (magit-dash-gh--run-process
-         (list "run" "list"
-               "--branch" branch
-               "--limit" "20"
-               "--json" "databaseId,name,status,conclusion,url,workflowName,headSha")
+         (append
+          (list "run" "list")
+          (when slug (list "--repo" slug))
+          (list "--branch" branch
+                "--limit" "20"
+                "--json" "databaseId,name,status,conclusion,url,workflowName,headSha"))
          path
          (lambda (output)
-           (let* ((runs (condition-case nil
+           (let* ((parsed-p t)
+                  (runs (condition-case nil
                             (json-parse-string output
                                                :array-type 'list
                                                :object-type 'alist)
-                          (error nil)))
-                  (ci-status (magit-dash-gh-ci--parse-runs runs)))
-             (magit-dash-gh--cache-set-if-current path :ci-status ci-status token)
-             (funcall callback ci-status)))
+                          (error (setq parsed-p nil) nil)))
+                  (ci-status (when parsed-p
+                               (or (magit-dash-gh-ci--parse-runs runs)
+                                   (list :none t)))))
+             (when parsed-p
+               (magit-dash-gh--cache-set-if-current path :ci-status ci-status token))
+             (funcall callback (if (plist-get ci-status :none) nil ci-status))))
          (lambda (_ _)
            (funcall callback nil)))))))
 
@@ -234,23 +262,6 @@ Does nothing when no CI status is cached for REPO."
 
 (declare-function agent-shell-workflow-dispatch "agent-shell-workflow")
 (declare-function agent-shell-workflow-exec "agent-shell-workflow")
-
-(defun magit-dash-ci--repo-slug (repo)
-  "Return OWNER/NAME slug for REPO struct or path."
-  (let* ((path (magit-dash-repo-path repo))
-         (default-directory (file-name-as-directory path)))
-    (or (ignore-errors
-          (when-let* ((info (magit-dash-gh--repo-info))
-                      (o (plist-get info :owner))
-                      (r (plist-get info :repo)))
-            (format "%s/%s" o r)))
-        (when-let* ((pair (or (magit-dash-gh--owner-repo-from-url (magit-dash-repo-repo repo))
-                             (magit-dash-gh--owner-repo-from-url (magit-dash-repo-clone-url repo)))))
-          (format "%s/%s" (car pair) (cdr pair)))
-        (let ((name (magit-dash-repo-name repo)))
-          (if (string-match-p "/" name)
-              name
-            (user-error "Cannot determine GitHub owner/repo slug for %s" name))))))
 
 (defun magit-dash-ci--dispatch-prompt (id args &optional context-dir)
   "Dispatch prompt ID with ARGS plist in optional CONTEXT-DIR.

@@ -213,26 +213,29 @@ cache is fresh, invokes CALLBACK immediately with cached data."
       nil)
      (t
       (magit-dash-status--set-in-flight top :status-ci t)
-      (magit-dash-gh--run-process
-       (list "run" "list"
-             "--branch" branch
-             "--limit" "1"
-             "--json" "databaseId,name,status,conclusion,createdAt,updatedAt,url,workflowName,headSha,event")
-       top
-       (lambda (output)
-         (magit-dash-status--set-in-flight top :status-ci nil)
-         (let* ((runs (condition-case nil
-                          (json-parse-string output :array-type 'list :object-type 'alist)
-                        (error nil)))
-                (parsed (and runs (magit-dash-status--parse-ci-run (car runs)))))
-           (magit-dash-gh--cache-set top :status-ci (or parsed :empty))
+      (let ((slug (ignore-errors (magit-dash-ci--repo-slug top))))
+        (magit-dash-gh--run-process
+         (append
+          (list "run" "list")
+          (when slug (list "--repo" slug))
+          (list "--branch" branch
+                "--limit" "1"
+                "--json" "databaseId,name,status,conclusion,createdAt,updatedAt,url,workflowName,headSha,event"))
+         top
+         (lambda (output)
+           (magit-dash-status--set-in-flight top :status-ci nil)
+           (let* ((runs (condition-case nil
+                            (json-parse-string output :array-type 'list :object-type 'alist)
+                          (error nil)))
+                  (parsed (and runs (magit-dash-status--parse-ci-run (car runs)))))
+             (magit-dash-gh--cache-set top :status-ci (or parsed :empty))
+             (magit-dash-gh--cache-set top :status-ci-time (float-time))
+             (when callback (funcall callback parsed))))
+         (lambda (_err _code)
+           (magit-dash-status--set-in-flight top :status-ci nil)
+           (magit-dash-gh--cache-set top :status-ci :empty)
            (magit-dash-gh--cache-set top :status-ci-time (float-time))
-           (when callback (funcall callback parsed))))
-       (lambda (_err _code)
-         (magit-dash-status--set-in-flight top :status-ci nil)
-         (magit-dash-gh--cache-set top :status-ci :empty)
-         (magit-dash-gh--cache-set top :status-ci-time (float-time))
-         (when callback (funcall callback nil))))))))
+           (when callback (funcall callback nil)))))))))
 
 (defun magit-dash-status--fetch-branch-pr (dir callback &optional force)
   "Fetch PR for current branch in DIR asynchronously.

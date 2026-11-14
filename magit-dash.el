@@ -3615,8 +3615,9 @@ Prompts for agent config and session choice before creating the shell."
 
 (defun magit-dash--repo-has-ci-status-p ()
   "Return non-nil when the repository at point has cached CI status."
-  (when-let* ((repo (magit-dash--repo-at-point)))
-    (magit-dash-gh--cache-get (magit-dash-repo-path repo) :ci-status)))
+  (when-let* ((repo (magit-dash--repo-at-point))
+              (ci (magit-dash-gh--cache-get (magit-dash-repo-path repo) :ci-status)))
+    (and (not (plist-get ci :none)))))
 
 ;;;###autoload
 (defun magit-dash-open-other-window ()
