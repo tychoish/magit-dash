@@ -56,6 +56,7 @@
 (declare-function magit-dash-worktree-symlink-worktree "magit-dash-worktree")
 (declare-function magit-dash-worktree-main-dir "magit-dash-worktree")
 (declare-function magit-dash-gh-actions-fetch-for-pr "magit-dash-gh-actions")
+(declare-function code-review-start "code-review" (url))
 ;;; Configuration
 
 (defvar magit-dash-gh-pr-thread-limit 100
@@ -128,6 +129,93 @@ Returns a list of plists :id :resolved :path :creator :last-commentor.
     (puthash "creator"        (or (plist-get thread :creator) "")             ht)
     (puthash "last_commentor" (or (plist-get thread :last-commentor) "")      ht)
     ht))
+
+(defun magit-dash-gh-pr--truncate-text (text max-chars)
+  "Truncate TEXT to MAX-CHARS characters, appending \"...\" if truncated."
+  (if (and text max-chars (> (length text) max-chars))
+      (concat (substring text 0 (max 0 (- max-chars 3))) "...")
+    (or text "")))
+
+(defun magit-dash-gh-pr-parse-unresolved-threads (graphql-response &optional limit max-chars)
+  "Extract unresolved review thread summaries from GRAPHQL-RESPONSE alist.
+Returns a list of plists with keys :id :path :line :outdated :author :body :comments.
+Caps thread count at LIMIT (default 20, max 50) and each comment's body at
+MAX-CHARS (default 1000)."
+  (let* ((limit (min (or limit 20) 50))
+         (max-chars (or max-chars 1000))
+         (data (map-elt graphql-response 'data))
+         (repo (map-elt data 'repository))
+         (pr (map-elt repo 'pullRequest))
+         (rt (map-elt pr 'reviewThreads))
+         (nodes (map-elt rt 'nodes))
+         (unresolved (seq-filter (lambda (th) (not (eq (map-elt th 'isResolved) t)))
+                                 nodes))
+         (capped-nodes (seq-take unresolved limit)))
+    (seq-map
+     (lambda (thread)
+       (let* ((comments-nodes (map-nested-elt thread '(comments nodes)))
+              (first-comment (car comments-nodes))
+              (creator (or (map-nested-elt first-comment '(author login)) "unknown"))
+              (outdated (eq (map-elt thread 'isOutdated) t))
+              (comments (mapcar
+                         (lambda (c)
+                           (list :id (or (map-elt c 'id) "")
+                                 :author (or (map-nested-elt c '(author login)) "unknown")
+                                 :body (magit-dash-gh-pr--truncate-text
+                                        (map-elt c 'body) max-chars)
+                                 :created_at (or (map-elt c 'createdAt) "")))
+                         comments-nodes))
+              (body (magit-dash-gh-pr--truncate-text
+                     (map-elt first-comment 'body) max-chars)))
+         (list :id (or (map-elt thread 'id) "")
+               :path (or (map-elt thread 'path) "")
+               :line (map-elt thread 'line)
+               :outdated (if outdated t :false)
+               :author creator
+               :body body
+               :comments (vconcat comments))))
+     capped-nodes)))
+
+(defun magit-dash-gh-pr-fetch-threads-graphql (slug number &optional limit max-chars dir)
+  "Fetch unresolved review threads for PR NUMBER in SLUG synchronously.
+SLUG is an \"owner/repo\" string.  DIR is optional working directory.
+Returns a list of plists."
+  (let* ((parts (split-string slug "/"))
+         (owner (car parts))
+         (repo (cadr parts))
+         (first-count (min (max (or limit 20) 1) 50))
+         (query "query($owner:String! $repo:String! $number:Int! $first:Int!){
+  repository(owner:$owner name:$repo){
+    pullRequest(number:$number){
+      reviewThreads(first:$first){
+        nodes{
+          id isResolved isOutdated path line
+          comments(first:50){
+            nodes{ id author{login} body createdAt }
+          }
+        }
+      }
+    }
+  }
+}"))
+    (unless (and owner repo)
+      (error "Invalid repository slug: %s" slug))
+    (pcase-let* ((`(,code . ,output)
+                  (magit-dash-gh--call-process
+                   (list "api" "graphql"
+                         "-f" (concat "query=" query)
+                         "-F" (concat "owner=" owner)
+                         "-F" (concat "repo=" repo)
+                         "-F" (format "number=%d" number)
+                         "-F" (format "first=%d" first-count))
+                   (or dir default-directory))))
+      (unless (eq code 0)
+        (error "Failed to fetch review threads for %s#%d: %s" slug number output))
+      (let ((parsed (condition-case err
+                        (json-parse-string output :array-type 'list :object-type 'alist)
+                      (error (error "Failed to parse GraphQL response: %s"
+                                    (error-message-string err))))))
+        (magit-dash-gh-pr-parse-unresolved-threads parsed limit max-chars)))))
 
 (defun magit-dash-gh-pr--graphql-query ()
   "Return the GraphQL query string for fetching review threads."
@@ -463,6 +551,9 @@ Uses active columns.  WIDTH is available window width; when nil,
 (defvar magit-dash-gh-pr-dashboard-mode-map
   (let ((m (make-sparse-keymap)))
     (keymap-set m "RET" #'magit-dash-gh-pr-dashboard-open-browser)
+    (keymap-set m "b"   #'magit-dash-gh-pr-dashboard-open-browser)
+    (keymap-set m "R"   #'magit-dash-gh-pr-dashboard-code-review)
+    (keymap-set m "c r" #'magit-dash-gh-pr-dashboard-code-review)
     (keymap-set m "w"   #'magit-dash-gh-pr-dashboard-open-worktree)
     (keymap-set m "c w" #'magit-dash-gh-pr-dashboard-create-worktree)
     (keymap-set m "c a" #'magit-dash-gh-pr-dashboard-create-all-worktrees)
@@ -874,13 +965,60 @@ working directory for `gh'."
     (seq-filter #'magit-dash-gh-pr-dashboard--entry-marked-p
                 (seq-map #'car tabulated-list-entries))))
 
+(defun magit-dash-gh-pr-dashboard--pr-url (&optional entry)
+  "Return the pull request URL for ENTRY (or entry at point).
+ENTRY may be an entry plist, a PR alist/plist, a URL string, or
+nil (which resolves to the entry at point)."
+  (cond
+   ((and (stringp entry) (string-match-p "\\`https?://" entry))
+    entry)
+   (t
+    (let* ((ent (or entry (magit-dash-gh-pr-dashboard--entry-at-point)))
+           (pr (or (plist-get ent :pr) ent))
+           (url (or (map-elt pr 'url)
+                    (map-elt pr :url)
+                    (and (listp pr) (plist-get pr :url))
+                    (and (listp pr) (cdr (assq 'url pr))))))
+      (or url
+          (let ((repo (or (plist-get ent :repo)
+                          (map-elt pr 'repo)
+                          (map-elt pr :repo)))
+                (num (or (plist-get ent :number)
+                         (map-elt pr 'number)
+                         (map-elt pr :number))))
+            (when (and repo num)
+              (format "https://github.com/%s/pull/%s" repo num))))))))
+
 (defun magit-dash-gh-pr-dashboard-open-browser ()
   "Open the pull request at point in a web browser."
   (interactive)
-  (when-let* ((entry (magit-dash-gh-pr-dashboard--entry-at-point))
-              (pr (plist-get entry :pr))
-              (url (map-elt pr 'url)))
+  (when-let* ((url (magit-dash-gh-pr-dashboard--pr-url)))
     (browse-url url)))
+
+;;;###autoload
+(defun magit-dash-gh-pr-code-review (url)
+  "Open a `code-review' buffer for pull request URL.
+Signals `user-error' if URL is missing or if `code-review'
+cannot be loaded."
+  (interactive
+   (list (or (and (derived-mode-p 'magit-dash-gh-pr-dashboard-mode)
+                  (ignore-errors (magit-dash-gh-pr-dashboard--pr-url)))
+             (read-string "Pull request URL: "))))
+  (unless (and (stringp url) (not (string-empty-p url)))
+    (user-error "A pull request URL is required"))
+  (unless (or (fboundp 'code-review-start)
+              (require 'code-review nil t))
+    (user-error "Package `code-review' is not available"))
+  (code-review-start url))
+
+;;;###autoload
+(defun magit-dash-gh-pr-dashboard-code-review (&optional entry)
+  "Open a `code-review' buffer for the pull request at point (or ENTRY)."
+  (interactive)
+  (let ((url (magit-dash-gh-pr-dashboard--pr-url entry)))
+    (unless url
+      (user-error "No pull request URL found for entry"))
+    (magit-dash-gh-pr-code-review url)))
 
 (defun magit-dash-gh-pr-dashboard-set-filter ()
   "Interactively set one PR dashboard filter field."
@@ -1754,7 +1892,8 @@ Signals `user-error' when not found."
 (transient-define-prefix magit-dash-gh-pr-dashboard-menu ()
   "Actions for the PR dashboard."
   [["Pull Request"
-    ("b"   "Open in browser"          magit-dash-gh-pr-dashboard-open-browser)]
+    ("b"   "Open in browser"          magit-dash-gh-pr-dashboard-open-browser)
+    ("R"   "Open in code-review"      magit-dash-gh-pr-dashboard-code-review)]
    ["Mark / Bulk"
     ("mm"  "Toggle mark"              magit-dash-gh-pr-dashboard-toggle-mark)
     ("mu"  "Unmark"                   magit-dash-gh-pr-dashboard-unmark)

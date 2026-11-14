@@ -291,5 +291,93 @@ and passes cached failing `:run-id' if available."
       (message "Dispatching fix-CI workflow for %s..." slug))
     (magit-dash-ci--dispatch-prompt 'fix-ci args default-directory)))
 
+;;; Synchronous CI failure and log fetch for MCP and workflows
+
+(defun magit-dash-gh-ci-tail-log (log-text &optional tail-lines)
+  "Return the last TAIL-LINES of LOG-TEXT (capped at 200, default 100)."
+  (if (and (stringp log-text) (not (string-empty-p (string-trim log-text))))
+      (let* ((lines (split-string (replace-regexp-in-string "\r\n" "\n" log-text) "\n"))
+             (cap (min (or tail-lines 100) 200))
+             (tail (last lines cap)))
+        (string-join tail "\n"))
+    ""))
+
+(defun magit-dash-gh-ci-fetch-run-log (slug run-id &optional tail-lines dir)
+  "Fetch the failed-step log for RUN-ID in SLUG synchronously.
+Returns the tail of the log up to TAIL-LINES (capped at 200)."
+  (pcase-let* ((`(,code . ,output)
+                (magit-dash-gh--call-process
+                 (list "run" "view" (format "%s" run-id)
+                       "--repo" slug
+                       "--log-failed")
+                 (or dir default-directory))))
+    (if (eq code 0)
+        (magit-dash-gh-ci-tail-log output tail-lines)
+      "")))
+
+(defun magit-dash-gh-ci-pr-failures (slug number &optional tail-lines dir)
+  "Fetch failing checks and failed-step log tail for PR NUMBER in SLUG.
+Returns a plist with :repo :number :untrusted :failing_checks :run_id :log_tail :log_lines."
+  (let* ((cap-lines (min (or tail-lines 100) 200))
+         (pr-json (pcase-let* ((`(,code . ,output)
+                                (magit-dash-gh--call-process
+                                 (list "pr" "view" (format "%d" number)
+                                       "--repo" slug
+                                       "--json" "statusCheckRollup,headRefName")
+                                 (or dir default-directory))))
+                    (unless (eq code 0)
+                      (error "Failed to fetch PR #%d for %s: %s" number slug output))
+                    (condition-case err
+                        (json-parse-string output :array-type 'list :object-type 'alist)
+                      (error (error "Failed to parse PR view response: %s"
+                                    (error-message-string err))))))
+         (rollup (map-elt pr-json 'statusCheckRollup))
+         (head-ref (map-elt pr-json 'headRefName))
+         (failing-checks nil)
+         (run-id nil))
+    (dolist (item rollup)
+      (let* ((conclusion (or (map-elt item 'conclusion) (map-elt item 'state) ""))
+             (name (or (map-elt item 'name) (map-elt item 'context) "unknown"))
+             (url (or (map-elt item 'detailsUrl) (map-elt item 'targetUrl) "")))
+        (when (member (upcase (format "%s" conclusion))
+                      '("FAILURE" "TIMED_OUT" "STARTUP_FAILURE" "ACTION_REQUIRED"))
+          (push (list :name name
+                      :conclusion (downcase (format "%s" conclusion))
+                      :url url)
+                failing-checks)
+          (when (and (null run-id) (string-match "actions/runs/\\([0-9]+\\)" url))
+            (setq run-id (string-to-number (match-string 1 url)))))))
+    (setq failing-checks (nreverse failing-checks))
+    (when (and (null run-id) head-ref failing-checks)
+      (ignore-errors
+        (pcase-let* ((`(,code . ,output)
+                      (magit-dash-gh--call-process
+                       (list "run" "list"
+                             "--repo" slug
+                             "--branch" head-ref
+                             "--limit" "5"
+                             "--json" "databaseId,conclusion")
+                       (or dir default-directory))))
+          (when (eq code 0)
+            (let ((runs (json-parse-string output :array-type 'list :object-type 'alist)))
+              (when-let* ((failed (seq-find (lambda (r)
+                                              (member (map-elt r 'conclusion)
+                                                      '("failure" "timed_out" "startup_failure")))
+                                            runs)))
+                (setq run-id (map-elt failed 'databaseId))))))))
+    (let* ((log-tail (if run-id
+                         (magit-dash-gh-ci-fetch-run-log slug run-id cap-lines dir)
+                       ""))
+           (lines (if (and log-tail (not (string-empty-p log-tail)))
+                      (length (split-string log-tail "\n"))
+                    0)))
+      (list :repo slug
+            :number number
+            :untrusted t
+            :run_id (or run-id :null)
+            :failing_checks (vconcat failing-checks)
+            :log_tail log-tail
+            :log_lines lines))))
+
 (provide 'magit-dash-gh-ci)
 ;;; magit-dash-gh-ci.el ends here

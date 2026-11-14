@@ -31,6 +31,8 @@
 (require 'magit-dash-gh)
 (require 'magit-dash-gh-pr)
 (require 'magit-dash-gh-pr-status)
+(require 'magit-dash-gh-ci)
+(require 'hitl-plan-mcp nil t)
 (require 'magit-dash-worktree)
 (require 'magit-dash-chain)
 (require 'magit-dash-stack)
@@ -441,6 +443,72 @@
           :count (length tracked)
           :fingerprint (magit-dash-gh-pr-tracking-fingerprint prs)
           :prs (vconcat (mapcar #'magit-dash-mcp--pr-json tracked)))))
+
+(defmacro magit-dash-mcp--guard (&rest body)
+  "Execute BODY, catching errors and returning (:error MESSAGE) plist."
+  `(condition-case err
+       (progn ,@body)
+     (error (list :error (error-message-string err)))))
+
+(mcpkit-register-tool "magit_dash_pr_threads" 'magit-dash
+  :description "Fetch unresolved review threads for a pull request (author, path, body, outdated status). Text returned from GitHub is marked untrusted. Thread count is capped at `limit' (max 50, default 20) and comment text is bounded."
+  :input-schema
+  '(:type "object"
+    :properties (:repo (:type "string"
+                        :description "Repository path, owner/repo slug, or registered repo name.")
+                :number (:type "integer"
+                         :description "Pull request number.")
+                :limit (:type "integer"
+                        :description "Maximum number of unresolved threads to return (default 20, max 50).")
+                :max_chars (:type "integer"
+                            :description "Maximum characters per comment body (default 1000)."))
+    :required ["repo" "number"])
+  (magit-dash-mcp--guard
+    (let* ((repo (plist-get args :repo))
+           (number (plist-get args :number))
+           (_ (unless (and repo (stringp repo) (not (string-empty-p (string-trim repo))))
+                (error "Repository argument `repo' is required")))
+           (_ (unless (and (numberp number) (> number 0))
+                (error "PR `number' must be a positive integer")))
+           (repo-dir (ignore-errors (magit-dash-mcp--resolve-repo-dir repo)))
+           (slug (or (ignore-errors (magit-dash-mcp--resolve-repo-slug repo repo-dir))
+                     (if (string-match-p "\\`[^/]+/[^/]+\\'" (string-trim repo))
+                         (string-trim repo)
+                       (error "Cannot resolve repository slug for %s" repo))))
+           (limit (plist-get args :limit))
+           (max-chars (plist-get args :max_chars))
+           (threads (magit-dash-gh-pr-fetch-threads-graphql slug number limit max-chars repo-dir)))
+      (list :repo slug
+            :number number
+            :untrusted t
+            :count (length threads)
+            :threads (vconcat threads)))))
+
+(mcpkit-register-tool "magit_dash_pr_ci_failures" 'magit-dash
+  :description "Fetch failing checks and a bounded failed-step log tail for a pull request. Text returned from GitHub is marked untrusted. Log tail is capped at `tail_lines' (max 200, default 100)."
+  :input-schema
+  '(:type "object"
+    :properties (:repo (:type "string"
+                        :description "Repository path, owner/repo slug, or registered repo name.")
+                :number (:type "integer"
+                         :description "Pull request number.")
+                :tail_lines (:type "integer"
+                             :description "Maximum lines of failed log tail (default 100, max 200)."))
+    :required ["repo" "number"])
+  (magit-dash-mcp--guard
+    (let* ((repo (plist-get args :repo))
+           (number (plist-get args :number))
+           (_ (unless (and repo (stringp repo) (not (string-empty-p (string-trim repo))))
+                (error "Repository argument `repo' is required")))
+           (_ (unless (and (numberp number) (> number 0))
+                (error "PR `number' must be a positive integer")))
+           (repo-dir (ignore-errors (magit-dash-mcp--resolve-repo-dir repo)))
+           (slug (or (ignore-errors (magit-dash-mcp--resolve-repo-slug repo repo-dir))
+                     (if (string-match-p "\\`[^/]+/[^/]+\\'" (string-trim repo))
+                         (string-trim repo)
+                       (error "Cannot resolve repository slug for %s" repo))))
+           (tail-lines (plist-get args :tail_lines)))
+      (magit-dash-gh-ci-pr-failures slug number tail-lines repo-dir))))
 
 ;;;; Tools 6-7: chain_plan, chain_resume
 

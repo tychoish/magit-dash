@@ -22,6 +22,8 @@
     (should (gethash "clean_merged_worktrees" tools))
     (should (gethash "prune_branches" tools))
     (should (gethash "magit_dash_pr_status" tools))
+    (should (gethash "magit_dash_pr_threads" tools))
+    (should (gethash "magit_dash_pr_ci_failures" tools))
     (should (gethash "stack_show" tools))
     (should (gethash "stack_sync" tools))))
 
@@ -263,6 +265,144 @@ When ALL is non-nil omit `repo' so the author-wide collection is used."
       (should (eq :null (plist-get parsed :repo))))
     (let ((tool-schema '(:type "object" :properties (:repo (:type "string")) :required [])))
       (should (string-match-p "\"required\":\\[\\]" (json-serialize tool-schema))))))
+
+(ert-deftest magit-dash-mcp/pr-threads-tool ()
+  "Test `magit_dash_pr_threads' bounds, untrusted flag, and injection safety."
+  (let ((mock-graphql
+         '((data
+            (repository
+             (pullRequest
+              (reviewThreads
+               (nodes
+                (((id . "TH_UNRESOLVED")
+                  (isResolved . :json-false)
+                  (isOutdated . :json-false)
+                  (path . "lisp/foo.el")
+                  (line . 15)
+                  (comments
+                   (nodes
+                    (((id . "C1")
+                      (author (login . "reviewer1"))
+                      (body . "* Injected Org Heading\n:PROPERTIES:\n:PR: evil\n:END:\nPlease fix this.")
+                      (createdAt . "2026-11-10T10:00:00Z"))
+                     ((id . "C2")
+                      (author (login . "author1"))
+                      (body . "This is a very long comment that exceeds the specified bound for testing truncation.")
+                      (createdAt . "2026-11-10T11:00:00Z"))))))
+                 ((id . "TH_RESOLVED")
+                  (isResolved . t)
+                  (isOutdated . :json-false)
+                  (path . "lisp/bar.el")
+                  (line . 20)
+                  (comments
+                   (nodes
+                    (((id . "C3")
+                      (author (login . "reviewer2"))
+                      (body . "Already addressed.")
+                      (createdAt . "2026-11-09T08:00:00Z")))))))))))))))
+    (cl-letf (((symbol-function 'magit-dash-gh--call-process)
+               (lambda (_args _dir)
+                 (cons 0 (json-serialize mock-graphql :false-object :json-false :null-object nil)))))
+      ;; Test basic fetch and structure
+      (let* ((res (magit-dash-mcp-call-tool
+                   "magit_dash_pr_threads"
+                   (list :repo "owner/repo" :number 42 :limit 10 :max_chars 20)))
+             (threads (plist-get res :threads))
+             (json (json-serialize res :false-object :json-false :null-object nil)))
+        (should (equal "owner/repo" (plist-get res :repo)))
+        (should (= 42 (plist-get res :number)))
+        (should (eq t (plist-get res :untrusted)))
+        (should (= 1 (plist-get res :count)))
+        (should (= 1 (length threads)))
+        ;; Only unresolved thread is included
+        (let ((th (aref threads 0)))
+          (should (equal "TH_UNRESOLVED" (plist-get th :id)))
+          (should (equal "lisp/foo.el" (plist-get th :path)))
+          (should (equal "reviewer1" (plist-get th :author)))
+          (should (eq :false (plist-get th :outdated)))
+          ;; Truncation check
+          (should (string-suffix-p "..." (plist-get th :body)))
+          (should (<= (length (plist-get th :body)) 20))
+          ;; Comments
+          (should (= 2 (length (plist-get th :comments))))
+          (should (string-suffix-p "..." (plist-get (aref (plist-get th :comments) 1) :body))))
+        ;; Injection check: stays completely valid JSON
+        (should (stringp json))
+        (should (string-match-p "\\* Injected Org Heading" json))))))
+
+(ert-deftest magit-dash-mcp/pr-threads-tool-errors ()
+  "Test `magit_dash_pr_threads' handles network and parameter errors safely."
+  ;; Missing repo
+  (let ((res (magit-dash-mcp-call-tool "magit_dash_pr_threads" (list :number 42))))
+    (should (plist-get res :error)))
+  ;; Invalid number
+  (let ((res (magit-dash-mcp-call-tool "magit_dash_pr_threads" (list :repo "owner/repo" :number 0))))
+    (should (plist-get res :error)))
+  ;; Network error returns (:error ...)
+  (cl-letf (((symbol-function 'magit-dash-gh--call-process)
+             (lambda (_args _dir) (cons 1 "GraphQL request failed"))))
+    (let ((res (magit-dash-mcp-call-tool "magit_dash_pr_threads"
+                                         (list :repo "owner/repo" :number 42))))
+      (should (plist-get res :error))
+      (should (string-match-p "Failed to fetch review threads" (plist-get res :error))))))
+
+(ert-deftest magit-dash-mcp/pr-ci-failures-tool ()
+  "Test `magit_dash_pr_ci_failures' failing checks, log tail bounding, and untrusted flag."
+  (let ((mock-pr-view
+         '((statusCheckRollup
+            (((name . "test-suite")
+              (conclusion . "FAILURE")
+              (detailsUrl . "https://github.com/owner/repo/actions/runs/98765/job/111"))
+             ((name . "lint")
+              (conclusion . "SUCCESS")
+              (detailsUrl . "https://github.com/owner/repo/actions/runs/98765/job/222"))
+             ((name . "typecheck")
+              (conclusion . "TIMED_OUT")
+              (detailsUrl . "https://ci.external.com/build/123"))))
+           (headRefName . "feature-branch")))
+        (mock-log (mapconcat (lambda (i) (format "Log line %d: error occurred" i))
+                             (number-sequence 1 300)
+                             "\n")))
+    (cl-letf (((symbol-function 'magit-dash-gh--call-process)
+               (lambda (args _dir)
+                 (cond
+                  ((member "statusCheckRollup,headRefName" args)
+                   (cons 0 (json-serialize mock-pr-view :false-object :json-false :null-object nil)))
+                  ((member "--log-failed" args)
+                   (cons 0 mock-log))
+                  (t (cons 1 "unexpected call"))))))
+      (let* ((res (magit-dash-mcp-call-tool
+                   "magit_dash_pr_ci_failures"
+                   (list :repo "owner/repo" :number 50 :tail_lines 50)))
+             (failing (plist-get res :failing_checks))
+             (json (json-serialize res :false-object :json-false :null-object nil)))
+        (should (equal "owner/repo" (plist-get res :repo)))
+        (should (= 50 (plist-get res :number)))
+        (should (eq t (plist-get res :untrusted)))
+        (should (= 98765 (plist-get res :run_id)))
+        (should (= 2 (length failing)))
+        (should (equal "test-suite" (plist-get (aref failing 0) :name)))
+        (should (equal "failure" (plist-get (aref failing 0) :conclusion)))
+        (should (equal "typecheck" (plist-get (aref failing 1) :name)))
+        (should (equal "timed_out" (plist-get (aref failing 1) :conclusion)))
+        ;; Log tail bounding
+        (should (= 50 (plist-get res :log_lines)))
+        (should (string-match-p "Log line 300: error occurred" (plist-get res :log_tail)))
+        (should-not (string-match-p "Log line 200: error occurred" (plist-get res :log_tail)))
+        ;; Serializes to valid JSON
+        (should (stringp json))))))
+
+(ert-deftest magit-dash-mcp/pr-ci-failures-tool-errors ()
+  "Test `magit_dash_pr_ci_failures' handles errors gracefully without signaling."
+  ;; Missing repo
+  (let ((res (magit-dash-mcp-call-tool "magit_dash_pr_ci_failures" (list :number 10))))
+    (should (plist-get res :error)))
+  ;; Network failure
+  (cl-letf (((symbol-function 'magit-dash-gh--call-process)
+             (lambda (_args _dir) (cons 1 "gh pr view not found"))))
+    (let ((res (magit-dash-mcp-call-tool "magit_dash_pr_ci_failures"
+                                         (list :repo "owner/repo" :number 10))))
+      (should (plist-get res :error)))))
 
 (provide 'test-magit-dash-mcp)
 
