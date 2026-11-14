@@ -943,6 +943,7 @@ without real git repos or a live dashboard buffer."
       (cl-letf (((symbol-function 'magit-dash--build-entry)
                  (lambda (r) (push (magit-dash-repo-name r) built) nil)))
         (with-temp-buffer
+          (magit-dash-mode)
           (setq-local magit-dash--tag-filter 'work)
           (magit-dash-refresh))))
     (should (= 1 (length built)))
@@ -959,6 +960,7 @@ without real git repos or a live dashboard buffer."
       (cl-letf (((symbol-function 'magit-dash--build-entry)
                  (lambda (r) (push (magit-dash-repo-name r) built) nil)))
         (with-temp-buffer
+          (magit-dash-mode)
           (setq-local magit-dash--tag-filter nil)
           (magit-dash-refresh))))
     (should (= 2 (length built)))))
@@ -1010,6 +1012,7 @@ without real git repos or a live dashboard buffer."
       (cl-letf (((symbol-function 'magit-dash--build-entry)
                  (lambda (r) (push (magit-dash-repo-name r) built) nil)))
         (with-temp-buffer
+          (magit-dash-mode)
           (setq-local magit-dash--hidden-paths '("/tmp/r1"))
           (magit-dash-refresh))))
     (should (= 1 (length built)))
@@ -1026,6 +1029,7 @@ without real git repos or a live dashboard buffer."
       (cl-letf (((symbol-function 'magit-dash--build-entry)
                  (lambda (r) (push (magit-dash-repo-name r) built) nil)))
         (with-temp-buffer
+          (magit-dash-mode)
           (setq-local magit-dash--hidden-paths '("/tmp/r1" "/tmp/r2"))
           (magit-dash-unhide-all)
           (should (null magit-dash--hidden-paths)))))
@@ -1052,6 +1056,7 @@ without real git repos or a live dashboard buffer."
          (magit-dash-repo-list (list r1 r2)))
     (magit-dash-test--with-refresh-stubs
       (with-temp-buffer
+        (magit-dash-mode)
         (setq-local magit-dash--hidden-paths '("/tmp/r1" "/tmp/r2"))
         (cl-letf (((symbol-function 'annotated-completing-read) (lambda (_table &rest _) "/tmp/r1")))
           (magit-dash-unhide-repo)
@@ -1060,6 +1065,7 @@ without real git repos or a live dashboard buffer."
 (ert-deftest magit-dash/unhide-repo-errors-when-none ()
   "Unhiding when no repos are hidden signals user-error."
   (with-temp-buffer
+    (magit-dash-mode)
     (setq-local magit-dash--hidden-paths nil)
     (should-error (magit-dash-unhide-repo) :type 'user-error)))
 
@@ -3796,6 +3802,7 @@ The bug was that add-text-properties returns t, not the modified string."
               ((symbol-function 'magit-dash--refresh-fetch-or-sync-async)
                (lambda (repos) (setq called-repos repos))))
       (with-temp-buffer
+        (magit-dash-mode)
         (magit-dash-refresh)))
     (should (= 1 (length called-repos)))
     (should (eq repo (car called-repos)))))
@@ -4206,7 +4213,9 @@ The bug was that add-text-properties returns t, not the modified string."
                (setq cancelled t))))
           (magit-dash-repo-list nil))
      (cl-letf (((symbol-function 'magit-dash-gh-ci-fetch-batch) (lambda (&rest _) nil)))
-       (magit-dash-refresh)
+       (with-temp-buffer
+         (magit-dash-mode)
+         (magit-dash-refresh))
        (should cancelled)))))
 
 (ert-deftest magit-dash/transient-menus-selector-conventions ()
@@ -4541,3 +4550,36 @@ The bug was that add-text-properties returns t, not the modified string."
         (magit-dash-mode)
         (should (memq 'magit-dash--which-key-sync-timer window-selection-change-functions))
         (should (alist-get 'magit-dash-mode which-key-replacement-alist))))))
+
+(ert-deftest magit-dash/refresh-does-not-corrupt-other-buffers ()
+  "magit-dash-refresh from an arbitrary buffer does not overwrite it."
+  (with-temp-buffer
+    (insert "arbitrary content\nline 2")
+    (magit-dash-refresh)
+    (should (equal (buffer-string) "arbitrary content\nline 2"))
+    (should-not (bound-and-true-p tabulated-list-format))))
+
+(ert-deftest magit-dash/refresh-redirects-to-dashboard-buffer ()
+  "magit-dash-refresh from non-dashboard buffer refreshes live magit-dash buffer."
+  (let* ((dash-buf (get-buffer-create magit-dash-buffer-name))
+         (other (generate-new-buffer "*other-buffer*"))
+         (refresh-called nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer dash-buf
+            (magit-dash-mode))
+          (with-current-buffer other
+            (insert "untouched text")
+            (cl-letf (((symbol-function 'magit-dash--cancel-refresh-jobs) #'ignore)
+                      ((symbol-function 'magit-dash--discover-worktrees) #'ignore)
+                      ((symbol-function 'magit-dash--discover-submodules) (lambda () (lambda (&rest _) nil)))
+                      ((symbol-function 'magit-dash--rebuild-submodule-path-set) #'ignore)
+                      ((symbol-function 'tabulated-list-init-header) #'ignore)
+                      ((symbol-function 'tabulated-list-print) (lambda (&rest _) (setq refresh-called t)))
+                      ((symbol-function 'magit-dash--refresh-repos) (lambda (&rest _) (lambda (&rest _) nil))))
+              (magit-dash-refresh)
+              (should (equal (buffer-string) "untouched text"))
+              (should-not (bound-and-true-p tabulated-list-format))))
+          (should refresh-called))
+      (kill-buffer dash-buf)
+      (kill-buffer other))))

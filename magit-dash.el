@@ -2769,34 +2769,47 @@ Returns a cancellation handle."
 Discovers worktrees synchronously and submodules asynchronously.
 Renders the table immediately with cached state, then cancels any pending
 refresh jobs before launching throttled stats, CI, and fetch/sync pipelines
-via `gen-run-async'."
+via `gen-run-async'.
+When invoked outside `magit-dash-mode', safely redirects to the
+`magit-dash-buffer-name' buffer if live, preventing accidental corruption
+of other buffers."
   (interactive)
-  (magit-dash--cancel-refresh-jobs)
-  (magit-dash--discover-worktrees)
-  (let ((subm-handle (magit-dash--discover-submodules)))
-    (magit-dash--rebuild-submodule-path-set)
-    (let* ((visible-base
-            (seq-filter
-             (lambda (r)
-               (and (not (member (magit-dash-repo-path r) magit-dash--hidden-paths))
-                    (if magit-dash--tag-filter
-                        (memq magit-dash--tag-filter
-                              (magit-dash--all-tags-for r))
-                      t)))
-             magit-dash-repo-list))
-           (repos (seq-filter
-                   (lambda (r)
-                     (not (member (magit-dash-repo-path r) magit-dash--hidden-paths)))
-                   (magit-dash--sorted-repos visible-base))))
-      (setq tabulated-list-format (magit-dash--build-format repos))
-      (tabulated-list-init-header)
-      (setq tabulated-list-entries (seq-map #'magit-dash--build-entry repos))
-      (tabulated-list-print t)
-      (let ((refresh-handle (magit-dash--refresh-repos repos)))
-        (setq magit-dash--refresh-cancel-handle
-              (lambda (&optional action)
-                (when (functionp subm-handle) (funcall subm-handle action))
-                (when (functionp refresh-handle) (funcall refresh-handle action))))))))
+  (if (not (derived-mode-p 'magit-dash-mode))
+      (if-let* ((buf (get-buffer magit-dash-buffer-name)))
+          (if (and (buffer-live-p buf)
+                   (with-current-buffer buf (derived-mode-p 'magit-dash-mode)))
+              (with-current-buffer buf
+                (magit-dash-refresh))
+            (when (called-interactively-p 'interactive)
+              (user-error "Buffer %s is not in magit-dash-mode" magit-dash-buffer-name)))
+        (when (called-interactively-p 'interactive)
+          (user-error "No %s buffer exists" magit-dash-buffer-name)))
+    (magit-dash--cancel-refresh-jobs)
+    (magit-dash--discover-worktrees)
+    (let ((subm-handle (magit-dash--discover-submodules)))
+      (magit-dash--rebuild-submodule-path-set)
+      (let* ((visible-base
+              (seq-filter
+               (lambda (r)
+                 (and (not (member (magit-dash-repo-path r) magit-dash--hidden-paths))
+                      (if magit-dash--tag-filter
+                          (memq magit-dash--tag-filter
+                                (magit-dash--all-tags-for r))
+                        t)))
+               magit-dash-repo-list))
+             (repos (seq-filter
+                     (lambda (r)
+                       (not (member (magit-dash-repo-path r) magit-dash--hidden-paths)))
+                     (magit-dash--sorted-repos visible-base))))
+        (setq tabulated-list-format (magit-dash--build-format repos))
+        (tabulated-list-init-header)
+        (setq tabulated-list-entries (seq-map #'magit-dash--build-entry repos))
+        (tabulated-list-print t)
+        (let ((refresh-handle (magit-dash--refresh-repos repos)))
+          (setq magit-dash--refresh-cancel-handle
+                (lambda (&optional action)
+                  (when (functionp subm-handle) (funcall subm-handle action))
+                  (when (functionp refresh-handle) (funcall refresh-handle action)))))))))
 
 (defun magit-dash-hard-refresh ()
   "Clear all caches and repopulate the dashboard from scratch.
@@ -3997,15 +4010,17 @@ Signals `user-error' when `magit-dash-repo-list' is empty."
 (defun magit-dash-toggle-mark ()
   "Toggle the mark on the repository at point and advance to the next line."
   (interactive)
-  (let* ((repo (magit-dash--repo-at-point))
-         (path (magit-dash-repo-path repo)))
-    (setq magit-dash--marked-paths
-          (if (member path magit-dash--marked-paths)
-              (delete path magit-dash--marked-paths)
-            (cons path magit-dash--marked-paths)))
-    (magit-dash--update-entry-for repo)
-    (tabulated-list-print t)
-    (forward-line 1)))
+  (unless (derived-mode-p 'magit-dash-mode)
+    (user-error "Not in a magit-dash buffer"))
+  (when-let* ((repo (magit-dash--repo-at-point)))
+    (let ((path (magit-dash-repo-path repo)))
+      (setq magit-dash--marked-paths
+            (if (member path magit-dash--marked-paths)
+                (delete path magit-dash--marked-paths)
+              (cons path magit-dash--marked-paths)))
+      (magit-dash--update-entry-for repo)
+      (tabulated-list-print t)
+      (forward-line 1))))
 
 (defun magit-dash-unmark-all ()
   "Unmark all repositories in the dashboard."

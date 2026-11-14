@@ -886,32 +886,47 @@ working directory for `gh'."
            (lambda (_output _code) nil)))))))
 
 (defun magit-dash-gh-pr-dashboard-refresh ()
-  "Fetch PRs matching current filters and repopulate the PR table."
+  "Fetch PRs matching current filters and repopulate the PR table.
+When invoked outside `magit-dash-gh-pr-dashboard-mode', safely redirects
+to the PR dashboard buffer if live, preventing accidental corruption of
+other buffers."
   (interactive)
-  (let* ((filters magit-dash-gh-pr-dashboard--filters)
-         (args (magit-dash-gh-pr-dashboard--build-args filters))
-         (buf (current-buffer))
-         (dir (or (ignore-errors (magit-dash-gh--repo-dir))
-                  (expand-file-name "~"))))
-    (message "magit-gh: fetching PRs...")
-    (magit-dash-gh--run-process
-     args dir
-     (lambda (output)
-       (when (buffer-live-p buf)
-         (with-current-buffer buf
-           (setq tabulated-list-entries
-                 (or (magit-dash-gh-pr-dashboard--parse-output output filters) nil))
-           (setq tabulated-list-format
-                 (magit-dash-gh-pr-dashboard--build-format
-                  (window-width (get-buffer-window buf t))
-                  tabulated-list-entries))
-           (tabulated-list-init-header)
-           (tabulated-list-print t)
-           (message "magit-gh: %d PR(s)"
-                    (length tabulated-list-entries)))
-         (unless (plist-get filters :repo)
-           (magit-dash-gh-pr-dashboard--enrich-ci
-            buf (or (plist-get filters :state) "open") dir)))))))
+  (if (not (derived-mode-p 'magit-dash-gh-pr-dashboard-mode))
+      (if-let* ((dash-buf (get-buffer (or (bound-and-true-p magit-dash-gh-pr-buffer-name)
+                                          "*magit-dash-gh-prs*"))))
+          (if (and (buffer-live-p dash-buf)
+                   (with-current-buffer dash-buf (derived-mode-p 'magit-dash-gh-pr-dashboard-mode)))
+              (with-current-buffer dash-buf
+                (magit-dash-gh-pr-dashboard-refresh))
+            (when (called-interactively-p 'interactive)
+              (user-error "Buffer is not in magit-dash-gh-pr-dashboard-mode")))
+        (when (called-interactively-p 'interactive)
+          (user-error "No PR dashboard buffer exists")))
+    (let* ((filters magit-dash-gh-pr-dashboard--filters)
+           (args (magit-dash-gh-pr-dashboard--build-args filters))
+           (buf (current-buffer))
+           (dir (or (ignore-errors (magit-dash-gh--repo-dir))
+                    (expand-file-name "~"))))
+      (message "magit-gh: fetching PRs...")
+      (magit-dash-gh--run-process
+       args dir
+       (lambda (output)
+         (when (and (buffer-live-p buf)
+                    (with-current-buffer buf (derived-mode-p 'magit-dash-gh-pr-dashboard-mode)))
+           (with-current-buffer buf
+             (setq tabulated-list-entries
+                   (or (magit-dash-gh-pr-dashboard--parse-output output filters) nil))
+             (setq tabulated-list-format
+                   (magit-dash-gh-pr-dashboard--build-format
+                    (window-width (get-buffer-window buf t))
+                    tabulated-list-entries))
+             (tabulated-list-init-header)
+             (tabulated-list-print t)
+             (message "magit-gh: %d PR(s)"
+                      (length tabulated-list-entries)))
+           (unless (plist-get filters :repo)
+             (magit-dash-gh-pr-dashboard--enrich-ci
+              buf (or (plist-get filters :state) "open") dir))))))))
 
 (defun magit-dash-gh-pr-dashboard--entry-at-point ()
   "Return the PR entry plist at point or signal `user-error'."

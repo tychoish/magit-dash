@@ -69,5 +69,13 @@
           (should (= (length tabulated-list-entries) 1))
           (should (equal (magit-dash-repo-name (caar tabulated-list-entries)) "dirty")))))))
 
+(ert-deftest magit-dash-actionable/refresh-does-not-corrupt-other-buffers ()
+  "magit-dash-actionable-refresh from an arbitrary buffer does not overwrite it."
+  (with-temp-buffer
+    (insert "original actionable text")
+    (magit-dash-actionable-refresh)
+    (should (equal (buffer-string) "original actionable text"))
+    (should-not (bound-and-true-p tabulated-list-format))))
+
 (provide 'test-magit-dash-actionable)
 ;;; test-magit-dash-actionable.el ends here
