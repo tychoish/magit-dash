@@ -274,32 +274,32 @@ When ALL is non-nil omit `repo' so the author-wide collection is used."
              (pullRequest
               (reviewThreads
                (nodes
-                (((id . "TH_UNRESOLVED")
-                  (isResolved . :json-false)
-                  (isOutdated . :json-false)
-                  (path . "lisp/foo.el")
-                  (line . 15)
-                  (comments
-                   (nodes
-                    (((id . "C1")
-                      (author (login . "reviewer1"))
-                      (body . "* Injected Org Heading\n:PROPERTIES:\n:PR: evil\n:END:\nPlease fix this.")
-                      (createdAt . "2026-11-10T10:00:00Z"))
-                     ((id . "C2")
-                      (author (login . "author1"))
-                      (body . "This is a very long comment that exceeds the specified bound for testing truncation.")
-                      (createdAt . "2026-11-10T11:00:00Z"))))))
-                 ((id . "TH_RESOLVED")
-                  (isResolved . t)
-                  (isOutdated . :json-false)
-                  (path . "lisp/bar.el")
-                  (line . 20)
-                  (comments
-                   (nodes
-                    (((id . "C3")
-                      (author (login . "reviewer2"))
-                      (body . "Already addressed.")
-                      (createdAt . "2026-11-09T08:00:00Z")))))))))))))))
+                . [((id . "TH_UNRESOLVED")
+                    (isResolved . :json-false)
+                    (isOutdated . :json-false)
+                    (path . "lisp/foo.el")
+                    (line . 15)
+                    (comments
+                     (nodes
+                      . [((id . "C1")
+                          (author (login . "reviewer1"))
+                          (body . "* Injected Org Heading\n:PROPERTIES:\n:PR: evil\n:END:\nPlease fix this.")
+                          (createdAt . "2026-11-10T10:00:00Z"))
+                         ((id . "C2")
+                          (author (login . "author1"))
+                          (body . "This is a very long comment that exceeds the specified bound for testing truncation.")
+                          (createdAt . "2026-11-10T11:00:00Z"))])))
+                   ((id . "TH_RESOLVED")
+                    (isResolved . t)
+                    (isOutdated . :json-false)
+                    (path . "lisp/bar.el")
+                    (line . 20)
+                    (comments
+                     (nodes
+                      . [((id . "C3")
+                          (author (login . "reviewer2"))
+                          (body . "Already addressed.")
+                          (createdAt . "2026-11-09T08:00:00Z"))])))]))))))))
     (cl-letf (((symbol-function 'magit-dash-gh--call-process)
                (lambda (_args _dir)
                  (cons 0 (json-serialize mock-graphql :false-object :json-false :null-object nil)))))
@@ -308,7 +308,7 @@ When ALL is non-nil omit `repo' so the author-wide collection is used."
                    "magit_dash_pr_threads"
                    (list :repo "owner/repo" :number 42 :limit 10 :max_chars 20)))
              (threads (plist-get res :threads))
-             (json (json-serialize res :false-object :json-false :null-object nil)))
+             (json (json-serialize res :false-object :false :null-object nil)))
         (should (equal "owner/repo" (plist-get res :repo)))
         (should (= 42 (plist-get res :number)))
         (should (eq t (plist-get res :untrusted)))
@@ -328,7 +328,7 @@ When ALL is non-nil omit `repo' so the author-wide collection is used."
           (should (string-suffix-p "..." (plist-get (aref (plist-get th :comments) 1) :body))))
         ;; Injection check: stays completely valid JSON
         (should (stringp json))
-        (should (string-match-p "\\* Injected Org Heading" json))))))
+        (should (string-match-p "\\* Injected Org" json))))))
 
 (ert-deftest magit-dash-mcp/pr-threads-tool-errors ()
   "Test `magit_dash_pr_threads' handles network and parameter errors safely."
@@ -350,15 +350,15 @@ When ALL is non-nil omit `repo' so the author-wide collection is used."
   "Test `magit_dash_pr_ci_failures' failing checks, log tail bounding, and untrusted flag."
   (let ((mock-pr-view
          '((statusCheckRollup
-            (((name . "test-suite")
-              (conclusion . "FAILURE")
-              (detailsUrl . "https://github.com/owner/repo/actions/runs/98765/job/111"))
-             ((name . "lint")
-              (conclusion . "SUCCESS")
-              (detailsUrl . "https://github.com/owner/repo/actions/runs/98765/job/222"))
-             ((name . "typecheck")
-              (conclusion . "TIMED_OUT")
-              (detailsUrl . "https://ci.external.com/build/123"))))
+            . [((name . "test-suite")
+                (conclusion . "FAILURE")
+                (detailsUrl . "https://github.com/owner/repo/actions/runs/98765/job/111"))
+               ((name . "lint")
+                (conclusion . "SUCCESS")
+                (detailsUrl . "https://github.com/owner/repo/actions/runs/98765/job/222"))
+               ((name . "typecheck")
+                (conclusion . "TIMED_OUT")
+                (detailsUrl . "https://ci.external.com/build/123"))])
            (headRefName . "feature-branch")))
         (mock-log (mapconcat (lambda (i) (format "Log line %d: error occurred" i))
                              (number-sequence 1 300)
@@ -375,7 +375,7 @@ When ALL is non-nil omit `repo' so the author-wide collection is used."
                    "magit_dash_pr_ci_failures"
                    (list :repo "owner/repo" :number 50 :tail_lines 50)))
              (failing (plist-get res :failing_checks))
-             (json (json-serialize res :false-object :json-false :null-object nil)))
+             (json (json-serialize res :false-object :false :null-object nil)))
         (should (equal "owner/repo" (plist-get res :repo)))
         (should (= 50 (plist-get res :number)))
         (should (eq t (plist-get res :untrusted)))
