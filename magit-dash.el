@@ -67,6 +67,10 @@
 (declare-function magit-log "magit-log")
 (declare-function magit-show-commit "magit-diff")
 (declare-function magit-checkout "magit-branch")
+(declare-function magit-merge-plain "magit-merge")
+(declare-function magit-git-rebase "magit-sequence")
+(declare-function magit-anything-modified-p "magit-status")
+(declare-function magit-dash-worktree-for-branch "magit-dash-worktree")
 (declare-function magit-worktree-checkout "magit-worktree")
 (declare-function magit-worktree-delete "magit-worktree")
 (declare-function magit-stash-clear "magit-stash")
@@ -118,12 +122,13 @@
   (fetch-on-refresh nil)
   (gh-account nil)
   (gh-host "github.com")
-  (pr nil))
+  (pr nil)
+  (upstream-repo nil)
+  (upstream-branch nil))
 
 (defalias 'magit-dash-repo-account #'magit-dash-repo-gh-account)
 (defalias 'magit-dash-repo-host #'magit-dash-repo-gh-host)
-(defalias 'magit-dash-repo-upstream-repo #'magit-dash-repo-repo)
-(defalias 'magit-dash-repo-upstream #'magit-dash-repo-repo)
+(defalias 'magit-dash-repo-upstream #'magit-dash-repo-upstream-repo)
 (defalias 'magit-dash-repo-remote-url #'magit-dash-repo-clone-url)
 (defalias 'magit-dash-repo-symlinks #'magit-dash-repo-worktree-symlinks)
 (defalias 'magit-dash-repo-auto-sync-on-refresh #'magit-dash-repo-sync-on-refresh)
@@ -470,7 +475,7 @@ first)."
       (expand-file-name path-or-url)
     path-or-url))
 
-(cl-defun magit-dash-register (&key name path repo include-prs include-ci auto-fetch auto-pull auto-commit auto-push auto-sync-command hooks tags commands sort-hint worktree sync-branches timer clone-url remote-url worktree-symlinks symlinks remote-sync sync-on-refresh auto-sync-on-refresh refresh-sync fetch-on-refresh gh-account gh-host pr)
+(cl-defun magit-dash-register (&key name path repo include-prs include-ci auto-fetch auto-pull auto-commit auto-push auto-sync-command hooks tags commands sort-hint worktree sync-branches timer clone-url remote-url worktree-symlinks symlinks remote-sync sync-on-refresh auto-sync-on-refresh refresh-sync fetch-on-refresh gh-account gh-host pr upstream-repo upstream upstream-branch)
   "Register or replace a repository with NAME at absolute PATH.
 REPO is the upstream repository path or URL for bootstrapping.
 INCLUDE-PRS, INCLUDE-CI, AUTO-FETCH, AUTO-PULL, AUTO-COMMIT, AUTO-PUSH,
@@ -546,7 +551,10 @@ Keyword arguments:
   :gh-account         GitHub account login (e.g. \"myuser\") used for
                       gh CLI commands.
   :gh-host            GitHub host (defaults to \"github.com\" or
-                      `magit-dash-multi-github-host\')."
+                      `magit-dash-multi-github-host\').
+  :upstream-repo      path or URL of upstream repository for tracking/sync.
+  :upstream           alias for :upstream-repo.
+  :upstream-branch    upstream branch name to sync from (e.g. \"master\")."
   (unless (and name path)
     (user-error "Magit-dash: must specify name (%s) and path (%s)" name path))
   (when auto-sync-command
@@ -563,6 +571,7 @@ Keyword arguments:
     (magit-dash-gh-pr-check-options name pr))
 
   (let* ((abs-path (expand-file-name path))
+         (upstream-target (or upstream-repo upstream (when repo (magit-dash--expand-repo-path repo))))
          (upstream (when repo (magit-dash--expand-repo-path repo)))
          (url (or clone-url remote-url))
          (links (or worktree-symlinks symlinks))
@@ -615,7 +624,9 @@ Keyword arguments:
                            :fetch-on-refresh fetch-on-refresh
                            :gh-account gh-account
                            :gh-host (or gh-host magit-dash-multi-github-host "github.com")
-                           :pr pr))))))
+                           :pr pr
+                           :upstream-repo upstream-target
+                           :upstream-branch upstream-branch))))))
   (when (and timer (fboundp 'magit-dash-register-sync-timer))
     (apply #'magit-dash-register-sync-timer :name name :repos (list name) timer)))
 
@@ -719,7 +730,15 @@ run the command in the background without popping up or stealing focus."
                            explicit-commands
                          (append explicit-commands
                                  '(("rebuild" . magit-dash-gh-workflow-run))))
-                     explicit-commands)))
+                     explicit-commands))
+         (commands (if (magit-dash-repo-upstream-repo repo)
+                       (let ((cmds commands))
+                         (unless (or (assoc "merge-upstream" cmds) (assoc 'merge-upstream cmds))
+                           (setq cmds (append cmds '(("merge-upstream" . magit-dash-upstream-merge)))))
+                         (unless (or (assoc "rebase-upstream" cmds) (assoc 'rebase-upstream cmds))
+                           (setq cmds (append cmds '(("rebase-upstream" . magit-dash-upstream-rebase)))))
+                         cmds)
+                     commands)))
     (unless commands
       (user-error "No commands registered for %s" (magit-dash-repo-name repo)))
     (let* ((picked (annotated-completing-read
@@ -729,6 +748,9 @@ run the command in the background without popping up or stealing focus."
                                       (target (car norm))
                                       (ann (cond
                                             ((eq target 'magit-dash-gh-workflow-run) "workflow run")
+                                            ((eq target 'magit-dash-upstream-merge) "merge upstream branch into local main")
+                                            ((eq target 'magit-dash-upstream-rebase) "rebase local main onto upstream branch")
+                                            ((eq target 'magit-dash-upstream-fetch) "fetch upstream branch")
                                             ((stringp target) target)
                                             (t (format "%s" target)))))
                                  (cons label (cons ann (cons label (cdr cmd))))))
@@ -2344,6 +2366,7 @@ until `magit-dash--populate-stats-async' updates them."
                          (propertize display 'face final-face)))
                       ('org
                        (let* ((slug (or (magit-dash-repo-upstream-repo repo)
+                                        (magit-dash-repo-repo repo)
                                         (magit-dash-repo-account repo)
                                         ""))
                               (pair (when (string-match "\\`\\([^/]+\\)/" slug)
@@ -3202,6 +3225,155 @@ all working tree changes."
             (message "magit-dash: staged all changes in %s" name))
         (message "magit-dash: stage all failed in %s" name))))))
 
+(defun magit-dash--repo-has-upstream-repo-p (&optional repo)
+  "Return non-nil if REPO or the repo at point has an upstream repo configured."
+  (when-let* ((repo (or repo
+                        (ignore-errors (magit-dash--repo-at-point))
+                        (and (= (length magit-dash-repo-list) 1)
+                             (car magit-dash-repo-list)))))
+    (and (magit-dash-repo-upstream-repo repo) t)))
+
+(defun magit-dash-upstream--ensure-remote (repo)
+  "Ensure an upstream remote exists in REPO and return its remote name.
+REPO is a `magit-dash-repo' struct, directory path string, or nil
+for current context."
+  (let* ((r (cond
+             ((magit-dash-repo-p repo) repo)
+             (repo
+              (let ((top (file-name-as-directory (expand-file-name repo))))
+                (seq-find (lambda (it)
+                            (file-equal-p (file-name-as-directory (magit-dash-repo-path it)) top))
+                          (magit-dash--all-repos))))
+             (t (when (fboundp 'magit-dash--current-repo-or-path)
+                  (let ((cur (magit-dash--current-repo-or-path)))
+                    (if (magit-dash-repo-p cur) cur nil))))))
+         (raw-url (and r (magit-dash-repo-upstream-repo r)))
+         (url (cond
+               ((and raw-url (string-match-p "\\`[^/@:]+/[^/@:]+\\'" raw-url))
+                (format "git@%s:%s.git"
+                        (or (and r (magit-dash-repo-gh-host r)) "github.com")
+                        raw-url))
+               (t raw-url)))
+         (remotes (magit-list-remotes)))
+    (cond
+     ((and url (not (string-empty-p url)))
+      (let* ((target-pair (magit-dash-gh--owner-repo-from-url url))
+             (existing-remote
+              (seq-find (lambda (rem)
+                          (let ((rem-url (magit-get "remote" rem "url")))
+                            (or (and rem-url (string-equal rem-url url))
+                                (and target-pair
+                                     rem-url
+                                     (equal (magit-dash-gh--owner-repo-from-url rem-url) target-pair)))))
+                        remotes)))
+        (cond
+         (existing-remote existing-remote)
+         ((not (member "upstream" remotes))
+          (magit-call-git "remote" "add" "upstream" url)
+          "upstream")
+         (t
+          (let ((rem-name "dash-upstream"))
+            (unless (member rem-name remotes)
+              (magit-call-git "remote" "add" rem-name url))
+            rem-name)))))
+     ((member "upstream" remotes)
+      "upstream")
+     (t
+      (user-error "Repository %s has no upstream remote or :upstream-repo registered"
+                  (if r (magit-dash-repo-name r) default-directory))))))
+
+;;;###autoload
+(defun magit-dash-upstream-fetch (&optional repo)
+  "Fetch configured upstream branch for REPO using Magit primitives.
+REPO defaults to the repository for current context or at point."
+  (interactive)
+  (let* ((target (or repo (magit-dash--current-repo-or-path)))
+         (struct (if (magit-dash-repo-p target) target nil))
+         (path (if (magit-dash-repo-p target) (magit-dash-repo-path target) target))
+         (name (if struct (magit-dash-repo-name struct) (file-name-nondirectory (directory-file-name path))))
+         (upstream-branch (or (and struct (magit-dash-repo-upstream-branch struct)) "master")))
+    (magit-dash-gh--with-repo-dir path
+      (let ((remote (magit-dash-upstream--ensure-remote struct)))
+        (message "magit-dash: [%s] fetching %s from %s..." name upstream-branch remote)
+        (if (= 0 (magit-call-git "fetch" remote upstream-branch))
+            (progn
+              (message "magit-dash: [%s] fetched %s/%s" name remote upstream-branch)
+              (when (fboundp 'magit-refresh) (magit-refresh))
+              t)
+          (user-error "magit-dash: [%s] failed to fetch %s from %s" name upstream-branch remote))))))
+
+;;;###autoload
+(defun magit-dash-upstream-merge (&optional repo)
+  "Fetch upstream and merge it into local main/default branch for REPO.
+Uses Magit primitives.  Ensures upstream remote exists and targets
+the branch where local changes live.
+REPO defaults to the repository for current context or at point."
+  (interactive)
+  (let* ((target (or repo (magit-dash--current-repo-or-path)))
+         (struct (if (magit-dash-repo-p target) target nil))
+         (path (if (magit-dash-repo-p target) (magit-dash-repo-path target) target))
+         (name (if struct (magit-dash-repo-name struct) (file-name-nondirectory (directory-file-name path))))
+         (upstream-branch (or (and struct (magit-dash-repo-upstream-branch struct)) "master"))
+         (local-branch (or (and struct (magit-dash-repo-branch struct)) "main"))
+         (wt-dir (and (fboundp 'magit-dash-worktree-for-branch)
+                      (magit-dash-worktree-for-branch path local-branch)))
+         (effective-dir (or wt-dir path)))
+    (magit-dash-gh--with-repo-dir effective-dir
+      (when (magit-anything-modified-p)
+        (user-error "Cannot merge upstream in %s: working tree has uncommitted changes" name))
+      (let ((remote (magit-dash-upstream--ensure-remote (or struct effective-dir))))
+        (message "magit-dash: [%s] fetching %s from %s..." name upstream-branch remote)
+        (unless (= 0 (magit-call-git "fetch" remote upstream-branch))
+          (user-error "Failed to fetch %s from %s in %s" upstream-branch remote name))
+        (let ((cur-branch (magit-get-current-branch)))
+          (unless (equal cur-branch local-branch)
+            (message "magit-dash: [%s] checking out %s..." name local-branch)
+            (magit-checkout local-branch)))
+        (message "magit-dash: [%s] merging %s/%s into %s..." name remote upstream-branch local-branch)
+        (magit-merge-plain (format "%s/%s" remote upstream-branch))
+        (when (fboundp 'magit-refresh) (magit-refresh))
+        (when (and struct (fboundp 'magit-dash-refresh-repo))
+          (magit-dash-refresh-repo struct nil t))
+        (message "magit-dash: [%s] merged %s/%s into %s" name remote upstream-branch local-branch)))))
+
+;;;###autoload
+(defun magit-dash-upstream-rebase (&optional repo)
+  "Fetch upstream and rebase local main/default branch onto it for REPO.
+Uses Magit primitives.  Ensures upstream remote exists and targets
+the branch where local changes live.
+REPO defaults to the repository for current context or at point."
+  (interactive)
+  (let* ((target (or repo (magit-dash--current-repo-or-path)))
+         (struct (if (magit-dash-repo-p target) target nil))
+         (path (if (magit-dash-repo-p target) (magit-dash-repo-path target) target))
+         (name (if struct (magit-dash-repo-name struct) (file-name-nondirectory (directory-file-name path))))
+         (upstream-branch (or (and struct (magit-dash-repo-upstream-branch struct)) "master"))
+         (local-branch (or (and struct (magit-dash-repo-branch struct)) "main"))
+         (wt-dir (and (fboundp 'magit-dash-worktree-for-branch)
+                      (magit-dash-worktree-for-branch path local-branch)))
+         (effective-dir (or wt-dir path)))
+    (magit-dash-gh--with-repo-dir effective-dir
+      (when (magit-anything-modified-p)
+        (user-error "Cannot rebase upstream in %s: working tree has uncommitted changes" name))
+      (let ((remote (magit-dash-upstream--ensure-remote (or struct effective-dir))))
+        (message "magit-dash: [%s] fetching %s from %s..." name upstream-branch remote)
+        (unless (= 0 (magit-call-git "fetch" remote upstream-branch))
+          (user-error "Failed to fetch %s from %s in %s" upstream-branch remote name))
+        (let ((cur-branch (magit-get-current-branch)))
+          (unless (equal cur-branch local-branch)
+            (message "magit-dash: [%s] checking out %s..." name local-branch)
+            (magit-checkout local-branch)))
+        (message "magit-dash: [%s] rebasing %s onto %s/%s..." name local-branch remote upstream-branch)
+        (magit-git-rebase (format "%s/%s" remote upstream-branch) nil)
+        (when (fboundp 'magit-refresh) (magit-refresh))
+        (when (and struct (fboundp 'magit-dash-refresh-repo))
+          (magit-dash-refresh-repo struct nil t))
+        (message "magit-dash: [%s] rebasing %s onto %s/%s started" name local-branch remote upstream-branch)))))
+
+(defalias 'magit-dash-merge-upstream #'magit-dash-upstream-merge)
+(defalias 'magit-dash-rebase-upstream #'magit-dash-upstream-rebase)
+(defalias 'magit-dash-fetch-upstream #'magit-dash-upstream-fetch)
+
 (defun magit-dash-push ()
   "Push current branch to its push remote for the repository at point."
   (interactive)
@@ -4017,6 +4189,11 @@ Indicates whether batch operations target all repos or marked repos."
      :inapt-if-not magit-dash--repo-has-ci-p)
     ("cw"  "Trigger workflow" magit-dash-gh-workflow-run
      :inapt-if-not magit-dash--repo-has-ci-p)]
+   ["Upstream"
+    :if magit-dash--repo-has-upstream-repo-p
+    ("um"  "Merge upstream"  magit-dash-upstream-merge)
+    ("ur"  "Rebase upstream" magit-dash-upstream-rebase)
+    ("uf"  "Fetch upstream"  magit-dash-upstream-fetch)]
    ["Worktree"
     ("wp"  "Dispatch task"   magit-dash-open-worktree-dispatch
      :inapt-if-not magit-dash--repo-at-point-p)

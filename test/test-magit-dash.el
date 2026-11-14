@@ -156,6 +156,18 @@
     (should (equal "/srv/git/r1.git" (magit-dash-repo-upstream-repo (car magit-dash-repo-list))))
     (should (equal "/srv/git/r1.git" (magit-dash-repo-upstream (car magit-dash-repo-list))))))
 
+(ert-deftest magit-dash/register-upstream-repo-and-branch ()
+  ":upstream-repo and :upstream-branch store dedicated upstream info."
+  (let ((magit-dash-repo-list nil))
+    (magit-dash-register :name "r1" :path "/tmp/r1"
+                         :upstream-repo "git@github.com:upstream/r1.git"
+                         :upstream-branch "master")
+    (should (equal "git@github.com:upstream/r1.git"
+                   (magit-dash-repo-upstream-repo (car magit-dash-repo-list))))
+    (should (equal "master"
+                   (magit-dash-repo-upstream-branch (car magit-dash-repo-list))))
+    (should (magit-dash--repo-has-upstream-repo-p))))
+
 (ert-deftest magit-dash/register-expands-local-repo-path ()
   ":repo expands local file paths but preserves URLs."
   (let ((magit-dash-repo-list nil))
@@ -742,6 +754,20 @@ target directly to the repo struct."
               ((symbol-function 'magit-dash-gh-workflow-run) #'ignore))
       (magit-dash--run-command-for repo nil)
       (should (member "rebuild" offered)))))
+
+(ert-deftest magit-dash/run-command-includes-upstream-when-upstream-configured ()
+  "run-command-for offers 'merge-upstream' and 'rebase-upstream' when :upstream-repo is set."
+  (let ((repo (magit-dash-repo--make :name "upstream-repo" :path "/tmp/upstream-repo"
+                                     :upstream-repo "git@github.com:upstream/repo.git"))
+        (offered nil))
+    (cl-letf (((symbol-function 'annotated-completing-read)
+               (lambda (choices &rest _args)
+                 (setq offered (mapcar #'car choices))
+                 '("merge-upstream" . magit-dash-upstream-merge)))
+              ((symbol-function 'magit-dash-upstream-merge) #'ignore))
+      (magit-dash--run-command-for repo nil)
+      (should (member "merge-upstream" offered))
+      (should (member "rebase-upstream" offered)))))
 
 (ert-deftest magit-dash/has-commands-p-true-when-ci-enabled ()
   "has-commands-p returns t for a repo with :include-ci t even without :commands."
@@ -2341,6 +2367,7 @@ in magit-dash-repo-list, preventing duplicate rows."
       (should (null (magit-dash--dirty-or-unknown-p)))
       (should (null (magit-dash--has-auto-commit-p)))
       (should (null (magit-dash--has-commands-p)))
+      (should (null (magit-dash--repo-has-upstream-repo-p)))
       (should (null (magit-dash--repo-at-point-behind-p)))
       (should (null (magit-dash--at-worktree-p)))
       (should (null (magit-dash--can-add-worktree-p)))
