@@ -178,6 +178,151 @@
     (magit-dash-register :name "r3" :path "/tmp/r3" :repo "https://github.com/user/r3.git")
     (should (equal "https://github.com/user/r3.git" (magit-dash-repo-repo (car magit-dash-repo-list))))))
 
+(ert-deftest magit-dash/register-batch-defaults-and-overrides ()
+  "magit-dash-register-batch applies defaults and merges overrides key-by-key."
+  (let ((magit-dash-repo-list nil))
+    (magit-dash-register-batch
+     :root-path "/srv/projects"
+     :defaults '(:include-ci t
+                 :sort-hint 7
+                 :repo-format "git@github.com:test/%s.git"
+                 :auto-pull t)
+     :repos '((:name "alpha")
+              (:name "beta" :sort-hint 3 :include-prs t)
+              (:name "gamma" :path "/custom/gamma" :repo "git@github.com:special/gamma.git")))
+    (should (= 3 (length magit-dash-repo-list)))
+    (let ((r-alpha (seq-find (lambda (r) (equal (magit-dash-repo-name r) "alpha")) magit-dash-repo-list))
+          (r-beta  (seq-find (lambda (r) (equal (magit-dash-repo-name r) "beta")) magit-dash-repo-list))
+          (r-gamma (seq-find (lambda (r) (equal (magit-dash-repo-name r) "gamma")) magit-dash-repo-list)))
+      (should (equal (magit-dash-repo-path r-alpha) "/srv/projects/alpha"))
+      (should (equal (magit-dash-repo-repo r-alpha) "git@github.com:test/alpha.git"))
+      (should (eq (magit-dash-repo-include-ci r-alpha) t))
+      (should (= (magit-dash-repo-sort-hint r-alpha) 7))
+      (should (null (magit-dash-repo-include-prs r-alpha)))
+
+      (should (equal (magit-dash-repo-path r-beta) "/srv/projects/beta"))
+      (should (equal (magit-dash-repo-repo r-beta) "git@github.com:test/beta.git"))
+      (should (eq (magit-dash-repo-include-ci r-beta) t))
+      (should (= (magit-dash-repo-sort-hint r-beta) 3))
+      (should (eq (magit-dash-repo-include-prs r-beta) t))
+
+      (should (equal (magit-dash-repo-path r-gamma) "/custom/gamma"))
+      (should (equal (magit-dash-repo-repo r-gamma) "git@github.com:special/gamma.git"))
+      (should (eq (magit-dash-repo-include-ci r-gamma) t))
+      (should (= (magit-dash-repo-sort-hint r-gamma) 7)))))
+
+(ert-deftest magit-dash/register-batch-additive ()
+  "magit-dash-register-batch skips repositories already present in magit-dash-repo-list."
+  (let ((magit-dash-repo-list nil))
+    ;; Explicit registration first
+    (magit-dash-register :name "alpha" :path "/srv/projects/alpha" :sort-hint 1 :repo "git@github.com:explicit/alpha.git")
+    ;; Batch registration should not overwrite alpha
+    (magit-dash-register-batch
+     :root-path "/srv/projects"
+     :defaults '(:sort-hint 10 :repo-format "git@github.com:batch/%s.git")
+     :repos '((:name "alpha")
+              (:name "beta")))
+    (should (= 2 (length magit-dash-repo-list)))
+    (let ((r-alpha (seq-find (lambda (r) (equal (magit-dash-repo-name r) "alpha")) magit-dash-repo-list))
+          (r-beta  (seq-find (lambda (r) (equal (magit-dash-repo-name r) "beta")) magit-dash-repo-list)))
+      (should (= (magit-dash-repo-sort-hint r-alpha) 1))
+      (should (equal (magit-dash-repo-repo r-alpha) "git@github.com:explicit/alpha.git"))
+      (should (= (magit-dash-repo-sort-hint r-beta) 10)))))
+
+(ert-deftest magit-dash/register-batch-ignore ()
+  "magit-dash-register-batch respects :ignore t in repo spec."
+  (let ((magit-dash-repo-list nil))
+    (magit-dash-register-batch
+     :root-path "/srv/projects"
+     :defaults '(:sort-hint 5)
+     :repos '((:name "alpha")
+              (:name "ignored" :ignore t)
+              (:name "beta")))
+    (should (= 2 (length magit-dash-repo-list)))
+    (should (seq-find (lambda (r) (equal (magit-dash-repo-name r) "alpha")) magit-dash-repo-list))
+    (should (seq-find (lambda (r) (equal (magit-dash-repo-name r) "beta")) magit-dash-repo-list))
+    (should-not (seq-find (lambda (r) (equal (magit-dash-repo-name r) "ignored")) magit-dash-repo-list))))
+
+(ert-deftest magit-dash/register-directory-matches-explicit ()
+  "A directory of three repositories with one exception matches three explicit calls."
+  (let* ((tmp (make-temp-file "magit-dash-test-dir-" t))
+         (repo-a (expand-file-name "repo-a" tmp))
+         (repo-b (expand-file-name "repo-b" tmp))
+         (repo-c (expand-file-name "repo-c" tmp))
+         (non-repo (expand-file-name "non-repo" tmp))
+         dir-repos explicit-repos)
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name ".git" repo-a) t)
+          (make-directory (expand-file-name ".git" repo-b) t)
+          (make-directory (expand-file-name ".git" repo-c) t)
+          (make-directory non-repo t) ; directory without .git should be ignored
+
+          ;; 1. Register via directory
+          (let ((magit-dash-repo-list nil))
+            (magit-dash-register-directory
+             tmp
+             :defaults '(:include-ci t
+                         :sort-hint 5
+                         :repo-format "git@github.com:test/%s.git")
+             :exceptions '(("repo-b" :sort-hint 2 :include-prs t :repo "git@github.com:custom/repo-b.git")))
+            (setq dir-repos magit-dash-repo-list))
+
+          ;; 2. Register via explicit calls
+          (let ((magit-dash-repo-list nil))
+            (magit-dash-register
+             :name "repo-a"
+             :path repo-a
+             :include-ci t
+             :sort-hint 5
+             :repo "git@github.com:test/repo-a.git")
+            (magit-dash-register
+             :name "repo-b"
+             :path repo-b
+             :include-ci t
+             :sort-hint 2
+             :include-prs t
+             :repo "git@github.com:custom/repo-b.git")
+            (magit-dash-register
+             :name "repo-c"
+             :path repo-c
+             :include-ci t
+             :sort-hint 5
+             :repo "git@github.com:test/repo-c.git")
+            (setq explicit-repos magit-dash-repo-list))
+
+          ;; Compare results
+          (should (= (length dir-repos) 3))
+          (should (= (length explicit-repos) 3))
+          ;; Sorting by name to ensure stable comparison regardless of registration order
+          (let ((sort-fn (lambda (r1 r2) (string< (magit-dash-repo-name r1) (magit-dash-repo-name r2)))))
+            (should (equal (sort (copy-sequence dir-repos) sort-fn)
+                           (sort (copy-sequence explicit-repos) sort-fn)))))
+      (delete-directory tmp t))))
+
+(ert-deftest magit-dash/register-directory-additive ()
+  "magit-dash-register-directory skips repositories already registered explicitly."
+  (let* ((tmp (make-temp-file "magit-dash-test-additive-" t))
+         (repo-a (expand-file-name "repo-a" tmp))
+         (repo-b (expand-file-name "repo-b" tmp)))
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name ".git" repo-a) t)
+          (make-directory (expand-file-name ".git" repo-b) t)
+          (let ((magit-dash-repo-list nil))
+            ;; Explicit call first with custom sort-hint
+            (magit-dash-register :name "repo-a" :path repo-a :sort-hint 1 :repo "git@github.com:explicit/repo-a.git")
+            (magit-dash-register-directory
+             tmp
+             :defaults '(:sort-hint 10 :repo-format "git@github.com:auto/%s.git"))
+            (should (= 2 (length magit-dash-repo-list)))
+            (let ((r-a (seq-find (lambda (r) (equal (magit-dash-repo-name r) "repo-a")) magit-dash-repo-list))
+                  (r-b (seq-find (lambda (r) (equal (magit-dash-repo-name r) "repo-b")) magit-dash-repo-list)))
+              (should (= (magit-dash-repo-sort-hint r-a) 1))
+              (should (equal (magit-dash-repo-repo r-a) "git@github.com:explicit/repo-a.git"))
+              (should (= (magit-dash-repo-sort-hint r-b) 10)))))
+      (delete-directory tmp t))))
+
 ;;;; magit-dash--sorted-repos
 
 (ert-deftest magit-dash/sorted-repos-by-hint ()

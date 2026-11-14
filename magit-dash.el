@@ -630,6 +630,110 @@ Keyword arguments:
   (when (and timer (fboundp 'magit-dash-register-sync-timer))
     (apply #'magit-dash-register-sync-timer :name name :repos (list name) timer)))
 
+(defconst magit-dash--register-known-keys
+  '(:name :path :repo :include-prs :include-ci :auto-fetch :auto-pull
+    :auto-commit :auto-push :auto-sync-command :hooks :tags :commands
+    :sort-hint :worktree :sync-branches :timer :clone-url :remote-url
+    :worktree-symlinks :symlinks :remote-sync :sync-on-refresh
+    :auto-sync-on-refresh :refresh-sync :fetch-on-refresh :gh-account
+    :gh-host :pr :upstream-repo :upstream :upstream-branch)
+  "List of keyword arguments accepted by `magit-dash-register'.")
+
+(defun magit-dash--merge-plists (base override)
+  "Merge OVERRIDE plist over BASE plist key-by-key.
+Keys present in OVERRIDE replace those in BASE; other keys in BASE are retained."
+  (let ((result (copy-sequence base)))
+    (while override
+      (let ((key (pop override))
+            (val (pop override)))
+        (setq result (plist-put result key val))))
+    result))
+
+(defun magit-dash--filter-plist (plist allowed-keys)
+  "Return a copy of PLIST retaining only keys in ALLOWED-KEYS."
+  (let ((result nil))
+    (while plist
+      (let ((k (pop plist))
+            (v (pop plist)))
+        (when (memq k allowed-keys)
+          (setq result (nconc result (list k v))))))
+    result))
+
+;;;###autoload
+(cl-defun magit-dash-register-batch (&key root-path defaults repos)
+  "Register repositories using common DEFAULTS and per-repo specs.
+ROOT-PATH is an optional base path used to resolve relative repo paths.
+DEFAULTS is a plist of keyword arguments passed to `magit-dash-register'.
+  - `:repo-format' in DEFAULTS is a format string receiving the repo's
+    directory basename to derive `:repo'.
+REPOS is a list of plists.  Each plist specifies `:name' and overrides.
+  - If `:path' is omitted, it is derived from ROOT-PATH and `:name'.
+  - If `:repo' is omitted and `:repo-format' is available, it is derived via
+    `(format repo-format (file-name-nondirectory (directory-file-name path)))'.
+  - Any keyword arguments in the repo plist override those in DEFAULTS.
+  - If `:ignore' is non-nil in the merged plist, the repository is skipped.
+Additive: repositories whose name or path is already registered in
+`magit-dash-repo-list' are skipped so explicit registrations win."
+  (dolist (repo-spec repos)
+    (unless (listp repo-spec)
+      (user-error "Magit-dash: each repo in :repos must be a plist, got %S" repo-spec))
+    (let* ((merged (magit-dash--merge-plists defaults repo-spec))
+           (name (plist-get merged :name))
+           (raw-path (plist-get merged :path))
+           (effective-root (or root-path (plist-get defaults :root-path)))
+           (repo-format (plist-get merged :repo-format)))
+      (unless name
+        (user-error "Magit-dash: batch repo entry missing :name: %S" repo-spec))
+      (unless (plist-get merged :ignore)
+        (let* ((path (cond
+                      (raw-path (expand-file-name raw-path))
+                      (effective-root (expand-file-name name (expand-file-name effective-root)))
+                      (t (user-error "Magit-dash: must specify :path or :root-path for repo %s" name))))
+               (basename (file-name-nondirectory (directory-file-name path)))
+               (repo (or (plist-get merged :repo)
+                         (when repo-format
+                           (format repo-format basename))))
+               (already-registered
+                (seq-some (lambda (r)
+                            (or (equal name (magit-dash-repo-name r))
+                                (equal path (magit-dash-repo-path r))))
+                          magit-dash-repo-list)))
+          (unless already-registered
+            (let ((clean-plist (magit-dash--filter-plist merged magit-dash--register-known-keys)))
+              (setq clean-plist (plist-put clean-plist :name name))
+              (setq clean-plist (plist-put clean-plist :path path))
+              (when repo
+                (setq clean-plist (plist-put clean-plist :repo repo)))
+              (apply #'magit-dash-register clean-plist))))))))
+
+;;;###autoload
+(cl-defun magit-dash-register-directory (directory &key defaults exceptions)
+  "Register git repositories in DIRECTORY using DEFAULTS and EXCEPTIONS.
+DIRECTORY is scanned for immediate child directories containing a
+`.git' directory or file.
+DEFAULTS is a plist of keyword arguments passed to `magit-dash-register'.
+  - `:repo-format' supports a `%s' substitution on the directory basename.
+EXCEPTIONS is an alist mapping directory basenames (or names) to a plist
+of overriding keyword arguments, merged key-by-key over DEFAULTS.
+Additive: repositories whose name or path is already registered in
+`magit-dash-repo-list' are skipped."
+  (let* ((dir (expand-file-name directory))
+         (entries (when (file-directory-p dir)
+                    (directory-files dir t directory-files-no-dot-files-regexp t)))
+         (repos nil))
+    (dolist (entry (sort entries #'string<))
+      (when (and (file-directory-p entry)
+                 (file-exists-p (expand-file-name ".git" entry)))
+        (let* ((basename (file-name-nondirectory (directory-file-name entry)))
+               (exc (or (cdr (assoc basename exceptions))
+                        (cdr (assoc (intern basename) exceptions))))
+               (repo-spec (magit-dash--merge-plists (list :name basename :path entry) exc)))
+          (push repo-spec repos))))
+    (magit-dash-register-batch
+     :root-path dir
+     :defaults defaults
+     :repos (nreverse repos))))
+
 ;;;; Registry helpers
 
 (defvar magit-dash-sync-trigger 'interactive
