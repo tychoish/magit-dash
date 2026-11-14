@@ -13,6 +13,13 @@
   and advance submodules to upstream HEAD with [[file:api.org::#magit-dash-bump-submodules-menu][~magit-dash-bump-submodules-menu~]] and
   [[file:api.org::#magit-dash-bump-submodules-all][~magit-dash-bump-submodules-all~]].
 
+- *Branch Stacks*: View a stack of dependent local branches (=wv= in the Worktree menu group,
+  ~magit-dash-stack-open~) with parent, worktree, drift and commit sizes, export dot or mermaid
+  graphs, and sync it by merging each parent forward through a PR chain plan
+  (~magit-dash-stack-sync~, MCP tools =stack_show= and =stack_sync=). Missing worktrees are created
+  under =magit-dash-chain-worktree-directory= (default =.wt=). See the
+  [[file:../README.org::#pr-chain][PR Chain Merge Plans]] section.
+
 * Key Functions and Options
 
 - [[file:api.org::#magit-dash-worktree-add][~magit-dash-worktree-add~]]: Prompt to create a new git worktree with automatic symlink seeding.

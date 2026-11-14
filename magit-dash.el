@@ -45,6 +45,7 @@
 
 (require 'magit-dash-gh-ci)
 (require 'magit-dash-chain)
+(require 'magit-dash-stack)
 (require 'magit-dash-gh-pr)
 (require 'magit-dash-gh-pr-status)
 (require 'magit-dash-gh)
@@ -4029,7 +4030,8 @@ Indicates whether batch operations target all repos or marked repos."
     ("wt"  "Toggle"          magit-dash-toggle-discovered-worktrees)
     ("wc"  "Plan PR chain merge" magit-dash-chain-plan
      :inapt-if-not magit-dash--repo-at-point-p)
-    ("wC"  "Resume PR chain"  magit-dash-chain-resume)]
+    ("wC"  "Resume PR chain"  magit-dash-chain-resume)
+    ("wv"  "View stack"       magit-dash-stack-open)]
    ["Agent Shell"
     ("av"  "Actions needing attention" magit-dash-actionable-open)
     ("as"  "Open"           magit-dash-agent-shell

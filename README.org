@@ -361,6 +361,16 @@ merge aborted; anything else is refused with the reason. If only some steps
 can be undone, a message names the refused ones and the plan is paused. Plans created before
 =:before= was recorded cannot be rolled back.
 
+** Branch stacks
+
+=magit-dash-stack= (=wv= in the Worktree group of the menu, or =M-x
+magit-dash-stack-open=) shows a stack of dependent local branches selected by a
+glob, with parent, worktree, drift and commit sizes, and can emit dot or
+mermaid graphs. =M-x magit-dash-stack-sync= turns the stack into a chain plan as
+described above; nothing runs until the plan is executed. The MCP tools
+=stack_show= (read-only) and =stack_sync= (creates an MCP-origin plan subject to
+approval) expose the same. See [[file:docs/worktrees-and-submodules.org][worktrees and submodules]].
+
 * PR Status
 :PROPERTIES:
 :CUSTOM_ID: pr-status
