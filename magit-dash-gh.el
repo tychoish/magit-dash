@@ -298,17 +298,38 @@ Signals `user-error' when not inside a git repository."
     (and (stringp state)
          (member (upcase state) '("MERGED" "CLOSED")))))
 
-(defun magit-dash-gh--default-branch ()
-  "Return the repository's default branch name, falling back to `main'."
-  (let* ((default-directory (magit-dash-gh--repo-dir))
-         (output (with-magit-gh-account (magit-dash-gh--repo-account default-directory)
-                   (string-trim
-                    (shell-command-to-string
-                     "gh repo view --json defaultBranchRef --jq .defaultBranchRef.name")))))
-    (if (and (not (string-empty-p output))
-             (not (string-match-p "[[:space:]]" output)))
-        output
-      "main")))
+(defun magit-dash-gh--default-branch (&optional dir)
+  "Return the repository's default branch name, falling back to `main'.
+Prioritises cached info and local git references before calling
+`gh repo view'."
+  (let* ((dir (or dir (magit-dash-gh--repo-dir)))
+         (default-directory dir)
+         (cached (magit-dash-gh--cache-get dir :default-branch)))
+    (if cached
+        cached
+      (let* ((local-default
+              (or (when-let* ((ref (ignore-errors
+                                     (magit-git-string "symbolic-ref" "--short" "refs/remotes/origin/HEAD"))))
+                    (replace-regexp-in-string "^origin/" "" ref))
+                  (ignore-errors (magit-get "init" "defaultBranch"))
+                  (when (magit-branch-p "main") "main")
+                  (when (magit-branch-p "master") "master")))
+             (branch
+              (if (and local-default (not (string-empty-p local-default)))
+                  local-default
+                (let ((output (ignore-errors
+                                (with-magit-gh-account (magit-dash-gh--repo-account dir)
+                                  (string-trim
+                                   (shell-command-to-string
+                                    "gh repo view --json defaultBranchRef --jq .defaultBranchRef.name"))))))
+                  (if (and output
+                           (not (string-empty-p output))
+                           (not (string-match-p "[[:space:]]" output)))
+                      output
+                    "main")))))
+        (when branch
+          (magit-dash-gh--cache-set dir :default-branch branch))
+        branch))))
 
 (defun magit-dash-gh--prune-cache-file ()
   "Return cache file path for current repo, or nil when caching is disabled.
@@ -830,39 +851,63 @@ signal."
        ((string-match "\\`\\([^/]+\\)/\\([^/]+\\)\\'" clean)
         (cons (match-string 1 clean) (match-string 2 clean)))))))
 
-(defun magit-dash-gh--repo-info ()
+(defun magit-dash-gh--repo-info (&optional dir)
   "Return a plist :owner :repo :branch for the current repository.
-Uses `gh repo view', git remotes, and `magit-get-current-branch'."
-  (let* ((dir (magit-dash-gh--repo-dir))
+Prioritises cached data, local git remotes, and registered repos to avoid
+blocking `gh repo view' network calls."
+  (let* ((dir (or dir (magit-dash-gh--repo-dir)))
          (default-directory dir)
-         owner repo)
-    (ignore-errors
-      (let* ((output (with-magit-gh-account (magit-dash-gh--repo-account dir)
-                       (string-trim
-                        (shell-command-to-string
-                         "gh repo view --json owner,name --jq '[.owner.login,.name]|@tsv'"))))
-             (parts (split-string output "\t")))
-        (when (and (= (length parts) 2)
-                   (not (string-empty-p (nth 0 parts)))
-                   (not (string-empty-p (nth 1 parts)))
-                   (not (string-match-p "[[:space:]]" (nth 0 parts)))
-                   (not (string-match-p "[[:space:]]" (nth 1 parts))))
-          (setq owner (nth 0 parts)
-                repo  (nth 1 parts)))))
-    (unless (and owner repo)
-      (let ((urls (ignore-errors
-                    (delq nil (list (magit-get "remote" "origin" "url")
-                                    (magit-get "remote" "pushdefault" "url")
-                                    (magit-get "remote" "upstream" "url"))))))
-        (seq-some (lambda (u)
-                    (when-let* ((pair (magit-dash-gh--owner-repo-from-url u)))
-                      (setq owner (car pair)
-                            repo  (cdr pair))
-                      t))
-                  urls)))
-    (list :owner  owner
-          :repo   repo
-          :branch (magit-get-current-branch))))
+         (cached (magit-dash-gh--cache-get dir :repo-info)))
+    (if cached
+        (plist-put (copy-sequence cached) :branch (magit-get-current-branch))
+      (let (owner repo)
+        ;; 1. Check local git remotes first (fast, synchronous, 0 network/blocking)
+        (let ((urls (ignore-errors
+                      (delq nil (list (magit-get "remote" "origin" "url")
+                                      (magit-get "remote" "pushdefault" "url")
+                                      (magit-get "remote" "upstream" "url"))))))
+          (seq-some (lambda (u)
+                      (when-let* ((pair (magit-dash-gh--owner-repo-from-url u)))
+                        (setq owner (car pair)
+                              repo  (cdr pair))
+                        t))
+                    urls))
+        ;; 2. If not found in remotes, check registered repo struct
+        (unless (and owner repo)
+          (when (boundp 'magit-dash-repo-list)
+            (when-let* ((r (seq-find (lambda (it)
+                                       (file-equal-p (magit-dash-repo-path it) dir))
+                                     magit-dash-repo-list))
+                        (raw (or (and (fboundp 'magit-dash-repo-upstream-repo)
+                                      (magit-dash-repo-upstream-repo r))
+                                 (and (fboundp 'magit-dash-repo-repo)
+                                      (magit-dash-repo-repo r))
+                                 (and (fboundp 'magit-dash-repo-clone-url)
+                                      (magit-dash-repo-clone-url r))))
+                        (pair (magit-dash-gh--owner-repo-from-url raw)))
+              (setq owner (car pair)
+                    repo  (cdr pair)))))
+        ;; 3. Fallback to `gh repo view` only if completely unknown locally
+        (unless (and owner repo)
+          (ignore-errors
+            (let* ((output (with-magit-gh-account (magit-dash-gh--repo-account dir)
+                             (string-trim
+                              (shell-command-to-string
+                               "gh repo view --json owner,name --jq '[.owner.login,.name]|@tsv'"))))
+                   (parts (split-string output "\t")))
+              (when (and (= (length parts) 2)
+                         (not (string-empty-p (nth 0 parts)))
+                         (not (string-empty-p (nth 1 parts)))
+                         (not (string-match-p "[[:space:]]" (nth 0 parts)))
+                         (not (string-match-p "[[:space:]]" (nth 1 parts))))
+                (setq owner (nth 0 parts)
+                      repo  (nth 1 parts))))))
+        (let ((res (list :owner  owner
+                         :repo   repo
+                         :branch (magit-get-current-branch))))
+          (when (and owner repo)
+            (magit-dash-gh--cache-set dir :repo-info res))
+          res)))))
 
 ;;; Account switching
 

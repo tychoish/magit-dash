@@ -452,10 +452,14 @@ Calls CALLBACK with list of PR plists."
       (when (and (magit-dash-status--cache-stale-p top :status-ci)
                  (not (magit-dash-status--in-flight-p top :status-ci)))
         (let ((buf (current-buffer)))
-          (magit-dash-status--fetch-ci
-           top
-           (lambda (&rest _)
-             (magit-dash-status--schedule-refresh buf)))))
+          (run-with-timer
+           0.01 nil
+           (lambda ()
+             (when (buffer-live-p buf)
+               (magit-dash-status--fetch-ci
+                top
+                (lambda (&rest _)
+                  (magit-dash-status--schedule-refresh buf))))))))
       (magit-insert-section (magit-dash-status-ci-section "ci")
         (let ((start (point)))
           (insert (format "%-10s" "CI: "))
@@ -488,10 +492,14 @@ Calls CALLBACK with list of PR plists."
       (when (and (magit-dash-status--cache-stale-p top :status-branch-pr)
                  (not (magit-dash-status--in-flight-p top :status-branch-pr)))
         (let ((buf (current-buffer)))
-          (magit-dash-status--fetch-branch-pr
-           top
-           (lambda (&rest _)
-             (magit-dash-status--schedule-refresh buf)))))
+          (run-with-timer
+           0.01 nil
+           (lambda ()
+             (when (buffer-live-p buf)
+               (magit-dash-status--fetch-branch-pr
+                top
+                (lambda (&rest _)
+                  (magit-dash-status--schedule-refresh buf))))))))
       (magit-insert-section (magit-dash-status-pr-section "pr")
         (let ((start (point)))
           (insert (format "%-10s" "PR: "))
@@ -522,10 +530,14 @@ Calls CALLBACK with list of PR plists."
       (when (and (magit-dash-status--cache-stale-p top :status-authored-prs)
                  (not (magit-dash-status--in-flight-p top :status-authored-prs)))
         (let ((buf (current-buffer)))
-          (magit-dash-status--fetch-authored-prs
-           top
-           (lambda (&rest _)
-             (magit-dash-status--schedule-refresh buf)))))
+          (run-with-timer
+           0.01 nil
+           (lambda ()
+             (when (buffer-live-p buf)
+               (magit-dash-status--fetch-authored-prs
+                top
+                (lambda (&rest _)
+                  (magit-dash-status--schedule-refresh buf))))))))
       (when (and (listp cached) cached)
         (magit-insert-section (magit-dash-status-prs-section "prs")
           (let ((start (point)))
