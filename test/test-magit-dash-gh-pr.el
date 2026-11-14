@@ -651,8 +651,9 @@
     (should (eq (lookup-key m (kbd "c w")) #'magit-dash-gh-pr-dashboard-create-worktree))
     (should (eq (lookup-key m (kbd "c a")) #'magit-dash-gh-pr-dashboard-create-all-worktrees))
     (should (eq (lookup-key m (kbd "c i")) #'magit-dash-gh-pr-dashboard-fetch-ci))
-    (should (eq (lookup-key m (kbd "R"))   #'magit-dash-gh-pr-dashboard-code-review))
-    (should (eq (lookup-key m (kbd "c r")) #'magit-dash-gh-pr-dashboard-code-review))
+    (when (magit-dash-gh-pr-code-review-available-p)
+      (should (eq (lookup-key m (kbd "R"))   #'magit-dash-gh-pr-dashboard-code-review))
+      (should (eq (lookup-key m (kbd "c r")) #'magit-dash-gh-pr-dashboard-code-review)))
     (should (eq (lookup-key m (kbd "b"))   #'magit-dash-gh-pr-dashboard-open-browser))
     (should (eq (lookup-key m (kbd "m m")) #'magit-dash-gh-pr-dashboard-toggle-mark))
     (should (eq (lookup-key m (kbd "m u")) #'magit-dash-gh-pr-dashboard-unmark))
@@ -709,6 +710,24 @@
             ((symbol-function 'require) (lambda (&rest _) nil)))
     (should-error (magit-dash-gh-pr-code-review "https://github.com/o/r/pull/1")
                   :type 'user-error)))
+
+(ert-deftest magit-dash-gh-pr/code-review-conditional-activation ()
+  "Keybindings and menu for code-review are only active when package is available."
+  (unwind-protect
+      (progn
+        ;; When unavailable
+        (cl-letf (((symbol-function 'magit-dash-gh-pr-code-review-available-p) (lambda () nil)))
+          (magit-dash-gh-pr-dashboard--setup-code-review-keys)
+          (should-not (lookup-key magit-dash-gh-pr-dashboard-mode-map (kbd "R")))
+          (should-not (lookup-key magit-dash-gh-pr-dashboard-mode-map (kbd "c r"))))
+        ;; When available
+        (cl-letf (((symbol-function 'magit-dash-gh-pr-code-review-available-p) (lambda () t)))
+          (magit-dash-gh-pr-dashboard--setup-code-review-keys)
+          (should (eq (lookup-key magit-dash-gh-pr-dashboard-mode-map (kbd "R"))
+                      #'magit-dash-gh-pr-dashboard-code-review))
+          (should (eq (lookup-key magit-dash-gh-pr-dashboard-mode-map (kbd "c r"))
+                      #'magit-dash-gh-pr-dashboard-code-review))))
+    (magit-dash-gh-pr-dashboard--setup-code-review-keys)))
 
 (ert-deftest magit-dash-gh-pr/dashboard-menu-opens ()
   "The dashboard transient can set up its complete keymap."

@@ -54,6 +54,7 @@
 (declare-function magit-dash-gh-prune-merged-branches "magit-dash-gh")
 (declare-function magit-dash-gh-auth-switch "magit-dash-gh")
 (declare-function magit-dash-gh-pr-fetch "magit-dash-gh-pr")
+(declare-function magit-dash-gh-pr-code-review-available-p "magit-dash-gh-pr")
 (declare-function magit-dash-gh-workflow-run "magit-dash-gh-actions")
 
 (defgroup magit-dash-status nil
@@ -754,6 +755,7 @@ Calls CALLBACK with list of PR plists."
    ("d" "View diff"                    magit-dash-status-pr-diff
     :inapt-if-not magit-dash-status--has-pr-at-point-p)
    ("r" "Code review"                  magit-dash-status-pr-code-review
+    :if magit-dash-gh-pr-code-review-available-p
     :inapt-if-not magit-dash-status--has-pr-at-point-p)
    ("w" "Open in worktree"             magit-dash-status-pr-worktree
     :inapt-if-not magit-dash-status--has-pr-at-point-p)

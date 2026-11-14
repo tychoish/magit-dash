@@ -57,6 +57,12 @@
 (declare-function magit-dash-worktree-main-dir "magit-dash-worktree")
 (declare-function magit-dash-gh-actions-fetch-for-pr "magit-dash-gh-actions")
 (declare-function code-review-start "code-review" (url))
+
+(defun magit-dash-gh-pr-code-review-available-p ()
+  "Return non-nil when `code-review' is installed and available."
+  (or (fboundp 'code-review-start)
+      (and (locate-library "code-review")
+           (ignore-errors (require 'code-review nil t)))))
 ;;; Configuration
 
 (defvar magit-dash-gh-pr-thread-limit 100
@@ -548,12 +554,23 @@ Uses active columns.  WIDTH is available window width; when nil,
                         (_     (alist-get col magit-dash-gh-pr--column-defs))))
                     active))))
 
+(defun magit-dash-gh-pr-dashboard--setup-code-review-keys ()
+  "Bind or unbind code-review keys in `magit-dash-gh-pr-dashboard-mode-map'."
+  (when (boundp 'magit-dash-gh-pr-dashboard-mode-map)
+    (if (magit-dash-gh-pr-code-review-available-p)
+        (progn
+          (keymap-set magit-dash-gh-pr-dashboard-mode-map "R" #'magit-dash-gh-pr-dashboard-code-review)
+          (keymap-set magit-dash-gh-pr-dashboard-mode-map "c r" #'magit-dash-gh-pr-dashboard-code-review))
+      (keymap-unset magit-dash-gh-pr-dashboard-mode-map "R" t)
+      (keymap-unset magit-dash-gh-pr-dashboard-mode-map "c r" t))))
+
 (defvar magit-dash-gh-pr-dashboard-mode-map
   (let ((m (make-sparse-keymap)))
     (keymap-set m "RET" #'magit-dash-gh-pr-dashboard-open-browser)
     (keymap-set m "b"   #'magit-dash-gh-pr-dashboard-open-browser)
-    (keymap-set m "R"   #'magit-dash-gh-pr-dashboard-code-review)
-    (keymap-set m "c r" #'magit-dash-gh-pr-dashboard-code-review)
+    (when (magit-dash-gh-pr-code-review-available-p)
+      (keymap-set m "R"   #'magit-dash-gh-pr-dashboard-code-review)
+      (keymap-set m "c r" #'magit-dash-gh-pr-dashboard-code-review))
     (keymap-set m "w"   #'magit-dash-gh-pr-dashboard-open-worktree)
     (keymap-set m "c w" #'magit-dash-gh-pr-dashboard-create-worktree)
     (keymap-set m "c a" #'magit-dash-gh-pr-dashboard-create-all-worktrees)
@@ -588,7 +605,11 @@ Uses active columns.  WIDTH is available window width; when nil,
   (tabulated-list-init-header)
   (setq-local magit-dash-gh-pr-dashboard--filters
               (list :state "open" :author nil :repo nil :org nil))
-  (setq-local magit-dash-gh-pr-dashboard--marked-entries nil))
+  (setq-local magit-dash-gh-pr-dashboard--marked-entries nil)
+  (magit-dash-gh-pr-dashboard--setup-code-review-keys))
+
+(with-eval-after-load 'code-review
+  (magit-dash-gh-pr-dashboard--setup-code-review-keys))
 
 (defun magit-dash-gh-pr--parse-status-rollup (rollup)
   "Calculate overall CI state from GitHub ROLLUP check runs or contexts.
@@ -1006,8 +1027,7 @@ cannot be loaded."
              (read-string "Pull request URL: "))))
   (unless (and (stringp url) (not (string-empty-p url)))
     (user-error "A pull request URL is required"))
-  (unless (or (fboundp 'code-review-start)
-              (require 'code-review nil t))
+  (unless (magit-dash-gh-pr-code-review-available-p)
     (user-error "Package `code-review' is not available"))
   (code-review-start url))
 
@@ -1893,7 +1913,8 @@ Signals `user-error' when not found."
   "Actions for the PR dashboard."
   [["Pull Request"
     ("b"   "Open in browser"          magit-dash-gh-pr-dashboard-open-browser)
-    ("R"   "Open in code-review"      magit-dash-gh-pr-dashboard-code-review)]
+    ("R"   "Open in code-review"      magit-dash-gh-pr-dashboard-code-review
+     :if magit-dash-gh-pr-code-review-available-p)]
    ["Mark / Bulk"
     ("mm"  "Toggle mark"              magit-dash-gh-pr-dashboard-toggle-mark)
     ("mu"  "Unmark"                   magit-dash-gh-pr-dashboard-unmark)

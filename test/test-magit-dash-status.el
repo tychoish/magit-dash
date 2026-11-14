@@ -262,5 +262,36 @@
   (let ((layout (get 'magit-dash-status-pr-menu 'transient--layout)))
     (should layout)
     (should (string-match-p "magit-dash-status-pr-code-review" (format "%S" layout)))))
+
+(ert-deftest magit-dash-status/pr-menu-keybindings ()
+  "magit-dash-status-pr-menu binds keys correctly for review, dashboard, and refresh."
+  (let* ((layout (get 'magit-dash-status-pr-menu 'transient--layout))
+         (suffixes (when layout
+                     (cl-labels ((walk (elem)
+                                   (cond
+                                    ((vectorp elem)
+                                     (seq-mapcat #'walk elem))
+                                    ((and (listp elem) (memq (car elem) '(transient-suffix transient-switch transient-argument)))
+                                     (list (cdr elem)))
+                                    ((listp elem)
+                                     (seq-mapcat #'walk elem))
+                                    (t nil))))
+                       (walk layout))))
+         (by-key (lambda (k) (seq-find (lambda (s) (equal (plist-get s :key) k)) suffixes)))
+         (by-cmd (lambda (c) (seq-find (lambda (s) (eq (plist-get s :command) c)) suffixes))))
+    (should layout)
+    ;; "r" is code review with :if predicate
+    (should (eq (plist-get (funcall by-key "r") :command) 'magit-dash-status-pr-code-review))
+    (should (equal "r" (plist-get (funcall by-cmd 'magit-dash-status-pr-code-review) :key)))
+    (should (eq (plist-get (funcall by-cmd 'magit-dash-status-pr-code-review) :if)
+                'magit-dash-gh-pr-code-review-available-p))
+    ;; "o" is open PR dashboard (formerly "p")
+    (should (eq (plist-get (funcall by-key "o") :command) 'magit-gh-pr-dash))
+    (should (equal "o" (plist-get (funcall by-cmd 'magit-gh-pr-dash) :key)))
+    ;; "g" is refresh PR data (formerly "r")
+    (should (eq (plist-get (funcall by-key "g") :command) 'magit-dash-status-pr-refresh))
+    (should (equal "g" (plist-get (funcall by-cmd 'magit-dash-status-pr-refresh) :key)))
+    ;; "p" is no longer used in this menu
+    (should-not (funcall by-key "p"))))
 (provide 'test-magit-dash-status)
 ;;; test-magit-dash-status.el ends here
