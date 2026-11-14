@@ -21,7 +21,9 @@
     (should (gethash "create_worktree_for_pr" tools))
     (should (gethash "clean_merged_worktrees" tools))
     (should (gethash "prune_branches" tools))
-    (should (gethash "magit_dash_pr_status" tools))))
+    (should (gethash "magit_dash_pr_status" tools))
+    (should (gethash "stack_show" tools))
+    (should (gethash "stack_sync" tools))))
 
 (ert-deftest magit-dash-mcp/manage-worktrees-actions ()
   "Test `manage_worktrees' tool for list, create, delete, and review actions."

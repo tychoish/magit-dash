@@ -19,6 +19,7 @@
 ;;   - `prune_branches'
 ;;   - `magit_dash_pr_status'
 ;;   - `chain_plan' and `chain_resume' (PR chain merge plans, see `magit-dash-chain')
+;;   - `stack_show' and `stack_sync' (local branch stacks, see `magit-dash-stack')
 
 ;;; Code:
 
@@ -32,6 +33,7 @@
 (require 'magit-dash-gh-pr-status)
 (require 'magit-dash-worktree)
 (require 'magit-dash-chain)
+(require 'magit-dash-stack)
 
 (declare-function magit-dash-repo-name "magit-dash")
 (declare-function magit-dash-repo-path "magit-dash")
@@ -471,6 +473,123 @@
     :properties (:plan_id (:type "string" :description "Chain plan id."))
     :required ["plan_id"])
   (magit-dash-chain-resume-json (plist-get args :plan_id)))
+
+;;;; Tools 8-9: stack_show, stack_sync
+
+(defun magit-dash-mcp--stack-args (args)
+  "Return (REPO-DIR PREFIX BASE) from tool ARGS, signalling on bad input."
+  (let ((prefix (plist-get args :prefix))
+        (base (plist-get args :base)))
+    (unless (and (stringp prefix) (not (string-empty-p (string-trim prefix))))
+      (error "Argument `prefix' is required"))
+    (list (magit-dash-mcp--resolve-repo-dir (plist-get args :repo))
+          prefix
+          (and (stringp base) (not (string-empty-p base)) base))))
+
+(defun magit-dash-mcp--stack-discover (repo-dir prefix base)
+  "Discover the stack of PREFIX in REPO-DIR on BASE, writing nothing."
+  (let* ((slug (ignore-errors (magit-dash-mcp--resolve-repo-slug repo-dir repo-dir)))
+         (prs (and slug (ignore-errors (magit-dash-chain-fetch-prs slug repo-dir)))))
+    (magit-dash-stack-discover repo-dir prefix base prs t)))
+
+(defun magit-dash-mcp--stack-tree (stack)
+  "Render STACK as an ASCII tree string via `magit-dash-chain-render-ascii'.
+Each bottom's subtree is rendered as a chain whose node :state carries the
+commit count and drift; the base line is shown once."
+  (let ((base (plist-get stack :base))
+        (blocks nil))
+    (dolist (bottom (magit-dash-stack--bottoms stack))
+      (let* ((chain (magit-dash-stack-to-chain stack (plist-get bottom :branch)))
+             (nodes (mapcar
+                     (lambda (cn)
+                       (let ((n (magit-dash-stack--node stack (plist-get cn :branch))))
+                         (append cn
+                                 (list :state
+                                       (format "%s%s"
+                                               (magit-dash-stack--commit-word
+                                                (magit-dash-stack--own-count n))
+                                               (if (plist-get n :drift)
+                                                   (format ", behind %d" (plist-get n :drift))
+                                                 ""))))))
+                     (plist-get chain :nodes)))
+             (text (magit-dash-chain-render-ascii (plist-put chain :nodes nodes))))
+        (push (if blocks (cdr (split-string text "\n" t)) (split-string text "\n" t)) blocks)))
+    (string-join (if blocks
+                     (apply #'append (nreverse blocks))
+                   (list (format "%s (base)" base)))
+                 "\n")))
+
+(defun magit-dash-mcp--stack-node-json (n)
+  "Return the JSON-ready plist for stack node N."
+  (let ((commits (plist-get n :commits)))
+    (list :branch (plist-get n :branch)
+          :parent (magit-dash-mcp--json-value (plist-get n :parent))
+          :parent_source (magit-dash-mcp--json-value (plist-get n :parent-source))
+          :tip (magit-dash-mcp--json-value (plist-get n :tip))
+          :worktree (magit-dash-mcp--json-value (plist-get n :worktree))
+          :drift (or (plist-get n :drift) 0)
+          :ahead (or (plist-get n :ahead) 0)
+          :commit_count (magit-dash-stack--own-count n)
+          :merge_commits (length (seq-filter (lambda (c) (plist-get c :merge)) commits))
+          :lines_added (apply #'+ (mapcar (lambda (c) (or (plist-get c :added) 0)) commits))
+          :lines_removed (apply #'+ (mapcar (lambda (c) (or (plist-get c :removed) 0)) commits)))))
+
+(mcpkit-register-tool "stack_show" 'magit-dash
+  :description "Show a stack of dependent local branches matching a glob prefix (for example \"feature/*\"): each branch's parent, worktree, drift (commits of its parent it lacks), commit counts and line totals, plus an ASCII tree and dot and mermaid graphs. Read-only: writes no files and no git config."
+  :input-schema
+  '(:type "object"
+    :properties (:repo (:type "string"
+                        :description "Local repository path, owner/repo slug, or registered repo name.")
+                :prefix (:type "string"
+                         :description "Branch glob selecting the stack, e.g. feature/*.")
+                :base (:type "string"
+                       :description "Optional base branch (default main or master; origin/main equals main)."))
+    :required ["repo" "prefix"])
+  (cl-destructuring-bind (repo-dir prefix base) (magit-dash-mcp--stack-args args)
+    (let ((stack (magit-dash-mcp--stack-discover repo-dir prefix base)))
+      (list :base (plist-get stack :base)
+            :prefix prefix
+            :nodes (vconcat (mapcar #'magit-dash-mcp--stack-node-json (plist-get stack :nodes)))
+            :problems (vconcat (plist-get stack :problems))
+            :tree (magit-dash-mcp--stack-tree stack)
+            :dot (magit-dash-stack-dot stack)
+            :mermaid (magit-dash-stack-mermaid stack)))))
+
+(mcpkit-register-tool "stack_sync" 'magit-dash
+  :description "Create a chain plan (domain magit-dash-chain, origin mcp) that merges each parent branch of a local branch stack forward into its children with --no-ff merge commits. Nothing is executed and nothing is pushed or rebased; the plan needs user approval, then run it with hitl plan_execute and resume after a conflict with chain_resume. Returns the plan id and record file. No plan is created when validation fails."
+  :input-schema
+  '(:type "object"
+    :properties (:repo (:type "string"
+                        :description "Local repository path, owner/repo slug, or registered repo name.")
+                :prefix (:type "string"
+                         :description "Branch glob selecting the stack, e.g. feature/*.")
+                :base (:type "string"
+                       :description "Optional base branch (default main or master).")
+                :root (:type "string"
+                       :description "Optional bottom branch whose subtree to sync; required when the stack has several bottoms."))
+    :required ["repo" "prefix"])
+  (cl-destructuring-bind (repo-dir prefix base) (magit-dash-mcp--stack-args args)
+    (let* ((root (plist-get args :root))
+           (root (and (stringp root) (not (string-empty-p root)) root))
+           (stack (magit-dash-mcp--stack-discover repo-dir prefix base))
+           (chain (and (cdr (plist-get stack :nodes))
+                       (magit-dash-chain-validate (magit-dash-stack-to-chain stack root))))
+           (errors (if chain
+                       (plist-get chain :errors)
+                     (list "Nothing to sync: the stack has fewer than two branches")))
+           (plan (and (null errors)
+                      (magit-dash-chain-create-plan chain :origin 'mcp))))
+      (list :valid (if errors :false t)
+            :errors (vconcat errors)
+            :warnings (vconcat (and chain (plist-get chain :warnings)))
+            :problems (vconcat (plist-get stack :problems))
+            :tree (magit-dash-mcp--stack-tree stack)
+            :plan_id (if plan (hitl-plan-id plan) :null)
+            :record_file (if plan (magit-dash-chain-record-file plan) :null)
+            :steps (if plan
+                       (vconcat (mapcar (lambda (s) (magit-dash-chain--step-label (hitl-plan-step-target s)))
+                                        (hitl-plan-steps plan)))
+                     [])))))
 
 (provide 'magit-dash-mcp)
 
