@@ -4199,7 +4199,8 @@ The bug was that add-text-properties returns t, not the modified string."
 
 (ert-deftest magit-dash/on-magit-post-refresh-updates-row ()
   "magit-post-refresh hook triggers magit-dash-refresh-repo for matching repo."
-  (let* ((repo (magit-dash-repo--make :name "my-repo" :path "/tmp/my-repo"))
+  (let* ((magit-dash-buffer-name (generate-new-buffer-name " *magit-dash-test*"))
+         (repo (magit-dash-repo--make :name "my-repo" :path "/tmp/my-repo"))
          (magit-dash-repo-list (list repo))
          (refreshed-repo nil)
          (dash-buf (get-buffer-create magit-dash-buffer-name)))
@@ -4215,9 +4216,8 @@ The bug was that add-text-properties returns t, not the modified string."
 
 (ert-deftest magit-dash/on-magit-post-refresh-skips-when-buffer-dead ()
   "magit-post-refresh hook does nothing when magit-dash buffer is not live."
-  (when (get-buffer magit-dash-buffer-name)
-    (kill-buffer (get-buffer magit-dash-buffer-name)))
-  (let* ((repo (magit-dash-repo--make :name "my-repo" :path "/tmp/my-repo"))
+  (let* ((magit-dash-buffer-name " *magit-dash-test-nonexistent-buffer*")
+         (repo (magit-dash-repo--make :name "my-repo" :path "/tmp/my-repo"))
          (magit-dash-repo-list (list repo))
          (refreshed nil))
     (cl-letf (((symbol-function 'magit-toplevel)
@@ -4229,7 +4229,8 @@ The bug was that add-text-properties returns t, not the modified string."
 
 (ert-deftest magit-dash/maybe-refresh-target-only-refreshes-target ()
   "magit-dash--maybe-refresh with a target only refreshes that target."
-  (let* ((repo (magit-dash-repo--make :name "r1" :path "/tmp/r1"))
+  (let* ((magit-dash-buffer-name (generate-new-buffer-name " *magit-dash-test*"))
+         (repo (magit-dash-repo--make :name "r1" :path "/tmp/r1"))
          (refreshed-target nil)
          (full-refreshed nil)
          (dash-buf (get-buffer-create magit-dash-buffer-name)))
@@ -4262,7 +4263,8 @@ The bug was that add-text-properties returns t, not the modified string."
 
 (ert-deftest magit-dash/batch-run-refreshes-each-row ()
   "batch-run refreshes the repo row as each repo in the batch completes."
-  (let* ((r1 (magit-dash-repo--make :name "r1" :path "/tmp/r1"))
+  (let* ((magit-dash-buffer-name (generate-new-buffer-name " *magit-dash-test*"))
+         (r1 (magit-dash-repo--make :name "r1" :path "/tmp/r1"))
          (r2 (magit-dash-repo--make :name "r2" :path "/tmp/r2"))
          (repos (list r1 r2))
          (refreshed-repos nil)
@@ -4338,19 +4340,21 @@ The bug was that add-text-properties returns t, not the modified string."
   "Test `magit-dash--which-key-sync-timer' calls `which-key--start-timer' with mode delay."
   (let ((timer-calls nil)
         (which-key-mode t)
-        (magit-dash-which-key-idle-delay 0.05))
-    (cl-letf (((symbol-function 'which-key--start-timer)
-               (lambda (&optional delay) (push delay timer-calls))))
-      (with-temp-buffer
-        (set-window-buffer (selected-window) (current-buffer))
-        (magit-dash-mode)
-        ;; magit-dash-mode enters setup which calls which-key--start-timer with 0.05
-        (should (equal timer-calls '(0.05)))
-        ;; Switching window to a non-magit-dash buffer restores default (nil argument)
+        (magit-dash-which-key-idle-delay 0.05)
+        (window-selection-change-functions (copy-sequence window-selection-change-functions)))
+    (save-window-excursion
+      (cl-letf (((symbol-function 'which-key--start-timer)
+                 (lambda (&optional delay) (push delay timer-calls))))
         (with-temp-buffer
           (set-window-buffer (selected-window) (current-buffer))
-          (magit-dash--which-key-sync-timer)
-          (should (equal timer-calls '(nil 0.05))))))))
+          (magit-dash-mode)
+          ;; magit-dash-mode enters setup which calls which-key--start-timer with 0.05
+          (should (equal timer-calls '(0.05)))
+          ;; Switching window to a non-magit-dash buffer restores default (nil argument)
+          (with-temp-buffer
+            (set-window-buffer (selected-window) (current-buffer))
+            (magit-dash--which-key-sync-timer)
+            (should (equal timer-calls '(nil 0.05)))))))))
 
 (ert-deftest magit-dash/which-key-setup-registers-and-adds-hook ()
   "Test `magit-dash--which-key-setup' runs without error and hooks window change."
