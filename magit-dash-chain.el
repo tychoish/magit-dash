@@ -264,6 +264,10 @@ topological (parents first, depth-first) order."
     (list :repo-dir (expand-file-name repo-dir) :base base :root root-branch
           :nodes (nreverse nodes) :problems (nreverse problems))))
 
+(defalias 'magit-dash-chain-fetch-prs #'magit-dash-chain--fetch-prs
+  "Return PR plists for repository SLUG (run from DIR); the public PR-data seam.
+Callers outside this module (the stack visualizer) use this name.")
+
 ;;;; Validation
 
 (defun magit-dash-chain-validate (chain)
