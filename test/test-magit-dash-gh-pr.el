@@ -500,8 +500,13 @@
   (should (eq t (alist-get 'updated magit-dash-gh-pr-columns)))
   (should (equal '(repo pr ci title worktree updated comments review)
                  (magit-dash-gh-pr--active-columns)))
-  (magit-dash-global-mode 1)
-  (should (memq 'magit-dash-gh-pr-columns savehist-additional-variables)))
+  (let ((was-on (bound-and-true-p magit-dash-global-mode)))
+    (unwind-protect
+        (progn
+          (unless was-on (magit-dash-global-mode 1))
+          (should (memq 'magit-dash-gh-pr-columns savehist-additional-variables)))
+      (unless was-on
+        (magit-dash-global-mode -1)))))
 
 (ert-deftest magit-dash-gh-pr/toggle-column ()
   "Toggling a column flips its enabled state and syncs show-org."
@@ -646,6 +651,9 @@
     (should (eq (lookup-key m (kbd "c w")) #'magit-dash-gh-pr-dashboard-create-worktree))
     (should (eq (lookup-key m (kbd "c a")) #'magit-dash-gh-pr-dashboard-create-all-worktrees))
     (should (eq (lookup-key m (kbd "c i")) #'magit-dash-gh-pr-dashboard-fetch-ci))
+    (should (eq (lookup-key m (kbd "R"))   #'magit-dash-gh-pr-dashboard-code-review))
+    (should (eq (lookup-key m (kbd "c r")) #'magit-dash-gh-pr-dashboard-code-review))
+    (should (eq (lookup-key m (kbd "b"))   #'magit-dash-gh-pr-dashboard-open-browser))
     (should (eq (lookup-key m (kbd "m m")) #'magit-dash-gh-pr-dashboard-toggle-mark))
     (should (eq (lookup-key m (kbd "m u")) #'magit-dash-gh-pr-dashboard-unmark))
     (should (eq (lookup-key m (kbd "m c")) #'magit-dash-gh-pr-dashboard-unmark-all))
@@ -659,12 +667,48 @@
   (let ((layout (get 'magit-dash-gh-pr-dashboard-menu 'transient--layout)))
     (should layout)
     (let ((flat (format "%S" layout)))
+      (should (string-match-p "magit-dash-gh-pr-dashboard-code-review" flat))
       (should (string-match-p "magit-dash-gh-pr-dashboard-create-worktree" flat))
       (should (string-match-p "magit-dash-gh-pr-dashboard-create-all-worktrees" flat))
       (should (string-match-p "magit-dash-gh-pr-dashboard-review-worktrees" flat))
       (should (string-match-p "magit-dash-gh-pr-dashboard-clean-merged-worktrees" flat))
       (should (string-match-p "magit-dash-gh-pr-dashboard-toggle-mark" flat))
       (should (string-match-p "magit-dash-gh-pr-dashboard-unmark-all" flat)))))
+
+(ert-deftest magit-dash-gh-pr/dashboard-pr-url-extraction ()
+  "magit-dash-gh-pr-dashboard--pr-url resolves URLs from strings, plists, and alists."
+  (should (equal "https://github.com/foo/bar/pull/10"
+                 (magit-dash-gh-pr-dashboard--pr-url "https://github.com/foo/bar/pull/10")))
+  ;; Entry with :pr alist having 'url
+  (let ((entry '(:number 12 :repo "org/repo" :pr ((url . "https://github.com/org/repo/pull/12")))))
+    (should (equal "https://github.com/org/repo/pull/12"
+                   (magit-dash-gh-pr-dashboard--pr-url entry))))
+  ;; Entry with :pr plist having :url
+  (let ((entry '(:number 15 :repo "org/repo" :pr (:url "https://github.com/org/repo/pull/15"))))
+    (should (equal "https://github.com/org/repo/pull/15"
+                   (magit-dash-gh-pr-dashboard--pr-url entry))))
+  ;; Entry without explicit url synthesizes from repo and number
+  (let ((entry '(:number 20 :repo "myorg/cool-proj" :pr nil)))
+    (should (equal "https://github.com/myorg/cool-proj/pull/20"
+                   (magit-dash-gh-pr-dashboard--pr-url entry)))))
+
+(ert-deftest magit-dash-gh-pr/dashboard-code-review-opens ()
+  "magit-dash-gh-pr-dashboard-code-review passes URL to code-review-start."
+  (let ((called-url nil))
+    (cl-letf (((symbol-function 'code-review-start)
+               (lambda (url) (setq called-url url))))
+      (magit-dash-gh-pr-dashboard-code-review
+       '(:number 42 :repo "tychoish/magit-dash" :pr ((url . "https://github.com/tychoish/magit-dash/pull/42"))))
+      (should (equal "https://github.com/tychoish/magit-dash/pull/42" called-url)))))
+
+(ert-deftest magit-dash-gh-pr/code-review-requires-url-and-package ()
+  "magit-dash-gh-pr-code-review validates URL and package availability."
+  (should-error (magit-dash-gh-pr-code-review "") :type 'user-error)
+  (should-error (magit-dash-gh-pr-code-review nil) :type 'user-error)
+  (cl-letf (((symbol-function 'fboundp) (lambda (_) nil))
+            ((symbol-function 'require) (lambda (&rest _) nil)))
+    (should-error (magit-dash-gh-pr-code-review "https://github.com/o/r/pull/1")
+                  :type 'user-error)))
 
 (ert-deftest magit-dash-gh-pr/dashboard-menu-opens ()
   "The dashboard transient can set up its complete keymap."

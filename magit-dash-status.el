@@ -738,11 +738,22 @@ Calls CALLBACK with list of PR plists."
     (magit-dash-status--fetch-branch-pr top on-done t)
     (magit-dash-status--fetch-authored-prs top on-done t)))
 
+(defun magit-dash-status-pr-code-review ()
+  "Open `code-review' buffer for the pull request at point."
+  (interactive)
+  (let* ((pr (magit-dash-status--current-pr))
+         (url (and (listp pr) (plist-get pr :url))))
+    (if (and url (not (string-empty-p url)))
+        (magit-dash-gh-pr-code-review url)
+      (user-error "No pull request URL available"))))
+
 (transient-define-prefix magit-dash-status-pr-menu ()
   "Actions for GitHub pull request."
   ["Pull Request Actions"
    ("v" "View in browser"              magit-dash-status-pr-browse)
    ("d" "View diff"                    magit-dash-status-pr-diff
+    :inapt-if-not magit-dash-status--has-pr-at-point-p)
+   ("r" "Code review"                  magit-dash-status-pr-code-review
     :inapt-if-not magit-dash-status--has-pr-at-point-p)
    ("w" "Open in worktree"             magit-dash-status-pr-worktree
     :inapt-if-not magit-dash-status--has-pr-at-point-p)
@@ -751,8 +762,8 @@ Calls CALLBACK with list of PR plists."
    ("k" "Checks / CI status"           magit-dash-status-pr-checks)
    ("t" "Fetch comments/threads"       magit-dash-status-pr-fetch-threads
     :inapt-if-not magit-dash-status--has-pr-at-point-p)
-   ("p" "Open PR dashboard"            magit-gh-pr-dash)
-   ("r" "Refresh PR data"              magit-dash-status-pr-refresh)
+   ("o" "Open PR dashboard"            magit-gh-pr-dash)
+   ("g" "Refresh PR data"              magit-dash-status-pr-refresh)
    ("q" "Quit"                         transient-quit-one)])
 
 ;;; Central Magit Dash Dispatcher (bound to "." and in magit-dispatch)

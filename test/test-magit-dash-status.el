@@ -243,5 +243,24 @@
                (lambda (num dir) (setq pr-args (list num dir)))))
       (magit-dash-status-pr-checks)
       (should (equal '(99 "/tmp/fake-repo") pr-args)))))
+
+(ert-deftest magit-dash-status/pr-code-review-calls-gh-pr-code-review ()
+  "magit-dash-status-pr-code-review opens code-review with PR URL."
+  (let ((opened-url nil))
+    (cl-letf (((symbol-function 'magit-dash-status--current-pr)
+               (lambda () '(:number 42 :url "https://github.com/foo/bar/pull/42")))
+              ((symbol-function 'magit-dash-gh-pr-code-review)
+               (lambda (url) (setq opened-url url))))
+      (magit-dash-status-pr-code-review)
+      (should (equal "https://github.com/foo/bar/pull/42" opened-url))))
+  (cl-letf (((symbol-function 'magit-dash-status--current-pr)
+             (lambda () nil)))
+    (should-error (magit-dash-status-pr-code-review) :type 'user-error)))
+
+(ert-deftest magit-dash-status/pr-menu-includes-code-review ()
+  "magit-dash-status-pr-menu contains code-review action."
+  (let ((layout (get 'magit-dash-status-pr-menu 'transient--layout)))
+    (should layout)
+    (should (string-match-p "magit-dash-status-pr-code-review" (format "%S" layout)))))
 (provide 'test-magit-dash-status)
 ;;; test-magit-dash-status.el ends here
