@@ -2,7 +2,7 @@
 
 ;; Real git against temp repositories with a local bare "origin"; PR data is
 ;; stubbed through the chain fetch seam.  No network, no gh.  Helpers come
-;; from test-magit-dash-chain.el.
+;; from the shared chain test fixtures.
 ;;
 ;; Batch run:
 ;;   emacs --batch -l test/test-helper.el -l test/test-magit-dash-stack.el \
@@ -13,9 +13,10 @@
 (require 'magit-dash)
 (require 'magit-dash-chain)
 (require 'hitl-plan-ui)
-(load (expand-file-name "test-magit-dash-chain.el"
-                        (file-name-directory (or load-file-name buffer-file-name)))
-      nil t)
+(require 'magit-dash-chain-test-fixtures
+         (expand-file-name "fixtures/magit-dash-chain-test-fixtures.el"
+                           (file-name-directory (or load-file-name buffer-file-name))))
+
 (require 'magit-dash-stack)
 
 (defconst magit-dash-stack-test--source
@@ -567,7 +568,8 @@ digraph tycho_FND_1340 {
 
 (ert-deftest magit-dash-stack/load-runs-no-process-and-changes-no-global-state ()
   (let* ((keymap-before (copy-tree global-map))
-         (buffers-before (buffer-list))
+         (buffers-before (seq-remove (lambda (b) (string-match-p "Native-compile" (buffer-name b)))
+                                     (buffer-list)))
          (dir default-directory)
          (hooks (list after-load-alist)))
     (cl-letf (((symbol-function 'call-process) (lambda (&rest _) (error "process at load")))
