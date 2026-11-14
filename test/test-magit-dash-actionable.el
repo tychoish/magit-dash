@@ -36,5 +36,38 @@
         (should (= (length tabulated-list-entries) 1))
         (should (string-match-p "offline" header-line-format))))))
 
+(ert-deftest magit-dash-actionable-mode-derives-from-magit-dash-mode ()
+  "magit-dash-actionable-mode inherits full magit-dash-mode functionality."
+  (with-temp-buffer
+    (magit-dash-actionable-mode)
+    (should (derived-mode-p 'magit-dash-mode))
+    (should (derived-mode-p 'tabulated-list-mode))))
+
+(ert-deftest magit-dash-actionable-columns-show-why-and-omit-type-sync ()
+  "magit-dash-actionable-mode enables 'why' column and disables 'worktree' and 'sync'."
+  (with-temp-buffer
+    (magit-dash-actionable-mode)
+    (should (eq t (cdr (assq 'why magit-dash-columns))))
+    (should (null (cdr (assq 'worktree magit-dash-columns))))
+    (should (null (cdr (assq 'sync magit-dash-columns))))))
+
+(ert-deftest magit-dash-actionable-filters-clean-repos ()
+  "Clean repositories with no PRs are filtered out of the actionable dashboard."
+  (with-temp-buffer
+    (magit-dash-actionable-mode)
+    (let ((clean-repo (magit-dash-repo--make :name "clean" :path "/tmp/clean"))
+          (dirty-repo (magit-dash-repo--make :name "dirty" :path "/tmp/dirty")))
+      (let ((magit-dash-repo-list (list clean-repo dirty-repo)))
+        (cl-letf (((symbol-function 'magit-dash--get-stats)
+                   (lambda (r)
+                     (if (equal (magit-dash-repo-name r) "dirty")
+                         '(:dirty t)
+                       '(:ahead 0 :behind 0 :dirty nil))))
+                  ((symbol-function 'magit-dash-gh-pr-status-collect-all)
+                   (lambda (&rest _) nil)))
+          (magit-dash-actionable-refresh)
+          (should (= (length tabulated-list-entries) 1))
+          (should (equal (magit-dash-repo-name (caar tabulated-list-entries)) "dirty")))))))
+
 (provide 'test-magit-dash-actionable)
 ;;; test-magit-dash-actionable.el ends here

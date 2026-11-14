@@ -1897,13 +1897,13 @@ Returns a cancellation handle."
 ;;;; Column configuration
 
 (defvar magit-dash-columns
-  '((org . nil) (name . t) (branch . t) (fetched . t) (updated . nil) (ci . t) (status . t) (worktree . t) (sync . t) (cached . nil) (upstream . nil))
+  '((org . nil) (name . t) (branch . t) (fetched . t) (updated . nil) (ci . t) (status . t) (worktree . t) (sync . t) (cached . nil) (upstream . nil) (why . nil))
   "Alist of (COLUMN-SYMBOL . ENABLED) for the repository dashboard.
 Persisted across sessions via `savehist-additional-variables'.")
 
 
 (defconst magit-dash--all-columns
-  '(org name branch fetched updated ci status worktree sync cached upstream)
+  '(org name branch fetched updated ci status worktree sync cached upstream why)
   "All available dashboard columns in display order.")
 
 (defconst magit-dash--column-defs
@@ -1915,7 +1915,8 @@ Persisted across sessions via `savehist-additional-variables'.")
     (sync     . ("Sync"     8 nil))
     (cached   . ("Cached"   7 nil))
     (ci       . ("CI"       3 nil))
-    (upstream . ("Upstream" 16 nil)))
+    (upstream . ("Upstream" 16 nil))
+    (why      . ("Why"      32 nil)))
   "Alist of COLUMN-SYMBOL to (LABEL WIDTH SORTABLE) for non-name columns.
 Name and Branch widths are computed dynamically in `magit-dash--build-format'.")
 
@@ -2408,6 +2409,13 @@ until `magit-dash--populate-stats-async' updates them."
                          (propertize "·" 'face 'shadow)))
                       ('upstream
                        (or (magit-dash-repo-repo repo) ""))
+                      ('why
+                       (or (and (boundp 'magit-dash-actionable--why-cache)
+                                magit-dash-actionable--why-cache
+                                (gethash (magit-dash-repo-path repo) magit-dash-actionable--why-cache))
+                           (and (fboundp 'magit-dash-actionable--format-why)
+                                (magit-dash-actionable--format-why repo))
+                           ""))
                       ('ci
                        (if (not (magit-dash-repo-include-ci repo))
                            ""
