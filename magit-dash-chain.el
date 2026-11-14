@@ -189,11 +189,8 @@ This is the only place git is invoked.  It refuses history rewriting
   "Return DIR as a canonical directory name without trailing slash."
   (directory-file-name (file-truename (expand-file-name dir))))
 
-(defun magit-dash-chain--worktree-for-branch (repo-dir branch)
-  "Return the path of the worktree (main or linked) of REPO-DIR on BRANCH, or nil."
-  (when-let* ((wt (seq-find (lambda (w) (equal (alist-get 'branch w) branch))
-                            (magit-dash-gh--git-worktrees repo-dir))))
-    (alist-get 'path wt)))
+(defalias 'magit-dash-chain--worktree-for-branch #'magit-dash-worktree-for-branch
+  "Return the worktree of REPO-DIR on BRANCH, or nil.")
 
 (defun magit-dash-chain--worktree-path (repo-dir branch)
   "Return the path where a worktree for BRANCH of REPO-DIR would be created."

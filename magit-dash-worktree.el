@@ -95,6 +95,12 @@ the main checkout.  If PATH is nil, uses `default-directory'."
             (file-name-directory (directory-file-name (or (magit-toplevel) dir)))))
       (or (magit-toplevel dir) dir))))
 
+(defun magit-dash-worktree-for-branch (repo-dir branch)
+  "Return the path of the worktree (main or linked) of REPO-DIR on BRANCH, or nil."
+  (when-let* ((wt (seq-find (lambda (w) (equal (alist-get 'branch w) branch))
+                            (magit-dash-gh--git-worktrees repo-dir))))
+    (alist-get 'path wt)))
+
 (defun magit-dash-worktree-linked-p (&optional path)
   "Return non-nil if PATH (default `default-directory') is a linked worktree.
 Returns nil if PATH is the primary repository checkout or not a git repository."
