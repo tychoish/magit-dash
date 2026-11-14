@@ -76,10 +76,13 @@ merge is fully resolved."
   :type '(choice (const nil) directory)
   :group 'magit-dash-chain)
 
-(defcustom magit-dash-chain-worktree-directory nil
+(defcustom magit-dash-chain-worktree-directory ".wt"
   "Directory in which missing chain worktrees are created.
+A relative name (the default, \".wt\") is resolved against the main
+worktree directory of the repository (`magit-dash-worktree-main-dir'),
+so worktrees land in <repo>/.wt/.  An absolute directory is used as is.
 When nil, a sibling of the repository named REPO.chain-worktrees."
-  :type '(choice (const nil) directory)
+  :type '(choice (const :tag "Sibling REPO.chain-worktrees" nil) directory)
   :group 'magit-dash-chain)
 
 (defcustom magit-dash-chain-verify-command nil
@@ -195,7 +198,9 @@ This is the only place git is invoked.  It refuses history rewriting
 (defun magit-dash-chain--worktree-path (repo-dir branch)
   "Return the path where a worktree for BRANCH of REPO-DIR would be created."
   (let* ((main (directory-file-name (expand-file-name (magit-dash-worktree-main-dir repo-dir))))
-         (root (or magit-dash-chain-worktree-directory (concat main ".chain-worktrees"))))
+         (root (if magit-dash-chain-worktree-directory
+                   (expand-file-name magit-dash-chain-worktree-directory main)
+                 (concat main ".chain-worktrees"))))
     (expand-file-name (replace-regexp-in-string "[^A-Za-z0-9._-]" "-" branch) root)))
 
 ;;;; Discovery
@@ -580,6 +585,15 @@ source instead of starting a new one."
      :attempts (1+ (or (plist-get prior :attempts) 0)) :error nil)
     (condition-case err
         (let* ((wt (magit-dash-chain--ensure-worktree target))
+               (_before (let ((old (plist-get (magit-dash-chain--result plan id) :before))
+                              (head (magit-dash-chain--head wt)))
+                          ;; Keep the original tip while resuming a merge;
+                          ;; otherwise re-record unless it is still an ancestor.
+                          (unless (or (magit-dash-chain--merge-in-progress-p wt)
+                                      (equal old head)
+                                      (and old (magit-dash-chain--git-p
+                                                wt "merge-base" "--is-ancestor" old head)))
+                            (magit-dash-chain--set-result plan id :before head))))
                (source (magit-dash-chain--resolve-source target))
                (src-sha (magit-dash-chain--git-ok wt "rev-parse" "--verify"
                                                   (concat (car source) "^{commit}")))
@@ -791,6 +805,91 @@ Return the plan."
     (hitl-plan-execute plan)
     (magit-dash-chain--write-record plan)
     plan))
+
+;;;; Rollback
+
+(defun magit-dash-chain--rollback-step (plan step)
+  "Roll back the update STEP of PLAN; return (STEP-ID ACTION . REASON).
+ACTION is `reset', `aborted' or `refused'."
+  (let* ((id (hitl-plan-step-id step))
+         (res (magit-dash-chain--result plan id))
+         (status (plist-get res :status))
+         (wt (plist-get res :worktree-path))
+         (before (plist-get res :before)))
+    (cl-flet ((refuse (why) (list id 'refused why))
+              (finish (action)
+                (magit-dash-chain--set-result plan id :status 'rolled-back :before nil :sha nil
+                                              :rolled-back (magit-dash-chain--now))
+                (setf (hitl-plan-step-status step) 'pending
+                      (hitl-plan-step-message step) nil)
+                (hitl-plan-save plan)
+                (list id action nil)))
+      (cond
+       ((not (memq status '(done blocked))) (refuse "step has not merged anything"))
+       ((not before) (refuse "plan has no recorded pre-merge tip (:before); it cannot be rolled back"))
+       ((not (and wt (file-directory-p wt))) (refuse (format "worktree %s is gone" wt)))
+       ((eq status 'blocked)
+        (if (magit-dash-chain--merge-in-progress-p wt)
+            (progn (magit-dash-chain--git-ok wt "merge" "--abort")
+                   (finish 'aborted))
+          (refuse "no merge is in progress")))
+       ((equal before (plist-get res :sha)) (refuse "step made no merge commit"))
+       ((magit-dash-chain--merge-in-progress-p wt) (refuse "a merge is in progress"))
+       ((magit-dash-chain--dirty-p wt) (refuse "worktree has uncommitted changes"))
+       ((not (equal (magit-dash-chain--head wt) (plist-get res :sha)))
+        (refuse "HEAD is no longer the recorded merge commit"))
+       (t (magit-dash-chain--git-ok wt "reset" "--hard" before)
+          (finish 'reset))))))
+
+;;;###autoload
+(defun magit-dash-chain-rollback (plan-or-id &optional step-id)
+  "Undo the merges recorded by chain PLAN-OR-ID, last step first.
+With STEP-ID, roll back only that step.  A done step is reset to the tip
+recorded before its merge, only when its worktree is clean and HEAD is
+still the recorded merge commit.  A blocked step has its merge aborted.
+Anything else is refused with the reason; if only some steps could be
+undone, a message names the refused ones and the plan is paused.
+Return a list of \(STEP-ID ACTION REASON) entries, ACTION being `reset',
+`aborted' or `refused'."
+  (interactive
+   (let ((id (completing-read "Roll back chain plan: "
+                              (mapcar #'hitl-plan-id
+                                      (hitl-plan-list nil nil 'magit-dash-chain)))))
+     (unless (yes-or-no-p (format "Reset the merged worktrees of plan %s? " id))
+       (user-error "Rollback cancelled"))
+     (list id)))
+  (let* ((plan (magit-dash-chain--plan plan-or-id))
+         (steps (seq-filter
+                 (lambda (s) (and (eq (plist-get (hitl-plan-step-target s) :kind) 'update)
+                                  (or (null step-id) (equal step-id (hitl-plan-step-id s)))
+                                  (memq (plist-get (magit-dash-chain--result
+                                                    plan (hitl-plan-step-id s))
+                                                   :status)
+                                        '(done blocked))))
+                 (reverse (hitl-plan-steps plan))))
+         (out (mapcar (lambda (s) (magit-dash-chain--rollback-step plan s)) steps)))
+    ;; A rolled-back step is pending again, so a complete plan can re-run.
+    ;; A partial rollback (some steps undone, some refused) leaves later
+    ;; branches holding merges of states that no longer exist, so say so.
+    (let ((undone (seq-filter (lambda (r) (memq (nth 1 r) '(reset aborted))) out))
+          (refused (seq-filter (lambda (r) (eq (nth 1 r) 'refused)) out)))
+      (when (and undone (memq (hitl-plan-status plan) '(complete paused)))
+        (setf (hitl-plan-status plan) 'paused)
+        (hitl-plan-save plan))
+      (when (and undone refused)
+        (message "Chain plan %s partially rolled back: %s undone; refused: %s.  \
+Refused branches still contain merges of the undone states"
+                 (hitl-plan-id plan)
+                 (mapconcat (lambda (r) (format "%s" (nth 0 r))) (reverse undone) ", ")
+                 (mapconcat (lambda (r) (format "%s (%s)" (nth 0 r) (nth 2 r))) refused ", "))))
+    (magit-dash-chain--write-record plan)
+    (when (called-interactively-p 'interactive)
+      (message "%s" (if out
+                        (mapconcat (lambda (r) (format "step %s: %s%s" (nth 0 r) (nth 1 r)
+                                                       (if (nth 2 r) (concat " (" (nth 2 r) ")") "")))
+                                   out "; ")
+                      "Nothing to roll back")))
+    out))
 
 ;;;; Interactive entry points
 

@@ -347,6 +347,20 @@ conflict to an agent first; the result is always verified before continuing,
 and a missing agent falls back to halting. Use hitl =plan_status= (domain
 =magit-dash-chain=) for read-only status.
 
+Missing worktrees are created under =magit-dash-chain-worktree-directory=,
+which defaults to =".wt"=: a relative value is resolved against the main
+worktree directory, so they land in =<repo>/.wt/=. Set an absolute directory
+(per repository with a directory-local variable if you like), or =nil= for a
+sibling =REPO.chain-worktrees= directory.
+
+Each step records the worktree's tip before its merge (=:before=, kept across
+resumes). =M-x magit-dash-chain-rollback= undoes a plan, last step first: a
+finished step is reset (=git reset --hard=) to that tip only when its worktree
+is clean and HEAD is still the recorded merge commit; a conflicted step has its
+merge aborted; anything else is refused with the reason. If only some steps
+can be undone, a message names the refused ones and the plan is paused. Plans created before
+=:before= was recorded cannot be rolled back.
+
 * PR Status
 :PROPERTIES:
 :CUSTOM_ID: pr-status
