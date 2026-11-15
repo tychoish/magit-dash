@@ -16,6 +16,8 @@
 (require 'transient)
 (require 'seq)
 
+(declare-function magit-dash-gh-ci--failure-p "magit-dash-gh-ci")
+
 (defvar magit-dash-actionable--why-cache (make-hash-table :test #'equal)
   "Cache mapping repository paths to their why/attention summary strings.")
 
@@ -24,7 +26,14 @@
 
 (defun magit-dash-actionable--repo-entries (repo)
   "Return action rows for REPO based on its cached or collected stats."
-  (let ((stats (magit-dash--get-stats repo)))
+  (let* ((stats (magit-dash--get-stats repo))
+         (path (magit-dash-repo-path repo))
+         (ci (when (fboundp 'magit-dash-gh--cache-get)
+               (magit-dash-gh--cache-get path :ci-status)))
+         (ci-conclusion (plist-get ci :conclusion))
+         (ci-failing (or (and (fboundp 'magit-dash-gh-ci--failure-p)
+                              (magit-dash-gh-ci--failure-p ci-conclusion))
+                         (member ci-conclusion '("failure" "timed_out" "startup_failure")))))
     (seq-map (lambda (item)
                (list (list :repo repo :kind (car item))
                      (vector (magit-dash-repo-name repo) (cdr item))))
@@ -34,7 +43,9 @@
                          (when (> (or (plist-get stats :behind) 0) 0)
                            (cons 'pull (format "%s unpulled commits" (plist-get stats :behind))))
                          (when (plist-get stats :dirty)
-                           (cons 'changes "Uncommitted changes")))))))
+                           (cons 'changes "Uncommitted changes"))
+                         (when ci-failing
+                           (cons 'ci (format "CI failing (%s)" ci-conclusion))))))))
 
 (defun magit-dash-actionable--pr-entries (prs)
   "Return action rows for PRS that need author attention."

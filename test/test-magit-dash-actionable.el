@@ -70,6 +70,25 @@
           (should (= (length tabulated-list-entries) 1))
           (should (equal (magit-dash-repo-name (caar tabulated-list-entries)) "dirty")))))))
 
+(ert-deftest magit-dash-actionable-includes-failing-ci-repo ()
+  "Repositories with failing CI are included in actionable view even if clean locally."
+  (with-temp-buffer
+    (magit-dash-actionable-mode)
+    (let ((clean-repo (magit-dash-repo--make :name "clean" :path "/tmp/clean"))
+          (ci-fail-repo (magit-dash-repo--make :name "ci-fail" :path "/tmp/ci-fail")))
+      (let ((magit-dash-repo-list (list clean-repo ci-fail-repo)))
+        (cl-letf (((symbol-function 'magit-dash--get-stats)
+                   (lambda (_) '(:ahead 0 :behind 0 :dirty nil)))
+                  ((symbol-function 'magit-dash-gh--cache-get)
+                   (lambda (path key)
+                     (when (and (equal path "/tmp/ci-fail") (eq key :ci-status))
+                       '(:conclusion "failure" :status "completed"))))
+                  ((symbol-function 'magit-dash-gh-pr-status-collect-all)
+                   (lambda (&rest _) nil)))
+          (magit-dash-actionable-refresh)
+          (should (= (length tabulated-list-entries) 1))
+          (should (equal (magit-dash-repo-name (caar tabulated-list-entries)) "ci-fail")))))))
+
 (ert-deftest magit-dash-actionable/refresh-does-not-corrupt-other-buffers ()
   "magit-dash-actionable-refresh from an arbitrary buffer does not overwrite it."
   (with-temp-buffer
