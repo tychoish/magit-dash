@@ -4168,11 +4168,39 @@ If the chosen repository is hidden, unhides it.  Otherwise, hides it."
 Returns nil when repositories are marked (since marked repos take precedence)."
   (not (magit-dash--has-marks-p)))
 
+(defun magit-dash--visible-repos ()
+  "Return the list of repositories currently visible in the dashboard buffer.
+Extracts repo objects from visible lines in the buffer, excluding any lines
+marked invisible or hidden via `magit-dash--hidden-paths'."
+  (if (derived-mode-p 'magit-dash-mode)
+      (let (repos)
+        (save-excursion
+          (save-restriction
+            (goto-char (point-min))
+            (while (not (eobp))
+              (unless (invisible-p (point))
+                (when-let* ((id (tabulated-list-get-id))
+                            (repo (cond
+                                   ((magit-dash-repo-p id) id)
+                                   ((and (consp id) (plist-get id :repo))
+                                    (plist-get id :repo)))))
+                  (when (and (magit-dash-repo-p repo)
+                             (not (member (magit-dash-repo-path repo) magit-dash--hidden-paths)))
+                    (push repo repos))))
+              (forward-line 1))))
+        (nreverse (delete-dups repos)))
+    (seq-filter (lambda (r)
+                  (and (not (member (magit-dash-repo-path r) magit-dash--hidden-paths))
+                       (if (bound-and-true-p magit-dash--tag-filter)
+                           (memq magit-dash--tag-filter (magit-dash--all-tags-for r))
+                         t)))
+                magit-dash-repo-list)))
+
 (defun magit-dash--effective-repos ()
-  "Return marked repos if any are marked.
-If none are marked, return all visible repos (batch is all by default).
-Falls back to `magit-dash-repo-list' when not in a dashboard buffer."
-  (let ((all (magit-dash--all-repos)))
+  "Return marked repos if any are marked and visible.
+If none are marked, return all visible repos in the dashboard buffer.
+Batch operations ONLY impact visible items."
+  (let ((all (magit-dash--visible-repos)))
     (if magit-dash--marked-paths
         (seq-filter (lambda (r)
                       (member (magit-dash-repo-path r)

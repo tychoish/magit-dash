@@ -3464,6 +3464,29 @@ The bug was that add-text-properties returns t, not the modified string."
         (magit-dash--marked-paths nil))
     (should (equal (magit-dash--effective-repos) magit-dash-repo-list))))
 
+(ert-deftest magit-dash/effective-repos-filtered-view-returns-only-visible ()
+  "effective-repos returns only rows actually visible in the dashboard buffer."
+  (with-temp-buffer
+    (magit-dash-mode)
+    (let* ((r1 (magit-dash-repo--make :name "r1" :path "/tmp/r1"))
+           (r2 (magit-dash-repo--make :name "r2" :path "/tmp/r2"))
+           (r3 (magit-dash-repo--make :name "r3" :path "/tmp/r3"))
+           (magit-dash-repo-list (list r1 r2 r3))
+           (magit-dash--marked-paths nil))
+      (setq tabulated-list-format [("Name" 10 t)])
+      (tabulated-list-init-header)
+      ;; Only r1 and r3 are in the printed view (e.g. filtered view)
+      (setq tabulated-list-entries (list (list r1 ["r1"])
+                                         (list r3 ["r3"])))
+      (tabulated-list-print t)
+      (should (equal (magit-dash--effective-repos) (list r1 r3)))
+      ;; If r2 was marked outside view, it is not in effective-repos
+      (setq magit-dash--marked-paths '("/tmp/r2"))
+      (should (null (magit-dash--effective-repos)))
+      ;; If r1 is marked, only r1 is returned
+      (setq magit-dash--marked-paths '("/tmp/r1"))
+      (should (equal (magit-dash--effective-repos) (list r1))))))
+
 (ert-deftest magit-dash/build-format-name-column-is-constant ()
   "The Name column title in `magit-dash--build-format' remains \"Name\"."
   (let ((magit-dash--marked-paths nil))
