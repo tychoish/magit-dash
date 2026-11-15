@@ -178,6 +178,148 @@ Returns a shadow \"—\" when CI-STATUS is nil or indicates no runs."
 
 ;;; Async fetch
 
+(defcustom magit-dash-gh-ci-use-graphql t
+  "When non-nil, attempt to batch CI status queries with GitHub GraphQL API."
+  :type 'boolean
+  :group 'magit-dash)
+
+(defun magit-dash-gh-ci--build-batch-graphql-query (entries)
+  "Build GraphQL query string for ENTRIES.
+Each element is a list of (ALIAS REPO SLUG BRANCH)."
+  (let ((fields
+         (mapconcat
+          (pcase-lambda (`(,alias ,_repo ,slug ,branch))
+            (let ((parts (split-string slug "/")))
+              (format "  %s: repository(owner: %S, name: %S) {
+    ref(qualifiedName: %S) {
+      target {
+        ... on Commit {
+          statusCheckRollup {
+            state
+            contexts(first: 20) {
+              nodes {
+                __typename
+                ... on CheckRun {
+                  name
+                  conclusion
+                  status
+                  databaseId
+                  detailsUrl
+                }
+                ... on StatusContext {
+                  context
+                  state
+                  targetUrl
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }"
+                      alias (car parts) (cadr parts)
+                      (format "refs/heads/%s" branch))))
+          entries
+          "\n")))
+    (format "query {\n%s\n}" fields)))
+
+(defun magit-dash-gh-ci--parse-graphql-rollup (rollup)
+  "Convert GraphQL ROLLUP alist to a `magit-dash-gh-ci' status plist."
+  (when rollup
+    (let* ((nodes (map-nested-elt rollup '(contexts nodes)))
+           (runs
+            (when (listp nodes)
+              (seq-map
+               (lambda (node)
+                 (let ((typename (map-elt node '__typename)))
+                   (if (equal typename "StatusContext")
+                       `((workflowName . ,(map-elt node 'context))
+                         (conclusion . ,(pcase (map-elt node 'state)
+                                          ("SUCCESS" "success")
+                                          ("FAILURE" "failure")
+                                          ("ERROR" "failure")
+                                          (_ nil)))
+                         (status . ,(if (equal (map-elt node 'state) "PENDING")
+                                        "in_progress"
+                                      "completed"))
+                         (url . ,(map-elt node 'targetUrl)))
+                     `((workflowName . ,(map-elt node 'name))
+                       (conclusion . ,(downcase (or (map-elt node 'conclusion) "")))
+                       (status . ,(downcase (or (map-elt node 'status) "")))
+                       (databaseId . ,(map-elt node 'databaseId))
+                       (url . ,(map-elt node 'detailsUrl))))))
+               nodes))))
+      (if (and runs (> (length runs) 0))
+          (magit-dash-gh-ci--parse-runs runs)
+        (let ((state (map-elt rollup 'state)))
+          (cond
+           ((equal state "SUCCESS")
+            (list :conclusion "success" :status "completed" :pass 1 :fail 0 :total 1))
+           ((member state '("FAILURE" "ERROR"))
+            (list :conclusion "failure" :status "completed" :pass 0 :fail 1 :total 1))
+           ((member state '("PENDING" "EXPECTED"))
+            (list :conclusion nil :status "in_progress" :pass 0 :fail 0 :total 0))
+           (t (list :none t))))))))
+
+(defun magit-dash-gh-ci-fetch-batch-graphql (repos on-done &optional on-repo-done)
+  "Batch-fetch CI status for REPOS using a single GitHub GraphQL query.
+Calls ON-REPO-DONE with (REPO CI-STATUS) for each successfully parsed repo.
+Calls ON-DONE with the list of remaining unhandled repos (e.g. repos that
+could not be queried via GraphQL or whose queries failed)."
+  (let* ((guards (bound-and-true-p magit-dash--refresh-guards))
+         (buf (or (get-buffer (or (bound-and-true-p magit-dash-buffer-name) "*magit-dash*"))
+                  (current-buffer)))
+         (entries nil)
+         (unhandled nil)
+         (idx 0))
+    (dolist (repo repos)
+      (let* ((path (magit-dash-repo-path repo))
+             (slug (ignore-errors (magit-dash-ci--repo-slug repo)))
+             (current (magit-dash--current-branch path))
+             (branch (if (string-empty-p current)
+                         (magit-dash-repo-branch repo)
+                       current)))
+        (if (and slug (string-match-p "/" slug) branch)
+            (push (list (format "r%d" (setq idx (1+ idx))) repo slug branch) entries)
+          (push repo unhandled))))
+    (if (null entries)
+        (when on-done (funcall on-done repos))
+      (let ((query (magit-dash-gh-ci--build-batch-graphql-query entries)))
+        (magit-dash-gh--run-process
+         (list "api" "graphql" "-f" (concat "query=" query))
+         (expand-file-name "~")
+         (lambda (output)
+           (let* ((data (condition-case nil
+                            (map-elt (json-parse-string output
+                                                        :array-type 'list
+                                                        :object-type 'alist)
+                                     'data)
+                          (error nil)))
+                  (remaining (copy-sequence unhandled)))
+             (if (null data)
+                 (when on-done (funcall on-done repos))
+               (dolist (item entries)
+                 (pcase-let* ((`(,alias ,repo ,_slug ,_branch) item)
+                              (path (magit-dash-repo-path repo))
+                              (repo-data (or (map-elt data (intern alias))
+                                             (map-elt data alias)))
+                              (rollup (map-nested-elt repo-data '(ref target statusCheckRollup)))
+                              (ci-status (magit-dash-gh-ci--parse-graphql-rollup rollup)))
+                   (if (and ci-status (magit-dash-gh--refresh-current-p guards path))
+                       (progn
+                         (magit-dash-gh--cache-set path :ci-status ci-status)
+                         (when (and buf (buffer-live-p buf))
+                           (with-current-buffer buf
+                             (when (fboundp 'magit-dash--update-entry)
+                               (magit-dash--update-entry repo))))
+                         (when on-repo-done
+                           (funcall on-repo-done repo ci-status)))
+                     (push repo remaining))))
+               (when on-done (funcall on-done remaining)))))
+         (lambda (_err _code)
+           (when on-done (funcall on-done repos))))))))
+
 (defun magit-dash-gh-ci-fetch (repo callback)
   "Fetch CI status for REPO asynchronously and call CALLBACK with the result.
 CALLBACK receives a CI status plist (see `magit-dash-gh-ci--parse-runs') or
@@ -228,13 +370,14 @@ Caches the result as :ci-status in the shared magit-dash-gh cache."
 
 ;;;###autoload
 (defun magit-dash-gh-ci-fetch-batch (repos &rest args)
-  "Fetch CI status for REPOS using `gen-run-async' with bounded concurrency.
+  "Fetch CI status for REPOS using GraphQL batching or `gen-run-async' with bounded concurrency.
 Concurrency is bounded by `magit-dash-max-concurrent-ci-jobs'.
 ARGS may contain an optional positional ON-DONE callback or keyword arguments:
   :on-done FUNCTION
   :on-repo-done FUNCTION
   :concurrency INTEGER
   :delay FLOAT
+  :use-graphql BOOLEAN
 Returns a cancellation handle."
   (let* ((guards (bound-and-true-p magit-dash--refresh-guards))
          (on-done (when (and (car args) (not (keywordp (car args))))
@@ -249,6 +392,9 @@ Returns a cancellation handle."
          (yield (or (plist-get args :delay)
                     (bound-and-true-p magit-dash-queue-yield-delay)
                     0.0))
+         (use-graphql (if (plist-member args :use-graphql)
+                          (plist-get args :use-graphql)
+                        magit-dash-gh-ci-use-graphql))
          (ci-repos (seq-filter #'magit-dash-repo-include-ci repos))
          (buf (or (get-buffer (or (bound-and-true-p magit-dash-buffer-name) "*magit-dash*"))
                   (current-buffer))))
@@ -256,24 +402,39 @@ Returns a cancellation handle."
         (progn
           (when on-done (funcall on-done))
           (lambda (&rest _) nil))
-      (gen-run-async
-       (lambda (repo done)
-         (if (not (magit-dash-gh--refresh-current-p guards (magit-dash-repo-path repo)))
-             (funcall done)
-           (magit-dash-gh-ci-fetch
-            repo
-            (lambda (ci-status)
-              (when (and buf (buffer-live-p buf))
-		(with-current-buffer buf
-                  (when (fboundp 'magit-dash--update-entry)
-                    (magit-dash--update-entry repo))))
-              (when on-repo-done
-		(funcall on-repo-done repo ci-status))
-              (funcall done)))))
-       ci-repos
-       :concurrency limit
-       :delay yield
-       :on-done on-done))))
+      (letrec ((run-individual
+                (lambda (remaining-repos)
+                  (if (null remaining-repos)
+                      (progn
+                        (when on-done (funcall on-done))
+                        (lambda (&rest _) nil))
+                    (gen-run-async
+                     (lambda (repo done)
+                       (if (not (magit-dash-gh--refresh-current-p guards (magit-dash-repo-path repo)))
+                           (funcall done)
+                         (magit-dash-gh-ci-fetch
+                          repo
+                          (lambda (ci-status)
+                            (when (and buf (buffer-live-p buf))
+                              (with-current-buffer buf
+                                (when (fboundp 'magit-dash--update-entry)
+                                  (magit-dash--update-entry repo))))
+                            (when on-repo-done
+                              (funcall on-repo-done repo ci-status))
+                            (funcall done)))))
+                     remaining-repos
+                     :concurrency limit
+                     :delay yield
+                     :on-done on-done)))))
+        (if (and use-graphql (> (length ci-repos) 1))
+            (progn
+              (magit-dash-gh-ci-fetch-batch-graphql
+               ci-repos
+               (lambda (unhandled)
+                 (funcall run-individual unhandled))
+               on-repo-done)
+              (lambda (&rest _) nil))
+          (funcall run-individual ci-repos))))))
 
 ;;; Public commands
 

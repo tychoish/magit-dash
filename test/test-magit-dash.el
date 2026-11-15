@@ -927,8 +927,8 @@ and the tabulated-list render functions so tests can call `magit-dash-refresh'
 without real git repos or a live dashboard buffer."
   `(cl-letf (((symbol-function 'magit-dash--discover-worktrees) (lambda () nil))
              ((symbol-function 'magit-dash--discover-submodules) (lambda () nil))
-             ((symbol-function 'magit-dash--populate-stats-async) (lambda (_) nil))
-             ((symbol-function 'magit-dash--refresh-fetch-or-sync-async) (lambda (_) nil))
+             ((symbol-function 'magit-dash--populate-stats-async) (lambda (&rest _) nil))
+             ((symbol-function 'magit-dash--refresh-fetch-or-sync-async) (lambda (&rest _) nil))
              ((symbol-function 'tabulated-list-print) (lambda (&rest _) nil))
              ((symbol-function 'tabulated-list-init-header) (lambda () nil)))
      ,@body))
@@ -4606,3 +4606,31 @@ The bug was that add-text-properties returns t, not the modified string."
           (should refresh-called))
       (kill-buffer dash-buf)
       (kill-buffer other))))
+
+(ert-deftest magit-dash/queue-yield-delay-default ()
+  "Queue yield delay should default to at least 0.02s (0.05s)."
+  (should (>= magit-dash-queue-yield-delay 0.02)))
+
+(ert-deftest magit-dash/refresh-dim-overlay-and-cancel-revert ()
+  "Test that buffer is dimmed during refresh and cancellation reverts to stale entries."
+  (let ((buf (get-buffer-create magit-dash-buffer-name)))
+    (unwind-protect
+        (with-current-buffer buf
+          (magit-dash-mode)
+          (setq tabulated-list-format [("Name" 10 t) ("Branch" 10 t) ("Status" 10 t)])
+          (tabulated-list-init-header)
+          (setq tabulated-list-entries '((#s(magit-dash-repo :name "r1" :path "/fake/r1") ["r1" "main" "clean"])))
+          (tabulated-list-print t)
+          ;; Dim buffer
+          (magit-dash--dim-buffer buf)
+          (should (overlayp magit-dash--dim-overlay))
+          (should (eq (overlay-get magit-dash--dim-overlay 'face) 'magit-dash-dim-overlay))
+          (should (equal magit-dash--stale-entries tabulated-list-entries))
+          ;; Modify entries to simulate in-flight modifications
+          (setq tabulated-list-entries '((#s(magit-dash-repo :name "r1" :path "/fake/r1") ["r1" "main" "dirty"])))
+          ;; Cancel refresh should revert to stale entries and remove overlay
+          (magit-dash--cancel-refresh-jobs)
+          (should-not magit-dash--dim-overlay)
+          (should-not magit-dash--stale-entries)
+          (should (equal (aref (cadar tabulated-list-entries) 2) "clean")))
+      (kill-buffer buf))))

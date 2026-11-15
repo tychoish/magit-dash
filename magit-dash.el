@@ -302,7 +302,7 @@ Defaults to 1.5x the number of CPU cores."
   :type 'integer
   :group 'magit-dash)
 
-(defcustom magit-dash-queue-yield-delay 0.0
+(defcustom magit-dash-queue-yield-delay 0.05
   "Delay in seconds between job dequeues in cooperative async runner."
   :type 'float
   :group 'magit-dash)
@@ -380,11 +380,61 @@ When nil, no replacements are registered."
 (defvar magit-dash--refresh-cancel-handle nil
   "Cancellation handle function for active `gen-run-async' refresh runners.")
 
+(defvar-local magit-dash--dim-overlay nil
+  "Overlay used to gray out the dashboard buffer during refresh.")
+
+(defvar-local magit-dash--stale-entries nil
+  "Saved copy of `tabulated-list-entries' before refresh for reverting on cancellation.")
+
+(defface magit-dash-dim-overlay
+  '((((class color) (min-colors 88) (background dark))
+     :foreground "#777777")
+    (((class color) (min-colors 88) (background light))
+     :foreground "#999999")
+    (t :inherit shadow))
+  "Face applied to dim the dashboard buffer while refreshing."
+  :group 'magit-dash)
+
+(defun magit-dash--dim-buffer (&optional buffer)
+  "Gray out BUFFER (defaults to current buffer) and snapshot stale entries."
+  (let ((buf (or buffer (current-buffer))))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (unless magit-dash--stale-entries
+          (setq magit-dash--stale-entries (copy-tree tabulated-list-entries)))
+        (unless (and magit-dash--dim-overlay (overlay-buffer magit-dash--dim-overlay))
+          (setq magit-dash--dim-overlay (make-overlay (point-min) (point-max)))
+          (overlay-put magit-dash--dim-overlay 'face 'magit-dash-dim-overlay)
+          (overlay-put magit-dash--dim-overlay 'priority 100))))))
+
+(defun magit-dash--undim-buffer (&optional buffer)
+  "Remove dim overlay and stale entries snapshot from BUFFER."
+  (let ((buf (or buffer (current-buffer))))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (when (and magit-dash--dim-overlay (overlay-buffer magit-dash--dim-overlay))
+          (delete-overlay magit-dash--dim-overlay))
+        (setq magit-dash--dim-overlay nil)
+        (setq magit-dash--stale-entries nil)))))
+
+(defun magit-dash--revert-stale-buffer (&optional buffer)
+  "Revert BUFFER to `magit-dash--stale-entries' and remove dim overlay."
+  (let ((buf (or buffer (current-buffer))))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (when magit-dash--stale-entries
+          (setq tabulated-list-entries (copy-tree magit-dash--stale-entries))
+          (tabulated-list-print t))
+        (magit-dash--undim-buffer buf)))))
+
 (defun magit-dash--cancel-refresh-jobs ()
   "Cancel all in-flight refresh jobs."
   (when (functionp magit-dash--refresh-cancel-handle)
     (ignore-errors (funcall magit-dash--refresh-cancel-handle :cancel)))
-  (setq magit-dash--refresh-cancel-handle nil))
+  (setq magit-dash--refresh-cancel-handle nil)
+  (when-let* ((buf (get-buffer (or (bound-and-true-p magit-dash-buffer-name) "*magit-dash*"))))
+    (when (buffer-live-p buf)
+      (magit-dash--revert-stale-buffer buf))))
 
 ;;;; Hooks and operations
 
@@ -2805,7 +2855,13 @@ of other buffers."
         (tabulated-list-init-header)
         (setq tabulated-list-entries (seq-map #'magit-dash--build-entry repos))
         (tabulated-list-print t)
-        (let ((refresh-handle (magit-dash--refresh-repos repos)))
+        (let* ((dash-buf (current-buffer))
+               (_ (when tabulated-list-entries
+                    (magit-dash--dim-buffer dash-buf)))
+               (refresh-handle (magit-dash--refresh-repos
+                                repos nil nil
+                                (lambda ()
+                                  (magit-dash--undim-buffer dash-buf)))))
           (setq magit-dash--refresh-cancel-handle
                 (lambda (&optional action)
                   (when (functionp subm-handle) (funcall subm-handle action))
@@ -2814,8 +2870,13 @@ of other buffers."
 (defun magit-dash-hard-refresh ()
   "Clear all caches and repopulate the dashboard from scratch.
 Unlike `magit-dash-refresh', discards all cached stats so every repo is
-re-collected asynchronously."
+re-collected asynchronously, graying out the buffer and keeping existing
+rows visible until fresh results arrive."
   (interactive)
+  (when-let* ((buf (or (get-buffer magit-dash-buffer-name)
+                       (and (derived-mode-p 'magit-dash-mode) (current-buffer)))))
+    (when (buffer-live-p buf)
+      (magit-dash--dim-buffer buf)))
   (magit-dash--cancel-refresh-jobs)
   (clrhash magit-dash-gh--cache)
   (clrhash magit-dash-gh--cache-requests)
@@ -2828,14 +2889,20 @@ re-collected asynchronously."
   (or (magit-dash--has-marks-p)
       (magit-dash--repo-at-point-p)))
 
-(defun magit-dash--refresh-repos (repos &optional force quiet)
+(defun magit-dash--refresh-repos (repos &optional force quiet on-done)
   "Refresh only REPOS, updating their dashboard rows in-place.
 When FORCE is non-nil, resets last fetch and sync attempt timestamps
 for REPOS so automatic fetch/sync is not throttled.
-When QUIET is non-nil, suppresses echo area messages."
-  (let ((buf (or (get-buffer magit-dash-buffer-name)
-                 (and (derived-mode-p 'magit-dash-mode) (current-buffer))))
-        (magit-dash--refresh-guards (make-hash-table :test #'equal)))
+When QUIET is non-nil, suppresses echo area messages.
+When ON-DONE is non-nil, calls it when all refresh operations finish."
+  (let* ((buf (or (get-buffer magit-dash-buffer-name)
+                  (and (derived-mode-p 'magit-dash-mode) (current-buffer))))
+         (magit-dash--refresh-guards (make-hash-table :test #'equal))
+         (stats-done nil)
+         (ci-done nil)
+         (check-done (lambda ()
+                       (when (and stats-done ci-done)
+                         (when on-done (funcall on-done))))))
     (seq-do
      (lambda (repo)
        (let* ((path (magit-dash-repo-path repo))
@@ -2849,12 +2916,24 @@ When QUIET is non-nil, suppresses echo area messages."
            (remhash exp-path magit-dash--repo-last-fetch-attempts)
            (remhash exp-path magit-dash--repo-last-sync-attempts))))
      repos)
-    (let ((stats-handle (if quiet
-                            (magit-dash--populate-stats-async repos nil quiet)
-                          (magit-dash--populate-stats-async repos)))
+    (let ((stats-handle (condition-case nil
+                            (magit-dash--populate-stats-async
+                             repos
+                             (lambda ()
+                               (setq stats-done t)
+                               (funcall check-done))
+                             quiet)
+                          (wrong-number-of-arguments
+                           (magit-dash--populate-stats-async repos))))
           (ci-handle (when (and buf (buffer-live-p buf))
-                       (magit-dash-gh-ci-fetch-batch repos)))
+                       (magit-dash-gh-ci-fetch-batch
+                        repos
+                        :on-done (lambda ()
+                                   (setq ci-done t)
+                                   (funcall check-done)))))
           (sync-handle (magit-dash--refresh-fetch-or-sync-async repos)))
+      (unless (and buf (buffer-live-p buf) (seq-some #'magit-dash-repo-include-ci repos))
+        (setq ci-done t))
       (lambda (&optional action)
         (when (functionp stats-handle) (funcall stats-handle action))
         (when (functionp ci-handle) (funcall ci-handle action))

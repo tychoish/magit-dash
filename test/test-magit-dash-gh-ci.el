@@ -276,5 +276,30 @@ passes nil explicitly to exercise the disabled case."
              (lambda () (list :owner "owner" :repo "myrepo" :branch "main"))))
     (should (equal "owner/myrepo" (magit-dash-ci--repo-slug "/tmp/myrepo")))))
 
+(ert-deftest magit-dash-gh-ci/build-batch-graphql-query ()
+  "Test GraphQL batch query generation for repositories."
+  (let* ((r1 (magit-dash-repo--make :name "r1" :path "/tmp/r1"))
+         (entries (list (list "r1" r1 "owner/repo1" "main")))
+         (q (magit-dash-gh-ci--build-batch-graphql-query entries)))
+    (should (string-match-p "r1: repository(owner: \"owner\", name: \"repo1\")" q))
+    (should (string-match-p "refs/heads/main" q))))
+
+(ert-deftest magit-dash-gh-ci/parse-graphql-rollup-states ()
+  "Test parsing GraphQL statusCheckRollup data."
+  (let* ((rollup-success '((state . "SUCCESS")
+                           (contexts (nodes ((__typename . "CheckRun")
+                                             (name . "test")
+                                             (conclusion . "SUCCESS")
+                                             (status . "COMPLETED"))))))
+         (res-success (magit-dash-gh-ci--parse-graphql-rollup rollup-success))
+         (rollup-fail '((state . "FAILURE")
+                        (contexts (nodes ((__typename . "CheckRun")
+                                          (name . "test")
+                                          (conclusion . "FAILURE")
+                                          (status . "COMPLETED"))))))
+         (res-fail (magit-dash-gh-ci--parse-graphql-rollup rollup-fail)))
+    (should (equal (plist-get res-success :conclusion) "success"))
+    (should (equal (plist-get res-fail :conclusion) "failure"))))
+
 (provide 'test-magit-dash-gh-ci)
 ;;; test-magit-dash-gh-ci.el ends here
