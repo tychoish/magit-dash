@@ -241,12 +241,12 @@ of other buffers."
 (define-derived-mode magit-dash-actionable-mode magit-dash-mode "Dash Actions"
   "Overlay and filtering of `magit-dash-repos' list view for actionable repositories.
 Shows repositories needing attention (uncommitted changes, unpushed or unpulled
-commits, and pull requests needing author feedback), replacing Type and Sync
-columns with a Why column."
+commits, and pull requests needing author feedback), displaying the Updated timestamp
+column and omitting Type, Sync, and Why columns."
   (setq-local magit-dash-columns
               '((org . nil) (name . t) (branch . t) (fetched . nil)
-                (updated . nil) (ci . t) (status . t)
-                (worktree . nil) (sync . nil) (why . t)
+                (updated . t) (ci . t) (status . t)
+                (worktree . nil) (sync . nil) (why . nil)
                 (cached . nil) (upstream . nil)))
   (setq tabulated-list-format (magit-dash--build-format nil))
   (tabulated-list-init-header))

@@ -43,11 +43,12 @@
     (should (derived-mode-p 'magit-dash-mode))
     (should (derived-mode-p 'tabulated-list-mode))))
 
-(ert-deftest magit-dash-actionable-columns-show-why-and-omit-type-sync ()
-  "magit-dash-actionable-mode enables 'why' column and disables 'worktree' and 'sync'."
+(ert-deftest magit-dash-actionable-columns-show-updated-and-omit-why-type-sync ()
+  "magit-dash-actionable-mode enables 'updated' column and disables 'why', 'worktree' and 'sync'."
   (with-temp-buffer
     (magit-dash-actionable-mode)
-    (should (eq t (cdr (assq 'why magit-dash-columns))))
+    (should (eq t (cdr (assq 'updated magit-dash-columns))))
+    (should (null (cdr (assq 'why magit-dash-columns))))
     (should (null (cdr (assq 'worktree magit-dash-columns))))
     (should (null (cdr (assq 'sync magit-dash-columns))))))
 
