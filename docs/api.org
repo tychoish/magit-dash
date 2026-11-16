@@ -16,7 +16,7 @@ docstrings.
                      "magit-dash-status.el"
                      "magit-dash-open.el"
                      "magit-dash-gh.el"
-                     "magit-dash-gh-pr.el"
+                     "magit-dash-pr.el"
                      "magit-dash-gh-ci.el"
                      "magit-dash-gh-actions.el"
                      "magit-dash-worktree.el"
@@ -31,7 +31,7 @@ docstrings.
                  "magit-dash-open"
                  ("magit-dash-gh"
                   "magit-dash-gh"
-                  "magit-dash-gh-pr"
+                  "magit-dash-pr"
                   "magit-dash-gh-ci"
                   "magit-dash-gh-actions")
                  "magit-dash-worktree"
@@ -291,7 +291,7 @@ In addition to any hooks its parent mode ~tabulated-list-mode~ might have run, t
 
 Key             Binding
 
-TAB		forward-button RET		magit-dash-magit-status SPC		magit-dash-toggle-mark !		magit-dash-magit-dispatch *		magit-dash-unmark-all -		negative-argument 0 .. 9		digit-argument <		beginning-of-buffer >		end-of-buffer ?		magit-dash-menu a		magit-dash-auto-sync b		magit-dash-visit-buffer c		magit-dash-magit-commit d		magit-dash-magit-diff e		magit-dash-find-file f		magit-dash-fetch g		magit-dash-refresh h		magit-dash-hide-repo i		magit-dash-add-tag k		magit-dash-worktree-delete l		magit-dash-magit-log m		magit-dash-menu n		magit-dash-sync o		magit-dash-open-repo p		magit-gh-pr-dash q		quit-window r		magit-dash-refresh-repo s		magit-dash-magit-status t		magit-dash-filter-by-tag u		magit-dash-pull w		magit-dash-open-worktree-dispatch x		magit-dash-run-command y		magit-dash-prune-branches {		tabulated-list-narrow-current-column }		tabulated-list-widen-current-column DEL		scroll-down-command S-SPC		scroll-down-command M-<left>	tabulated-list-previous-column M-<right>	tabulated-list-next-column <backtab>	backward-button <follow-link>	mouse-face <mouse-2>	mouse-select-window
+TAB		forward-button RET		magit-dash-magit-status SPC		magit-dash-toggle-mark !		magit-dash-magit-dispatch *		magit-dash-unmark-all -		negative-argument 0 .. 9		digit-argument <		beginning-of-buffer >		end-of-buffer ?		magit-dash-menu a		magit-dash-auto-sync b		magit-dash-visit-buffer c		magit-dash-magit-commit d		magit-dash-magit-diff e		magit-dash-find-file f		magit-dash-fetch g		magit-dash-refresh h		magit-dash-hide-repo i		magit-dash-add-tag k		magit-dash-worktree-delete l		magit-dash-magit-log m		magit-dash-menu n		magit-dash-sync o		magit-dash-open-repo p		magit-dash-pr q		quit-window r		magit-dash-refresh-repo s		magit-dash-magit-status t		magit-dash-filter-by-tag u		magit-dash-pull w		magit-dash-open-worktree-dispatch x		magit-dash-run-command y		magit-dash-prune-branches {		tabulated-list-narrow-current-column }		tabulated-list-widen-current-column DEL		scroll-down-command S-SPC		scroll-down-command M-<left>	tabulated-list-previous-column M-<right>	tabulated-list-next-column <backtab>	backward-button <follow-link>	mouse-face <mouse-2>	mouse-select-window
 
 M-s		magit-dash-toggle-discovered-submodules M-t		magit-dash-toggle-discovered-worktrees
 
@@ -1044,23 +1044,23 @@ Select a repository using context-aware completion and dispatch a worktree task.
 
 *** Core Helpers Shared By All Magit-Dash-Gh-* Modules
 
-**** [[file:../magit-dash-gh.el::81][magit-dash-gh-prune-pr-limit]] :variable:
+**** [[file:../magit-dash-gh.el::81][magit-dash-prune-pr-limit]] :variable:
 :PROPERTIES:
-:CUSTOM_ID: magit-dash-gh-prune-pr-limit
+:CUSTOM_ID: magit-dash-prune-pr-limit
 :END:
 
 Maximum number of PRs to fetch from GitHub on each incremental scan.
 
-**** [[file:../magit-dash-gh.el::84][magit-dash-gh-prune-cache-dir]] :variable:
+**** [[file:../magit-dash-gh.el::84][magit-dash-prune-cache-dir]] :variable:
 :PROPERTIES:
-:CUSTOM_ID: magit-dash-gh-prune-cache-dir
+:CUSTOM_ID: magit-dash-prune-cache-dir
 :END:
 
 Directory for per-repo closed-PR cache files, or nil to disable disk caching.
 
-**** [[file:../magit-dash-gh.el::310][magit-dash-gh-prune-merged-branches]] :command:
+**** [[file:../magit-dash-gh.el::310][magit-dash-prune-merged-branches]] :command:
 :PROPERTIES:
-:CUSTOM_ID: magit-dash-gh-prune-merged-branches
+:CUSTOM_ID: magit-dash-prune-merged-branches
 :END:
 
 Open a menu to prune local branches whose PRs are merged or closed.
@@ -1075,9 +1075,9 @@ Per-repo cache (candidates + marked list) lives on the unified global cache keye
   - prune marked branches (when any are marked)
   - prune: BRANCH [marked]   (one entry per candidate)
 
-**** [[file:../magit-dash-gh.el::344][magit-dash-gh-prune-prefetch]]
+**** [[file:../magit-dash-gh.el::344][magit-dash-prune-prefetch]]
 :PROPERTIES:
-:CUSTOM_ID: magit-dash-gh-prune-prefetch
+:CUSTOM_ID: magit-dash-prune-prefetch
 :END:
 
 Seed the in-memory closed-PR cache from disk for the current repo. Makes no GitHub API calls; safe to call on status load. Skips silently when caching is disabled, not in a git repo, or the in-memory cache is already populated.
@@ -1126,18 +1126,18 @@ Switch the active ‘gh’ CLI account. When more than two accounts are configur
 
 GitHub and Magit Dash operations.
 
-**** [[file:../magit-dash-gh-pr.el::44][magit-dash-gh-pr-thread-limit]] :variable:
+**** [[file:../magit-dash-pr.el::44][magit-dash-pr-thread-limit]] :variable:
 :PROPERTIES:
-:CUSTOM_ID: magit-dash-gh-pr-thread-limit
+:CUSTOM_ID: magit-dash-pr-thread-limit
 :END:
 
 Maximum number of review threads to fetch per pull request.
 
 *** Public Api
 
-**** [[file:../magit-dash-gh-pr.el::213][magit-dash-gh-pr-fetch]] :command:
+**** [[file:../magit-dash-pr.el::213][magit-dash-pr-fetch]] :command:
 :PROPERTIES:
-:CUSTOM_ID: magit-dash-gh-pr-fetch
+:CUSTOM_ID: magit-dash-pr-fetch
 :END:
 
 Download comments and review threads for PR-NUMBER (or the current branch’s PR). When PR-NUMBER is nil, auto-detects the PR for the current branch.
@@ -1146,106 +1146,106 @@ Creates an artifact directory under plans/ containing: pr-info.json            �
 
 *** Pr Dashboard Mode
 
-**** [[file:../magit-dash-gh-pr.el::272][magit-dash-gh-pr-dashboard-mode-map]] :variable:
+**** [[file:../magit-dash-pr.el::272][magit-dash-pr-dashboard-mode-map]] :variable:
 :PROPERTIES:
-:CUSTOM_ID: magit-dash-gh-pr-dashboard-mode-map
+:CUSTOM_ID: magit-dash-pr-dashboard-mode-map
 :END:
 
-Keymap for ~magit-dash-gh-pr-dashboard-mode~.
+Keymap for ~magit-dash-pr-dashboard-mode~.
 
-**** [[file:../magit-dash-gh-pr.el::287][magit-dash-gh-pr-dashboard-mode]] :command:
+**** [[file:../magit-dash-pr.el::287][magit-dash-pr-dashboard-mode]] :command:
 :PROPERTIES:
-:CUSTOM_ID: magit-dash-gh-pr-dashboard-mode
+:CUSTOM_ID: magit-dash-pr-dashboard-mode
 :END:
 
 Major mode for the pull request dashboard.
 
-In addition to any hooks its parent mode ~tabulated-list-mode~ might have run, this mode runs the hook ~magit-dash-gh-pr-dashboard-mode-hook~, as the final or penultimate step during initialization.
+In addition to any hooks its parent mode ~tabulated-list-mode~ might have run, this mode runs the hook ~magit-dash-pr-dashboard-mode-hook~, as the final or penultimate step during initialization.
 
 Key             Binding
 
-RET		magit-dash-gh-pr-dashboard-open-browser ?		magit-dash-gh-pr-dashboard-menu F		magit-dash-gh-pr-dashboard-clear-filters W		magit-dash-gh-pr-dashboard-open-worktree c		magit-dash-gh-pr-dashboard-fetch-ci f		magit-dash-gh-pr-dashboard-set-filter g		magit-dash-gh-pr-dashboard-refresh m		magit-dash-gh-pr-dashboard-menu q		quit-window r		magit-dash-gh-pr-dashboard-refresh w		magit-dash-gh-pr-dashboard-open-worktree
+RET		magit-dash-pr-dashboard-open-browser ?		magit-dash-pr-dashboard-menu F		magit-dash-pr-dashboard-clear-filters W		magit-dash-pr-dashboard-open-worktree c		magit-dash-pr-dashboard-fetch-ci f		magit-dash-pr-dashboard-set-filter g		magit-dash-pr-dashboard-refresh m		magit-dash-pr-dashboard-menu q		quit-window r		magit-dash-pr-dashboard-refresh w		magit-dash-pr-dashboard-open-worktree
 
-**** [[file:../magit-dash-gh-pr.el::389][magit-dash-gh-pr-dashboard-refresh]] :command:
+**** [[file:../magit-dash-pr.el::389][magit-dash-pr-dashboard-refresh]] :command:
 :PROPERTIES:
-:CUSTOM_ID: magit-dash-gh-pr-dashboard-refresh
+:CUSTOM_ID: magit-dash-pr-dashboard-refresh
 :END:
 
 Fetch PRs matching current filters and repopulate the PR table.
 
-**** [[file:../magit-dash-gh-pr.el::420][magit-dash-gh-pr-dashboard-open-browser]] :command:
+**** [[file:../magit-dash-pr.el::420][magit-dash-pr-dashboard-open-browser]] :command:
 :PROPERTIES:
-:CUSTOM_ID: magit-dash-gh-pr-dashboard-open-browser
+:CUSTOM_ID: magit-dash-pr-dashboard-open-browser
 :END:
 
 Open the pull request at point in a web browser.
 
-**** [[file:../magit-dash-gh-pr.el::428][magit-dash-gh-pr-dashboard-set-filter]] :command:
+**** [[file:../magit-dash-pr.el::428][magit-dash-pr-dashboard-set-filter]] :command:
 :PROPERTIES:
-:CUSTOM_ID: magit-dash-gh-pr-dashboard-set-filter
+:CUSTOM_ID: magit-dash-pr-dashboard-set-filter
 :END:
 
 Interactively set one PR dashboard filter field.
 
-**** [[file:../magit-dash-gh-pr.el::452][magit-dash-gh-pr-dashboard-clear-filters]] :command:
+**** [[file:../magit-dash-pr.el::452][magit-dash-pr-dashboard-clear-filters]] :command:
 :PROPERTIES:
-:CUSTOM_ID: magit-dash-gh-pr-dashboard-clear-filters
+:CUSTOM_ID: magit-dash-pr-dashboard-clear-filters
 :END:
 
 Reset all dashboard filters to their defaults (open PRs) and refresh.
 
-**** [[file:../magit-dash-gh-pr.el::459][magit-dash-gh-pr-buffer-name]] :variable:
+**** [[file:../magit-dash-pr.el::459][magit-dash-pr-buffer-name]] :variable:
 :PROPERTIES:
-:CUSTOM_ID: magit-dash-gh-pr-buffer-name
+:CUSTOM_ID: magit-dash-pr-buffer-name
 :END:
 
 Buffer name for the pull request dashboard.
 
-**** [[file:../magit-dash-gh-pr.el::463][magit-gh-pr-dash]] :command:
+**** [[file:../magit-dash-pr.el::463][magit-dash-pr]] :command:
 :PROPERTIES:
-:CUSTOM_ID: magit-gh-pr-dash
+:CUSTOM_ID: magit-dash-pr
 :END:
 
 Open the GitHub pull request dashboard buffer. Aggregates all open PRs by default across repositories.
 
-**** [[file:../magit-dash-gh-pr.el::475][magit-dash-gh-pr-dashboard-open]] :command:
+**** [[file:../magit-dash-pr.el::475][magit-dash-pr-dashboard-open]] :command:
 :PROPERTIES:
-:CUSTOM_ID: magit-dash-gh-pr-dashboard-open
+:CUSTOM_ID: magit-dash-pr-dashboard-open
 :END:
 
 Open the GitHub pull request dashboard buffer. Aggregates all open PRs by default across repositories.
 
-**** [[file:../magit-dash-gh-pr.el::477][magit-gh-prs]] :command:
+**** [[file:../magit-dash-pr.el::477][magit-dash-prs]] :command:
 :PROPERTIES:
-:CUSTOM_ID: magit-gh-prs
+:CUSTOM_ID: magit-dash-prs
 :END:
 
 Open the GitHub pull request dashboard buffer. Aggregates all open PRs by default across repositories.
 
-**** [[file:../magit-dash-gh-pr.el::479][magit-dash-gh-pr-dash]] :command:
+**** [[file:../magit-dash-pr.el::479][magit-dash-pr-dash]] :command:
 :PROPERTIES:
-:CUSTOM_ID: magit-dash-gh-pr-dash
+:CUSTOM_ID: magit-dash-pr-dash
 :END:
 
 Open the GitHub pull request dashboard buffer. Aggregates all open PRs by default across repositories.
 
-**** [[file:../magit-dash-gh-pr.el::496][magit-dash-gh-pr-dashboard-open-worktree]] :command:
+**** [[file:../magit-dash-pr.el::496][magit-dash-pr-dashboard-open-worktree]] :command:
 :PROPERTIES:
-:CUSTOM_ID: magit-dash-gh-pr-dashboard-open-worktree
+:CUSTOM_ID: magit-dash-pr-dashboard-open-worktree
 :END:
 
 Create and open a git worktree for the pull request at point (or ENTRY). If a worktree for this PR already exists, switches to its magit status buffer. Otherwise, fetches the PR branch from GitHub, adds the worktree, and opens its magit status buffer.
 
-**** [[file:../magit-dash-gh-pr.el::531][magit-dash-gh-pr-dashboard-fetch-ci]] :command:
+**** [[file:../magit-dash-pr.el::531][magit-dash-pr-dashboard-fetch-ci]] :command:
 :PROPERTIES:
-:CUSTOM_ID: magit-dash-gh-pr-dashboard-fetch-ci
+:CUSTOM_ID: magit-dash-pr-dashboard-fetch-ci
 :END:
 
 Fetch GitHub Actions CI logs for the pull request at point.
 
-**** [[file:../magit-dash-gh-pr.el::541][magit-dash-gh-pr-dashboard-menu]] :command:
+**** [[file:../magit-dash-pr.el::541][magit-dash-pr-dashboard-menu]] :command:
 :PROPERTIES:
-:CUSTOM_ID: magit-dash-gh-pr-dashboard-menu
+:CUSTOM_ID: magit-dash-pr-dashboard-menu
 :END:
 
 Actions for the PR dashboard.

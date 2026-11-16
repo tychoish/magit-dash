@@ -114,13 +114,13 @@ Below is an example ~use-package~ configuration block setting useful options wit
              magit-dash-open-other-window
              magit-dash-open-repo
              magit-dash-sync-repo
-             magit-dash-gh-pr-dashboard-open
+             magit-dash-pr-dashboard-open
              magit-dash-gh-actions-fetch
-             magit-dash-gh-prune-merged-branches
+             magit-dash-prune-merged-branches
              magit-dash-gh-auth-switch)
   :bind (("C-c g d" . magit-dash-open)
          ("C-c g r" . magit-dash-open-repo)
-         ("C-c g p" . magit-dash-gh-pr-dashboard-open)
+         ("C-c g p" . magit-dash-pr-dashboard-open)
          ("C-c g a" . magit-dash-gh-actions-fetch))
   :init
   ;; Install GitHub CI/PR status headers and dispatcher into magit-status
@@ -131,7 +131,7 @@ Below is an example ~use-package~ configuration block setting useful options wit
   ;; Load optional features
   (require 'magit-dash-open)
   (require 'magit-dash-gh)
-  (require 'magit-dash-gh-pr)
+  (require 'magit-dash-pr)
   (require 'magit-dash-gh-ci)
   (require 'magit-dash-gh-actions)
   (require 'magit-dash-worktree)
@@ -159,9 +159,9 @@ Below is an example ~use-package~ configuration block setting useful options wit
   (setq magit-dash-status-authored-prs-limit 15)       ; default: 15 (max authored PRs displayed)
   (setq magit-dash-status-cache-ttl 60)                ; default: 60 (seconds before cache invalidation)
 
-  ;; GitHub integration limits (magit-dash-gh, magit-dash-gh-pr, magit-dash-gh-actions)
-  (setq magit-dash-gh-pr-thread-limit 100)             ; default: 100 (max review threads fetched)
-  (setq magit-dash-gh-prune-pr-limit 100)              ; default: 100 (max PRs checked for branch pruning)
+  ;; GitHub integration limits (magit-dash-gh, magit-dash-pr, magit-dash-gh-actions)
+  (setq magit-dash-pr-thread-limit 100)             ; default: 100 (max review threads fetched)
+  (setq magit-dash-prune-pr-limit 100)              ; default: 100 (max PRs checked for branch pruning)
   (setq magit-dash-gh-actions-run-limit 10)            ; default: 10 (recent runs listed for download)
   (setq magit-dash-gh-actions-include-failed-log t)    ; default: t (save separate failed-step log)
   (setq magit-dash-gh-collect-index-format 'json)      ; default: 'json (artifact index format)
@@ -375,9 +375,9 @@ approval) expose the same. See [[file:docs/worktrees-and-submodules.org][worktre
 :PROPERTIES:
 :CUSTOM_ID: pr-status
 :END:
-=magit-dash-gh-pr-status= collects your open PRs, in the current repository
-(=magit-dash-gh-pr-status-collect=) or across all repositories
-(=magit-dash-gh-pr-status-collect-all=), with one GraphQL query and classifies
+=magit-dash-pr-status= collects your open PRs, in the current repository
+(=magit-dash-pr-status-collect=) or across all repositories
+(=magit-dash-pr-status-collect-all=), with one GraphQL query and classifies
 each into its next step. It returns plain plists and writes no files. Buckets are
 checked in order, so a PR is never ready with a failing check:
 
@@ -390,23 +390,23 @@ checked in order, so a PR is never ready with a failing check:
 
 The query rejects incomplete results when GitHub reports additional pages.
 A failed query signals an error and leaves the in-memory tracking cache
-alone. =magit-dash-gh-pr-attach-tracking= adds a =:tracking= plist (delta
-since the last committed snapshot, action summary), =magit-dash-gh-pr-commit-tracking=
-records the snapshot, and =magit-dash-gh-pr-tracking-fingerprint= returns a
+alone. =magit-dash-pr-attach-tracking= adds a =:tracking= plist (delta
+since the last committed snapshot, action summary), =magit-dash-pr-commit-tracking=
+records the snapshot, and =magit-dash-pr-tracking-fingerprint= returns a
 stable hash of the volatile fields for cheap change detection.
 
 #+BEGIN_SRC emacs-lisp
-(setq magit-dash-gh-pr-status-required-approvals 1) ; default for all repos
+(setq magit-dash-pr-status-required-approvals 1) ; default for all repos
 (magit-dash-register :name "monorepo" :path "~/src/monorepo"
                      :repo "org/monorepo"
                      :pr '(:required-approvals 2))  ; per-repo override
 #+END_SRC
 
-Run it interactively with =M-x magit-dash-gh-pr-status=, from cron or a
+Run it interactively with =M-x magit-dash-pr-status=, from cron or a
 script with
 
 #+BEGIN_SRC sh
-emacs --batch -l magit-dash -f magit-dash-gh-pr-status-batch [REPO-DIR]
+emacs --batch -l magit-dash -f magit-dash-pr-status-batch [REPO-DIR]
 #+END_SRC
 
 which prints one line per PR and exits non-zero with the error on stderr
@@ -414,8 +414,8 @@ when =gh= fails, or through the =magit_dash_pr_status= MCP tool (returns
 structured data; =repo= is optional and defaults to all repositories).
 The tool is read-only by default; pass =commit= true to record the snapshot so the
 next call reports deltas against it. Other options:
-=magit-dash-gh-pr-status-author= (default =@me=) and
-=magit-dash-gh-pr-status-ignored-reviewers= (default =("claude")=).
+=magit-dash-pr-status-author= (default =@me=) and
+=magit-dash-pr-status-ignored-reviewers= (default =("claude")=).
 
 * User Guides
 :PROPERTIES:
@@ -447,9 +447,9 @@ Detailed API documentation for all modules, options, and commands is available i
 | [[file:docs/api.org::#magit-dash-status-setup][~magit-dash-status-setup~]]              | Function | Install GitHub CI/PR section headers and dispatch key into Magit     |
 | [[file:docs/api.org::#magit-dash-sync-repo][~magit-dash-sync-repo~]]                 | Command  | Interactively execute configured sync pipeline for a repository      |
 | [[file:docs/api.org::#magit-dash-sync-all][~magit-dash-sync-all~]]                  | Command  | Run automated sync pipeline across all registered repositories       |
-| [[file:docs/api.org::#magit-dash-gh-pr-dashboard-open][~magit-dash-gh-pr-dashboard-open~]]      | Command  | Open dedicated tabulated dashboard for authored and review PRs       |
+| [[file:docs/api.org::#magit-dash-pr-dashboard-open][~magit-dash-pr-dashboard-open~]]      | Command  | Open dedicated tabulated dashboard for authored and review PRs       |
 | [[file:docs/api.org::#magit-dash-gh-actions-fetch][~magit-dash-gh-actions-fetch~]]          | Command  | Fetch, inspect, and fold GitHub Actions step logs and failures       |
-| [[file:docs/api.org::#magit-dash-gh-prune-merged-branches][~magit-dash-gh-prune-merged-branches~]]  | Command  | Interactively find and delete local branches whose PRs have merged   |
+| [[file:docs/api.org::#magit-dash-prune-merged-branches][~magit-dash-prune-merged-branches~]]  | Command  | Interactively find and delete local branches whose PRs have merged   |
 | [[file:docs/api.org::#magit-dash-worktree-add][~magit-dash-worktree-add~]]              | Command  | Create new git worktree with automatic environment symlinking        |
 | [[file:docs/api.org::#magit-dash-bump-submodules-menu][~magit-dash-bump-submodules-menu~]]      | Command  | Transient menu to inspect and fast-forward dirty submodules          |
 | [[file:docs/api.org::#magit-dash-ci-dispatch-fix-operation][~magit-dash-ci-dispatch-fix-operation~]] | Function | Dispatch automated repair prompt for failed CI runs to agent queues  |
