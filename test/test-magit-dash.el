@@ -12,6 +12,7 @@
 (require 'cl-lib)
 (require 'map)
 (require 'magit-dash)
+(require 'magit-dash-pr)
 
 ;;;; magit-dash-register
 
@@ -1116,6 +1117,84 @@ without real git repos or a live dashboard buffer."
   (let ((fmt (magit-dash--build-format nil)))
     (should (= (length "Name") (cadr (aref fmt 0))))))
 
+;;;; width cap and point preservation
+
+(ert-deftest magit-dash/build-format-caps-name-at-quarter-width ()
+  "A very long name is capped at 25% of the window width."
+  (let* ((r (magit-dash-repo--make :name (make-string 120 ?x) :path "/tmp/r"))
+         (fmt (cl-letf (((symbol-function 'window-width) (lambda (&rest _) 100)))
+                (magit-dash--build-format (list r)))))
+    (should (= 25 (cadr (aref fmt 0))))))
+
+(ert-deftest magit-dash/build-format-right-aligns-fixed-columns ()
+  "Non-elastic columns carry :right-align."
+  (let* ((fmt (magit-dash--build-format nil))
+         (fixed (seq-find (lambda (c) (not (member (car c) '("Name" "Branch"))))
+                          (append fmt nil))))
+    (should (plist-get (nthcdr 3 fixed) :right-align))))
+
+(ert-deftest magit-dash/print-preserves-point-by-path ()
+  "Redrawing with rebuilt (non-eq) repo structs keeps point on the same path."
+  (with-temp-buffer
+    (magit-dash-mode)
+    (let ((mk (lambda (n) (magit-dash-repo--make :name n :path (concat "/tmp/" n)))))
+      (setq tabulated-list-format [("Name" 10 nil)])
+      (tabulated-list-init-header)
+      (setq tabulated-list-entries
+            (seq-map (lambda (n) (list (funcall mk n) (vector n))) '("a" "b" "c")))
+      (tabulated-list-print t)
+      (goto-char (point-min))
+      (forward-line 2)
+      (setq tabulated-list-entries
+            (seq-map (lambda (n) (list (funcall mk n) (vector n))) '("a" "b" "c")))
+      (magit-dash--print)
+      (should (equal "/tmp/c" (magit-dash-repo-path (tabulated-list-get-id)))))))
+
+
+;;;; operation guard recovery
+
+(ert-deftest magit-dash/op-guard-reclaims-stuck-operation ()
+  "An op older than the timeout no longer blocks the repo."
+  (let* ((magit-dash--active-operations (make-hash-table :test #'equal))
+         (magit-dash--operation-history nil)
+         (magit-dash-operation-timeout 10)
+         (repo (magit-dash-repo--make :name "r" :path "/tmp/stuck-r"))
+         (op (magit-dash--op-start repo "fetch")))
+    (should (magit-dash--op-running-p "/tmp/stuck-r"))
+    (setf (magit-dash-operation-started-at op) (- (float-time) 60))
+    (should-not (magit-dash--op-running-p "/tmp/stuck-r"))
+    (should (magit-dash--op-start repo "fetch"))))
+
+(ert-deftest magit-dash/guarded-op-run-finishes-op-on-sync-error ()
+  "A synchronously signalling OP-FN releases the guard and reports `error'."
+  (let* ((magit-dash--active-operations (make-hash-table :test #'equal))
+         (magit-dash--operation-history nil)
+         (repo (magit-dash-repo--make :name "r" :path "/tmp/sync-err-r"))
+         status)
+    (magit-dash--guarded-op-run
+     repo "fetch" (lambda (_r _cb) (error "boom"))
+     (lambda (st &optional _text) (setq status st)))
+    (should (eq 'error status))
+    (should-not (magit-dash--op-running-p "/tmp/sync-err-r"))))
+
+(ert-deftest magit-dash/run-git-tracks-all-op-processes ()
+  "A later git process in the repo does not displace the op's earlier one."
+  (let* ((magit-dash--active-operations (make-hash-table :test #'equal))
+         (magit-dash--operation-history nil)
+         (dir (make-temp-file "mdash" t))
+         (repo (magit-dash-repo--make :name "r" :path dir))
+         (op (magit-dash--op-start repo "fetch"))
+         (sleeper (let ((default-directory dir))
+                    (make-process :name "sleeper" :command '("sleep" "30") :noquery t))))
+    (unwind-protect
+        (progn
+          (setf (magit-dash-operation-process op) (list sleeper))
+          (let ((proc (magit-dash--run-git dir '("--version") #'ignore)))
+            (should (memq sleeper (magit-dash-operation-process op)))
+            (should (memq proc (magit-dash-operation-process op)))))
+      (delete-process sleeper)
+      (delete-directory dir t))))
+
 ;;;; magit-dash--build-entry
 
 (ert-deftest magit-dash/build-entry-structure ()
@@ -1170,12 +1249,12 @@ without real git repos or a live dashboard buffer."
              (vec (cadr entry)))
         (should (equal "┄" (aref vec 1)))))))
 
-;;;; magit-dash-gh-pr-dashboard--build-args
+;;;; magit-dash-pr-dashboard--build-args
 
 (ert-deftest magit-dash/pr-build-args-default ()
   "Default filters aggregate all open PRs without author filtering."
   (let ((filters (list :state "open" :author nil :repo nil :org nil)))
-    (let ((args (magit-dash-gh-pr-dashboard--build-args filters)))
+    (let ((args (magit-dash-pr-dashboard--build-args filters)))
       (should (equal "search" (nth 0 args)))
       (should (equal "prs" (nth 1 args)))
       (should (member "--state" args))
@@ -1185,14 +1264,14 @@ without real git repos or a live dashboard buffer."
 (ert-deftest magit-dash/pr-build-args-with-author ()
   "Explicit author filter adds --author to the search command."
   (let ((filters (list :state "open" :author "@me" :repo nil :org nil)))
-    (let ((args (magit-dash-gh-pr-dashboard--build-args filters)))
+    (let ((args (magit-dash-pr-dashboard--build-args filters)))
       (should (equal "search" (nth 0 args)))
       (should (member "--author" args))
       (should (member "@me" args)))))
 (ert-deftest magit-dash/pr-build-args-with-repo ()
   "When :repo is set, uses gh pr list -R REPO."
   (let ((filters (list :state "open" :author nil :repo "owner/myrepo" :org nil)))
-    (let ((args (magit-dash-gh-pr-dashboard--build-args filters)))
+    (let ((args (magit-dash-pr-dashboard--build-args filters)))
       (should (equal "pr" (nth 0 args)))
       (should (equal "list" (nth 1 args)))
       (should (member "-R" args))
@@ -1201,7 +1280,7 @@ without real git repos or a live dashboard buffer."
 (ert-deftest magit-dash/pr-build-args-with-org ()
   "When :org is set (no :repo), adds --owner to the search command."
   (let ((filters (list :state "open" :author "@me" :repo nil :org "myorg")))
-    (let ((args (magit-dash-gh-pr-dashboard--build-args filters)))
+    (let ((args (magit-dash-pr-dashboard--build-args filters)))
       (should (equal "search" (nth 0 args)))
       (should (member "--owner" args))
       (should (member "myorg" args)))))
@@ -1209,13 +1288,13 @@ without real git repos or a live dashboard buffer."
 (ert-deftest magit-dash/pr-build-args-state-closed ()
   "State \"closed\" is passed through for both search and per-repo modes."
   (let ((filters (list :state "closed" :author nil :repo nil :org nil)))
-    (let ((args (magit-dash-gh-pr-dashboard--build-args filters)))
+    (let ((args (magit-dash-pr-dashboard--build-args filters)))
       (should (member "closed" args)))))
 
 (ert-deftest magit-dash/pr-build-args-state-unknown ()
   "Unknown state falls back to \"open\" in search mode."
   (let ((filters (list :state "merged" :author nil :repo nil :org nil)))
-    (let ((args (magit-dash-gh-pr-dashboard--build-args filters)))
+    (let ((args (magit-dash-pr-dashboard--build-args filters)))
       (should (equal "search" (nth 0 args)))
       (should (member "open" args))
       (should-not (member "merged" args)))))
@@ -1223,64 +1302,64 @@ without real git repos or a live dashboard buffer."
 (ert-deftest magit-dash/pr-build-args-no-author ()
   "Nil :author omits --author from the command."
   (let ((filters (list :state "open" :author nil :repo nil :org nil)))
-    (let ((args (magit-dash-gh-pr-dashboard--build-args filters)))
+    (let ((args (magit-dash-pr-dashboard--build-args filters)))
       (should-not (member "--author" args)))))
 
-;;;; magit-dash-gh-pr-dashboard--format-ci
+;;;; magit-dash-pr-dashboard--format-ci
 
 (ert-deftest magit-dash/format-ci-success ()
   (should (equal "✓" (substring-no-properties
-                         (magit-dash-gh-pr-dashboard--format-ci "SUCCESS")))))
+                         (magit-dash-pr-dashboard--format-ci "SUCCESS")))))
 
 (ert-deftest magit-dash/format-ci-failure ()
   (should (equal "x" (substring-no-properties
-                         (magit-dash-gh-pr-dashboard--format-ci "FAILURE")))))
+                         (magit-dash-pr-dashboard--format-ci "FAILURE")))))
 
 (ert-deftest magit-dash/format-ci-pending ()
   (should (equal "⟳" (substring-no-properties
-                            (magit-dash-gh-pr-dashboard--format-ci "PENDING")))))
+                            (magit-dash-pr-dashboard--format-ci "PENDING")))))
 
 (ert-deftest magit-dash/format-ci-nil ()
   "Nil or unknown CI state produces a dash."
-  (should (equal "—" (magit-dash-gh-pr-dashboard--format-ci nil)))
-  (should (equal "—" (magit-dash-gh-pr-dashboard--format-ci "UNKNOWN"))))
+  (should (equal "—" (magit-dash-pr-dashboard--format-ci nil)))
+  (should (equal "—" (magit-dash-pr-dashboard--format-ci "UNKNOWN"))))
 
-;;;; magit-dash-gh-pr-dashboard--format-review
+;;;; magit-dash-pr-dashboard--format-review
 
 (ert-deftest magit-dash/format-review-approved ()
   (should (equal "approved" (substring-no-properties
-                             (magit-dash-gh-pr-dashboard--format-review "APPROVED")))))
+                             (magit-dash-pr-dashboard--format-review "APPROVED")))))
 
 (ert-deftest magit-dash/format-review-changes ()
   (should (equal "changes req" (substring-no-properties
-                                (magit-dash-gh-pr-dashboard--format-review "CHANGES_REQUESTED")))))
+                                (magit-dash-pr-dashboard--format-review "CHANGES_REQUESTED")))))
 
 (ert-deftest magit-dash/format-review-needed ()
   (should (equal "needed" (substring-no-properties
-                           (magit-dash-gh-pr-dashboard--format-review "REVIEW_REQUIRED")))))
+                           (magit-dash-pr-dashboard--format-review "REVIEW_REQUIRED")))))
 
 (ert-deftest magit-dash/format-review-nil ()
   "Nil review decision returns empty string."
-  (should (equal "" (magit-dash-gh-pr-dashboard--format-review nil))))
+  (should (equal "" (magit-dash-pr-dashboard--format-review nil))))
 
-;;;; magit-dash-gh-pr-dashboard--comments-count
+;;;; magit-dash-pr-dashboard--comments-count
 
 (ert-deftest magit-dash/comments-count-integer ()
   "When comments field is already an integer, return it directly."
   (let ((pr '((comments . 7))))
-    (should (= 7 (magit-dash-gh-pr-dashboard--comments-count pr)))))
+    (should (= 7 (magit-dash-pr-dashboard--comments-count pr)))))
 
 (ert-deftest magit-dash/comments-count-alist ()
   "When comments is an alist with totalCount, extract it."
   (let ((pr `((comments . ((totalCount . 3))))))
-    (should (= 3 (magit-dash-gh-pr-dashboard--comments-count pr)))))
+    (should (= 3 (magit-dash-pr-dashboard--comments-count pr)))))
 
 (ert-deftest magit-dash/comments-count-nil ()
   "Nil comments field returns 0."
   (let ((pr '((title . "test"))))
-    (should (= 0 (magit-dash-gh-pr-dashboard--comments-count pr)))))
+    (should (= 0 (magit-dash-pr-dashboard--comments-count pr)))))
 
-;;;; magit-dash-gh-pr-dashboard--parse-output
+;;;; magit-dash-pr-dashboard--parse-output
 
 (defun magit-dash-test--make-pr-json (&rest overrides)
   "Build a minimal PR JSON object string, optionally overriding fields."
@@ -1299,13 +1378,13 @@ without real git repos or a live dashboard buffer."
 
 (ert-deftest magit-dash/parse-output-empty-array ()
   "Empty JSON array produces nil."
-  (should (null (magit-dash-gh-pr-dashboard--parse-output
+  (should (null (magit-dash-pr-dashboard--parse-output
                  "[]"
                  (list :repo "owner/myrepo")))))
 
 (ert-deftest magit-dash/parse-output-non-json ()
   "Non-JSON output (e.g., error message) produces nil."
-  (should (null (magit-dash-gh-pr-dashboard--parse-output
+  (should (null (magit-dash-pr-dashboard--parse-output
                  "error: not found"
                  (list :state "open")))))
 
@@ -1314,7 +1393,7 @@ without real git repos or a live dashboard buffer."
   (let* ((pr (magit-dash-test--make-pr-json))
          (json (concat "[" (json-serialize pr) "]"))
          (filters (list :state "open" :repo "owner/myrepo"))
-         (entries (magit-dash-gh-pr-dashboard--parse-output json filters)))
+         (entries (magit-dash-pr-dashboard--parse-output json filters)))
     (should (= 1 (length entries)))
     (let* ((entry (car entries))
            (id (car entry))
@@ -1330,7 +1409,7 @@ without real git repos or a live dashboard buffer."
                      (list (cons 'repository '((nameWithOwner . "org/other"))))))
          (json (concat "[" (json-serialize pr) "]"))
          (filters (list :state "open" :author "@me"))
-         (entries (magit-dash-gh-pr-dashboard--parse-output json filters)))
+         (entries (magit-dash-pr-dashboard--parse-output json filters)))
     (should (= 1 (length entries)))
     (let* ((entry (car entries))
            (id (car entry)))
@@ -1342,10 +1421,10 @@ without real git repos or a live dashboard buffer."
          (pr2 (append (magit-dash-test--make-pr-json) (list (cons 'number 99))))
          (json (concat "[" (json-serialize pr1) "," (json-serialize pr2) "]"))
          (filters (list :repo "owner/repo"))
-         (entries (magit-dash-gh-pr-dashboard--parse-output json filters)))
+         (entries (magit-dash-pr-dashboard--parse-output json filters)))
     (should (= 2 (length entries)))))
 
-;;;; magit-dash-gh-pr-dashboard--build-entry (column structure)
+;;;; magit-dash-pr-dashboard--build-entry (column structure)
 
 (ert-deftest magit-dash/build-entry-columns ()
   "build-entry produces vector matching the column format with WT and separated Org/Repo."
@@ -1356,7 +1435,8 @@ without real git repos or a live dashboard buffer."
                (reviewDecision . "APPROVED")
                (statusCheckRollup . ((state . "SUCCESS")))
                (url . "https://example.com/10")))
-         (entry (magit-dash-gh-pr-dashboard--build-entry pr "myorg/myrepo"))
+         (magit-dash-pr-columns (append '((author . nil)) magit-dash-pr-columns))
+         (entry (magit-dash-pr-dashboard--build-entry pr "myorg/myrepo"))
          (id (car entry))
          (vec (cadr entry)))
     (should (= 8 (length vec)))
@@ -1368,7 +1448,8 @@ without real git repos or a live dashboard buffer."
     (should (equal 10 (plist-get id :number)))
     (should (equal "myorg/myrepo" (plist-get id :repo))))
   ;; With Org column enabled:
-  (let* ((magit-dash-gh-pr-show-org t)
+  (let* ((magit-dash-pr-show-org t)
+         (magit-dash-pr-columns (append '((author . nil)) magit-dash-pr-columns))
          (pr '((number . 10)
                (title . "My PR")
                (updatedAt . "2024-06-01T12:00:00Z")
@@ -1376,7 +1457,7 @@ without real git repos or a live dashboard buffer."
                (reviewDecision . "APPROVED")
                (statusCheckRollup . ((state . "SUCCESS")))
                (url . "https://example.com/10")))
-         (entry (magit-dash-gh-pr-dashboard--build-entry pr "myorg/myrepo"))
+         (entry (magit-dash-pr-dashboard--build-entry pr "myorg/myrepo"))
          (vec (cadr entry)))
     (should (= 9 (length vec)))
     (should (equal "myorg" (aref vec 0)))
@@ -1389,7 +1470,7 @@ without real git repos or a live dashboard buffer."
                (title . ,(make-string 50 ?X))
                (updatedAt . "")
                (comments . 0)))
-         (entry (magit-dash-gh-pr-dashboard--build-entry pr "r"))
+         (entry (magit-dash-pr-dashboard--build-entry pr "r"))
          (vec (cadr entry)))
     (should (<= (length (aref vec 3)) 37))))
 
@@ -4043,7 +4124,7 @@ The bug was that add-text-properties returns t, not the modified string."
     ;; Push & PR
     (should (eq (lookup-key m (kbd "p p")) #'magit-dash-push))
     (should (eq (lookup-key m (kbd "p a")) #'magit-dash-push-all))
-    (should (eq (lookup-key m (kbd "p r")) #'magit-dash-gh-pr-views-menu))
+    (should (eq (lookup-key m (kbd "p r")) #'magit-dash-pr-views-menu))
     ;; Commit
     (should (eq (lookup-key m (kbd "c c")) #'magit-dash-magit-commit))
     (should (eq (lookup-key m (kbd "c a")) #'magit-dash-commit-all))
@@ -4244,8 +4325,8 @@ The bug was that add-text-properties returns t, not the modified string."
 (ert-deftest magit-dash/transient-menus-selector-conventions ()
   "Ensure all transient menu selectors are 1 or 2 lowercase letters or symbols."
   (let ((prefixes '(magit-dash-menu
-                    magit-dash-gh-pr-dashboard-menu
-                    magit-dash-gh-pr-views-menu
+                    magit-dash-pr-dashboard-menu
+                    magit-dash-pr-views-menu
                     magit-dash-gh-menu
                     magit-dash-status-ci-menu
                     magit-dash-status-pr-menu

@@ -18,7 +18,7 @@
 ;; Press RET to open a per-repo overview buffer with PR counts and magit action
 ;; shortcuts.  Press m or ? for the transient actions menu.
 ;;
-;; `magit-dash-gh-pr-dashboard-open' — a tabulated-list view of pull requests with
+;; `magit-dash-pr-dashboard-open' — a tabulated-list view of pull requests with
 ;; filters for state, author, repo, and org.  Supports CI outcome, age, comment
 ;; count, and review decision columns.
 ;;
@@ -46,8 +46,8 @@
 (require 'magit-dash-gh-ci)
 (require 'magit-dash-chain)
 (require 'magit-dash-stack)
-(require 'magit-dash-gh-pr)
-(require 'magit-dash-gh-pr-status)
+(require 'magit-dash-pr)
+(require 'magit-dash-pr-status)
 (require 'magit-dash-gh)
 (require 'magit-dash-open)
 (require 'magit-dash-submodules)
@@ -88,8 +88,8 @@
 (declare-function magit-dash-gh-ci-fetch "magit-dash-gh-ci")
 (declare-function magit-dash-gh-ci-fetch-batch "magit-dash-gh-ci")
 (declare-function magit-dash-gh-workflow-run "magit-dash-gh-actions")
-(declare-function magit-gh-pr-dash "magit-dash-gh-pr")
-(declare-function magit-dash-gh-pr-views-menu "magit-dash-gh-pr")
+(declare-function magit-dash-pr "magit-dash-pr")
+(declare-function magit-dash-pr-views-menu "magit-dash-pr")
 (autoload 'magit-dash-actionable-open "magit-dash-actionable" nil t)
 
 (defconst magit-dash-buffer-name "*magit-dash-repos*")
@@ -149,7 +149,7 @@ Use `magit-dash-register' to add entries.")
   status        ; :running, :ok, :skipped, :error, :cancelled
   started-at    ; float-time
   finished-at   ; float-time or nil
-  process       ; process object or nil
+  process       ; list of processes started for this op (dead ones pruned)
   error-text)
 
 (defvar magit-dash--active-operations (make-hash-table :test #'equal)
@@ -161,11 +161,30 @@ Use `magit-dash-register' to add entries.")
 (defvar magit-dash--operation-counter 0
   "Monotonic counter for generating operation IDs.")
 
+(defcustom magit-dash-operation-timeout 900
+  "Seconds after which a still-running repo operation is considered stuck.
+A stuck operation (one whose completion callback never fired) would
+otherwise block every later operation on that repo forever.  It is
+reclaimed, recorded as an error, the next time the repo is checked."
+  :type 'integer
+  :group 'magit-dash)
+
 (defun magit-dash--op-running-p (repo-path)
-  "Return non-nil if an operation is currently running for REPO-PATH."
+  "Return non-nil if an operation is currently running for REPO-PATH.
+An operation older than `magit-dash-operation-timeout' is finished as
+an error and reported as not running."
   (when-let* ((key (expand-file-name repo-path))
-              (op (gethash key magit-dash--active-operations)))
-    (eq (magit-dash-operation-status op) :running)))
+              (op (gethash key magit-dash--active-operations))
+              ((eq (magit-dash-operation-status op) :running)))
+    (if (> (- (float-time) (magit-dash-operation-started-at op))
+           magit-dash-operation-timeout)
+        (progn
+          (message "magit-dash: reclaiming stuck %s operation for %s"
+                   (magit-dash-operation-label op)
+                   (magit-dash-operation-repo-name op))
+          (magit-dash--op-finish op :error "timed out without completing")
+          nil)
+      t)))
 
 (defun magit-dash--op-start (repo label &optional proc)
   "Start tracking an operation for REPO with LABEL.
@@ -187,7 +206,7 @@ struct, store it in `magit-dash--active-operations', and return it."
                  :status :running
                  :started-at (float-time)
                  :finished-at nil
-                 :process proc
+                 :process (and proc (list proc))
                  :error-text nil)))
         (puthash path op magit-dash--active-operations)
         op))))
@@ -217,10 +236,17 @@ guard context are permitted and execute OP-FN directly."
         (funcall op-fn repo on-complete)
       (if-let* ((op (magit-dash--op-start repo label)))
           (let ((magit-dash--guarded-repos (cons path magit-dash--guarded-repos)))
-            (funcall op-fn repo
-                     (lambda (status &optional text)
-                       (magit-dash--op-finish op status text)
-                       (funcall on-complete status text))))
+            (condition-case err
+                (funcall op-fn repo
+                         (lambda (status &optional text)
+                           (magit-dash--op-finish op status text)
+                           (funcall on-complete status text)))
+              ;; A synchronous failure in OP-FN never reaches its callback;
+              ;; without this the op stays :running and blocks the repo.
+              (error
+               (let ((text (error-message-string err)))
+                 (magit-dash--op-finish op :error text)
+                 (funcall on-complete 'error text)))))
         (funcall on-complete 'skipped "operation already in progress")))))
 (defmacro with-magit-dash (&rest body)
   "Execute BODY in the `magit-dash' buffer.
@@ -424,7 +450,7 @@ When nil, no replacements are registered."
       (with-current-buffer buf
         (when magit-dash--stale-entries
           (setq tabulated-list-entries (copy-tree magit-dash--stale-entries))
-          (tabulated-list-print t))
+          (magit-dash--print))
         (magit-dash--undim-buffer buf)))))
 
 (defun magit-dash--cancel-refresh-jobs ()
@@ -540,8 +566,8 @@ Keyword arguments:
   :include-prs    include in PR dashboard fetches.
   :include-ci     include in CI status column fetches (GitHub Actions).
   :pr             plist of per-repository PR tooling options, read through
-                  `magit-dash-gh-pr-repo-option'; see
-                  `magit-dash-gh-pr-known-options'.
+                  `magit-dash-pr-repo-option'; see
+                  `magit-dash-pr-known-options'.
   :auto-fetch     non-nil — run git fetch --all during auto-sync.
   :auto-pull      non-nil — run git pull during auto-sync (implies fetch).
                   Respects :sync-branches.
@@ -618,7 +644,7 @@ Keyword arguments:
   (when remote-sync
     (magit-dash--validate-remote-sync remote-sync))
   (when pr
-    (magit-dash-gh-pr-check-options name pr))
+    (magit-dash-pr-check-options name pr))
 
   (let* ((abs-path (expand-file-name path))
          (upstream-target (or upstream-repo upstream (when repo (magit-dash--expand-repo-path repo))))
@@ -1251,7 +1277,9 @@ not via a thrown error."
       (with-current-buffer proc-buf
         (setq default-directory path))
       (when-let* ((active-op (gethash (expand-file-name path) magit-dash--active-operations)))
-        (setf (magit-dash-operation-process active-op) proc))
+        (setf (magit-dash-operation-process active-op)
+              (cons proc (seq-filter #'process-live-p
+                                     (magit-dash-operation-process active-op)))))
       proc)))
 
 (defun magit-dash--fetch-async (repo on-complete)
@@ -2237,13 +2265,67 @@ Returns an empty string when nothing is set."
   "Face for branch names in the repo dashboard."
   :group 'magit-dash)
 
+;;; Point-preserving redraw
+
+(defun magit-dash--path-at (pos)
+  "Return the repo path of the row at buffer position POS, or nil."
+  (save-excursion
+    (goto-char pos)
+    (when-let* ((id (tabulated-list-get-id)))
+      (magit-dash-repo-path id))))
+
+(defun magit-dash--goto-path (path)
+  "Move point to the row for repo PATH; return non-nil if found."
+  (goto-char (point-min))
+  (let (found)
+    (while (and (not found) (not (eobp)))
+      (if (equal path (magit-dash--path-at (point)))
+          (setq found t)
+        (forward-line 1)))
+    found))
+
+(defun magit-dash--print ()
+  "Redraw the table, keeping every window's point and scroll position.
+`tabulated-list-print' only restores point in the current window and
+matches rows with `equal' on the repo struct, so a redraw from a timer
+or async callback (or after repos are rebuilt) sent point to the top.
+Rows are matched here by repo path instead."
+  (let ((saved (seq-map (lambda (win)
+                          (list win
+                                (magit-dash--path-at (window-point win))
+                                (magit-dash--path-at (window-start win))
+                                (save-excursion
+                                  (goto-char (window-point win))
+                                  (current-column))))
+                        (get-buffer-window-list nil nil t))))
+    (tabulated-list-print t)
+    (seq-do (lambda (entry)
+              (pcase-let ((`(,win ,point-path ,start-path ,col) entry))
+                (when (and point-path (window-live-p win))
+                  (save-excursion
+                    (when (and start-path (magit-dash--goto-path start-path))
+                      (set-window-start win (point) t)))
+                  (when (save-excursion (magit-dash--goto-path point-path))
+                    (save-excursion
+                      (magit-dash--goto-path point-path)
+                      (move-to-column col)
+                      (set-window-point win (point)))
+                    (when (eq win (selected-window))
+                      (magit-dash--goto-path point-path)
+                      (move-to-column col))))))
+            saved)))
+
 (defun magit-dash--build-format (repos)
   "Return the tabulated-list format vector for REPOS using enabled columns.
-Name and Branch columns are elastic: Name is capped at the longest
-display name + 2 (minimum 4 for header), and Branch is wide enough
-for its longest value.  The two are sized independently; only when
-together they exceed the available window space is the wider one trimmed."
-  (let* ((raw-name (seq-reduce
+Name and Branch are sized to their longest value (Name + 2, Branch + 1),
+but each is capped at 25% of the window width.  All other columns have
+fixed widths and are right-aligned."
+  (let* ((window-cols (or (ignore-errors
+                            (window-width (or (get-buffer-window (current-buffer) t)
+                                              (selected-window))))
+                          97))
+         (cap (max 8 (/ window-cols 4)))
+         (raw-name (seq-reduce
                     (lambda (w r)
                       (max w (length (or (and magit-dash--submodule-path-set
                                               (gethash (magit-dash-repo-path r)
@@ -2252,45 +2334,23 @@ together they exceed the available window space is the wider one trimmed."
                     repos 0))
          (raw-branch (seq-reduce
                       (lambda (w r)
-                        (let ((b (magit-dash--display-branch-name
-                                  (or (plist-get (magit-dash-gh--cache-get
-                                                  (magit-dash-repo-path r) :stats)
-                                                 :branch)
-                                      (magit-dash-repo-branch r)
-                                      ""))))
-                          (max w (length b))))
+                        (max w (length (magit-dash--display-branch-name
+                                        (or (plist-get (magit-dash-gh--cache-get
+                                                        (magit-dash-repo-path r) :stats)
+                                                       :branch)
+                                            (magit-dash-repo-branch r)
+                                            "")))))
                       repos 0))
-         (fixed-width (seq-reduce
-                       (lambda (acc pair)
-                         (if (magit-dash--column-enabled-p (car pair))
-                             (+ acc (cadr (cdr pair)))
-                           acc))
-                       magit-dash--column-defs 0))
-         (available (max 20 (- (or (ignore-errors (window-width)) 97) fixed-width)))
-         (name-need (max (length "Name") (+ raw-name 2)))
-         (branch-need (max 8 (1+ raw-branch)))
-         (widths (let ((nw name-need) (bw branch-need))
-                   ;; Each column is sized to its own content.  Only when
-                   ;; the sum overflows do we trim, always shaving the
-                   ;; currently wider column so neither is penalized
-                   ;; for the other's length.
-                   (while (and (> (+ nw bw) available)
-                               (or (> nw (length "Name")) (> bw 8)))
-                     (if (or (and (>= nw bw) (> nw (length "Name")))
-                             (<= bw 8))
-                         (setq nw (1- nw))
-                       (setq bw (1- bw))))
-                   (list nw bw)))
-         (name-width (car widths))
-         (branch-width (cadr widths))
-         (active (magit-dash--active-columns)))
+         (name-width (min cap (max (length "Name") (+ raw-name 2))))
+         (branch-width (min cap (max 8 (1+ raw-branch)))))
     (apply #'vector
            (seq-map (lambda (col)
                       (pcase col
                         ('name   `("Name"   ,name-width   t))
                         ('branch `("Branch" ,branch-width t))
-                        (_       (alist-get col magit-dash--column-defs))))
-                    active))))
+                        (_       (append (alist-get col magit-dash--column-defs)
+                                         '(:right-align t)))))
+                    (magit-dash--active-columns)))))
 
 (defvar magit-dash-mode-map
   (let ((m (make-sparse-keymap)))
@@ -2335,8 +2395,8 @@ together they exceed the available window space is the wider one trimmed."
     (keymap-set m "p"   (cons "push/pr" (make-sparse-keymap)))
     (keymap-set m "p p" #'magit-dash-push)
     (keymap-set m "p a" #'magit-dash-push-all)
-    (keymap-set m "p r" #'magit-dash-gh-pr-views-menu)
-    (keymap-set m "p d" #'magit-gh-pr-dash)
+    (keymap-set m "p r" #'magit-dash-pr-views-menu)
+    (keymap-set m "p d" #'magit-dash-pr)
 
     ;; Commit prefix: c
     (keymap-set m "c"   (cons "commit" (make-sparse-keymap)))
@@ -2589,7 +2649,7 @@ until `magit-dash--populate-stats-async' updates them."
                          (magit-dash--build-entry repo)
                        entry))
                    tabulated-list-entries))
-    (tabulated-list-print t)))
+    (magit-dash--print)))
 
 (defun magit-dash--populate-stats-async (repos &optional on-done quiet)
   "Asynchronously collect stats for stale or uncached repos in REPOS.
@@ -2854,7 +2914,7 @@ of other buffers."
         (setq tabulated-list-format (magit-dash--build-format repos))
         (tabulated-list-init-header)
         (setq tabulated-list-entries (seq-map #'magit-dash--build-entry repos))
-        (tabulated-list-print t)
+        (magit-dash--print)
         (let* ((dash-buf (current-buffer))
                (_ (when tabulated-list-entries
                     (magit-dash--dim-buffer dash-buf)))
@@ -3847,7 +3907,7 @@ among the registered repositories when neither applies."
                         (magit-dash-worktree-main-dir path)
                       path))
          (default-directory (file-name-as-directory main-path)))
-    (magit-dash-gh-prune-merged-branches)
+    (magit-dash-prune-merged-branches)
     (if repo
         (magit-dash-refresh-repo repo nil t)
       (when-let* ((target-dir (file-name-as-directory (expand-file-name main-path)))
@@ -4098,7 +4158,7 @@ Signals `user-error' when `magit-dash-repo-list' is empty."
                 (delete path magit-dash--marked-paths)
               (cons path magit-dash--marked-paths)))
       (magit-dash--update-entry-for repo)
-      (tabulated-list-print t)
+      (magit-dash--print)
       (forward-line 1))))
 
 (defun magit-dash-unmark-all ()
@@ -4110,7 +4170,7 @@ Signals `user-error' when `magit-dash-repo-list' is empty."
           (seq-map (lambda (entry)
                      (magit-dash--build-entry (car entry)))
                    tabulated-list-entries))
-    (tabulated-list-print t)))
+    (magit-dash--print)))
 
 ;;;###autoload
 (defun magit-dash-hide-repo (&optional repo)
@@ -4143,7 +4203,7 @@ Use `magit-dash-unhide-all' to restore all hidden repositories."
                               (member (magit-dash-repo-path (car entry))
                                       magit-dash--hidden-paths))
                             tabulated-list-entries))
-          (tabulated-list-print t))
+          (magit-dash--print))
       (magit-dash-refresh))
     (if (= (length targets) 1)
         (message "Hidden repository: %s ('hc' to clear hidden, 'hu' to unhide)"
@@ -4237,7 +4297,7 @@ If the chosen repository is hidden, unhides it.  Otherwise, hides it."
                       (seq-remove (lambda (entry)
                                     (equal (magit-dash-repo-path (car entry)) path))
                                   tabulated-list-entries))
-                (tabulated-list-print t))
+                (magit-dash--print))
             (magit-dash-refresh))
           (message "Hidden repository: %s ('hc' to clear hidden, 'hu' to unhide)"
                    (magit-dash-repo-name repo)))))))
@@ -4538,7 +4598,7 @@ Indicates whether batch operations target all repos or marked repos."
     ("sb"  "Bump submodules" magit-dash-bump-submodules-menu
      :inapt-if-not magit-dash--repo-at-point-p)]
    ["Dashboard"
-    ("pr"  "PR views…"       magit-dash-gh-pr-views-menu)
+    ("pr"  "PR views…"       magit-dash-pr-views-menu)
     ("nt"  "Filter by tag"   magit-dash-filter-by-tag)
     ("rt"  "Refresh by tag"  magit-dash-refresh-by-tag)
     ("hr"  (lambda () (if (magit-dash--has-marks-p) "Hide marked" "Hide repo"))
@@ -4631,9 +4691,10 @@ Indicates whether batch operations target all repos or marked repos."
      (lambda (_path op)
        (when (eq (magit-dash-operation-status op) :running)
          (cl-incf count)
-         (when-let* ((proc (magit-dash-operation-process op)))
-           (when (process-live-p proc)
-             (delete-process proc)))
+         (seq-do (lambda (proc)
+                   (when (process-live-p proc)
+                     (delete-process proc)))
+                 (magit-dash-operation-process op))
          (setf (magit-dash-operation-status op) :cancelled)
          (setf (magit-dash-operation-finished-at op) (float-time))
          (setf (magit-dash-operation-error-text op) "stopped by user")
@@ -4662,7 +4723,7 @@ KILL and WINDOW are passed through to `quit-window'."
     (magit-dash--cancel-refresh-jobs))
   (if (or kill (one-window-p)
           (not (derived-mode-p 'magit-dash-mode
-                               'magit-dash-gh-pr-dashboard-mode)))
+                               'magit-dash-pr-dashboard-mode)))
       (quit-window kill window)
     (delete-window (or window (selected-window)))))
 
@@ -4672,7 +4733,7 @@ KILL and WINDOW are passed through to `quit-window'."
       (magit-dash--cancel-refresh-jobs))
     (if (or kill (one-window-p)
             (not (derived-mode-p 'magit-dash-mode
-                                 'magit-dash-gh-pr-dashboard-mode)))
+                                 'magit-dash-pr-dashboard-mode)))
         (funcall orig-fn kill window)
       (delete-window (or window (selected-window))))))
 
@@ -4684,7 +4745,7 @@ KILL and WINDOW are passed through to `quit-window'."
   (interactive)
   (when (boundp 'nerd-icons-mode-icon-alist)
     (add-to-list 'nerd-icons-mode-icon-alist '(magit-dash-mode nerd-icons-devicon "nf-dev-git" :face nerd-icons-orange))
-    (add-to-list 'nerd-icons-mode-icon-alist '(magit-dash-gh-pr-dashboard-mode nerd-icons-octicon "nf-oct-git_pull_request" :face nerd-icons-orange))
+    (add-to-list 'nerd-icons-mode-icon-alist '(magit-dash-pr-dashboard-mode nerd-icons-octicon "nf-oct-git_pull_request" :face nerd-icons-orange))
     (add-to-list 'nerd-icons-mode-icon-alist '(magit-dash-gh-actions-log-mode nerd-icons-octicon "nf-oct-workflow" :face nerd-icons-orange))))
 
 (when (boundp 'nerd-icons-mode-icon-alist)
