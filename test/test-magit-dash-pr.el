@@ -1,32 +1,32 @@
-;;; test-magit-dash-gh-pr.el --- ERT tests for magit-dash-gh-pr -*- lexical-binding: t; no-byte-compile: t; -*-
+;;; test-magit-dash-pr.el --- ERT tests for magit-dash-pr -*- lexical-binding: t; no-byte-compile: t; -*-
 
 ;; Run inside a live Emacs session:
-;;   (ert "^magit-dash-gh-pr/")
+;;   (ert "^magit-dash-pr/")
 ;;
 ;; Batch run:
 ;;   emacs --batch -l test/test-helper.el \
-;;     -l test/test-magit-dash-gh-pr.el \
-;;     --eval '(ert-run-tests-batch-and-exit "magit-dash-gh-pr/")'
+;;     -l test/test-magit-dash-pr.el \
+;;     --eval '(ert-run-tests-batch-and-exit "magit-dash-pr/")'
 
 (require 'ert)
 (require 'cl-lib)
 (require 'map)
 (require 'magit-dash)
-(require 'magit-dash-gh-pr)
+(require 'magit-dash-pr)
 (require 'magit-dash-gh-actions)
 
 ;;; Test helpers
 
-(defmacro magit-dash-gh-pr-test/with-temp-dir (&rest body)
+(defmacro magit-dash-pr-test/with-temp-dir (&rest body)
   "Execute BODY with `default-directory' set to a fresh temp directory."
   (declare (indent 0))
-  `(let ((dir (make-temp-file "magit-dash-gh-pr-test-" t)))
+  `(let ((dir (make-temp-file "magit-dash-pr-test-" t)))
      (unwind-protect
          (let ((default-directory dir))
            ,@body)
        (delete-directory dir t))))
 
-(defun magit-dash-gh-pr-test/make-thread (id resolved path creator last-commentor)
+(defun magit-dash-pr-test/make-thread (id resolved path creator last-commentor)
   "Return a fake GraphQL review thread node alist."
   `((id . ,id)
     (isResolved . ,(if resolved t :false))
@@ -38,23 +38,23 @@
                              (body . "last comment")
                              (createdAt . "2026-01-02T00:00:00Z"))))))))
 
-(defun magit-dash-gh-pr-test/graphql-response (threads)
+(defun magit-dash-pr-test/graphql-response (threads)
   "Wrap THREADS in a fake GraphQL response alist."
   `((data . ((repository . ((pullRequest . ((reviewThreads . ((nodes . ,threads)))))))))))
 
 
-;;; magit-dash-gh-pr--parse-threads
+;;; magit-dash-pr--parse-threads
 
 
-(ert-deftest magit-dash-gh-pr/parse-threads-empty ()
-  (let* ((response (magit-dash-gh-pr-test/graphql-response nil))
-         (threads (magit-dash-gh-pr--parse-threads response)))
+(ert-deftest magit-dash-pr/parse-threads-empty ()
+  (let* ((response (magit-dash-pr-test/graphql-response nil))
+         (threads (magit-dash-pr--parse-threads response)))
     (should (null threads))))
 
-(ert-deftest magit-dash-gh-pr/parse-threads-resolved ()
-  (let* ((node (magit-dash-gh-pr-test/make-thread "t1" t "src/foo.el" "alice" "bob"))
-         (response (magit-dash-gh-pr-test/graphql-response (list node)))
-         (threads (magit-dash-gh-pr--parse-threads response)))
+(ert-deftest magit-dash-pr/parse-threads-resolved ()
+  (let* ((node (magit-dash-pr-test/make-thread "t1" t "src/foo.el" "alice" "bob"))
+         (response (magit-dash-pr-test/graphql-response (list node)))
+         (threads (magit-dash-pr--parse-threads response)))
     (should (= 1 (length threads)))
     (let ((th (car threads)))
       (should (equal "t1"         (plist-get th :id)))
@@ -63,67 +63,67 @@
       (should (equal "alice"      (plist-get th :creator)))
       (should (equal "bob"        (plist-get th :last-commentor))))))
 
-(ert-deftest magit-dash-gh-pr/parse-threads-unresolved ()
-  (let* ((node (magit-dash-gh-pr-test/make-thread "t2" nil "lisp/bar.el" "charlie" "dave"))
-         (response (magit-dash-gh-pr-test/graphql-response (list node)))
-         (threads (magit-dash-gh-pr--parse-threads response)))
+(ert-deftest magit-dash-pr/parse-threads-unresolved ()
+  (let* ((node (magit-dash-pr-test/make-thread "t2" nil "lisp/bar.el" "charlie" "dave"))
+         (response (magit-dash-pr-test/graphql-response (list node)))
+         (threads (magit-dash-pr--parse-threads response)))
     (let ((th (car threads)))
       (should (eq nil (plist-get th :resolved))))))
 
-(ert-deftest magit-dash-gh-pr/parse-threads-multiple ()
+(ert-deftest magit-dash-pr/parse-threads-multiple ()
   (let* ((nodes (list
-                 (magit-dash-gh-pr-test/make-thread "t1" t   "a.el" "u1" "u2")
-                 (magit-dash-gh-pr-test/make-thread "t2" nil "b.el" "u3" "u4")
-                 (magit-dash-gh-pr-test/make-thread "t3" t   "c.el" "u5" "u5")))
-         (response (magit-dash-gh-pr-test/graphql-response nodes))
-         (threads (magit-dash-gh-pr--parse-threads response)))
+                 (magit-dash-pr-test/make-thread "t1" t   "a.el" "u1" "u2")
+                 (magit-dash-pr-test/make-thread "t2" nil "b.el" "u3" "u4")
+                 (magit-dash-pr-test/make-thread "t3" t   "c.el" "u5" "u5")))
+         (response (magit-dash-pr-test/graphql-response nodes))
+         (threads (magit-dash-pr--parse-threads response)))
     (should (= 3 (length threads)))
     (should (eq t   (plist-get (nth 0 threads) :resolved)))
     (should (eq nil (plist-get (nth 1 threads) :resolved)))
     (should (eq t   (plist-get (nth 2 threads) :resolved)))))
 
-(ert-deftest magit-dash-gh-pr/parse-threads-creator-from-first-comment ()
+(ert-deftest magit-dash-pr/parse-threads-creator-from-first-comment ()
   "Creator comes from the first comment's author."
-  (let* ((node (magit-dash-gh-pr-test/make-thread "t1" nil "x.el" "firstauthor" "lastauthor"))
-         (response (magit-dash-gh-pr-test/graphql-response (list node)))
-         (threads (magit-dash-gh-pr--parse-threads response)))
+  (let* ((node (magit-dash-pr-test/make-thread "t1" nil "x.el" "firstauthor" "lastauthor"))
+         (response (magit-dash-pr-test/graphql-response (list node)))
+         (threads (magit-dash-pr--parse-threads response)))
     (should (equal "firstauthor" (plist-get (car threads) :creator)))
     (should (equal "lastauthor"  (plist-get (car threads) :last-commentor)))))
 
-;;; magit-dash-gh-pr--thread-table
+;;; magit-dash-pr--thread-table
 
-(ert-deftest magit-dash-gh-pr/thread-table-resolved ()
+(ert-deftest magit-dash-pr/thread-table-resolved ()
   (let* ((th  '(:id "t1" :resolved t :path "x.el" :creator "a" :last-commentor "b"))
-         (ht  (magit-dash-gh-pr--thread-table th)))
+         (ht  (magit-dash-pr--thread-table th)))
     (should (equal "t1"  (map-elt ht "id")))
     (should (eq    t     (map-elt ht "resolved")))
     (should (equal "x.el" (map-elt ht "path")))
     (should (equal "a"   (map-elt ht "creator")))
     (should (equal "b"   (map-elt ht "last_commentor")))))
 
-(ert-deftest magit-dash-gh-pr/thread-table-unresolved ()
+(ert-deftest magit-dash-pr/thread-table-unresolved ()
   (let* ((th '(:id "t2" :resolved nil :path "" :creator "c" :last-commentor "d"))
-         (ht (magit-dash-gh-pr--thread-table th)))
+         (ht (magit-dash-pr--thread-table th)))
     (should (eq :false (map-elt ht "resolved")))))
 
 
 ;;; has_unresolved_threads derivation
 
-(ert-deftest magit-dash-gh-pr/has-unresolved-all-resolved ()
+(ert-deftest magit-dash-pr/has-unresolved-all-resolved ()
   (let ((threads '((:resolved t) (:resolved t))))
     (should-not (seq-some (lambda (th) (not (plist-get th :resolved))) threads))))
 
-(ert-deftest magit-dash-gh-pr/has-unresolved-one-unresolved ()
+(ert-deftest magit-dash-pr/has-unresolved-one-unresolved ()
   (let ((threads '((:resolved t) (:resolved nil) (:resolved t))))
     (should (seq-some (lambda (th) (not (plist-get th :resolved))) threads))))
 
-(ert-deftest magit-dash-gh-pr/has-unresolved-empty ()
+(ert-deftest magit-dash-pr/has-unresolved-empty ()
   (should-not (seq-some (lambda (th) (not (plist-get th :resolved))) nil)))
 
 ;;; Pipeline: step-finalize index structure
 
-(ert-deftest magit-dash-gh-pr/step-finalize-writes-index ()
-  (magit-dash-gh-pr-test/with-temp-dir
+(ert-deftest magit-dash-pr/step-finalize-writes-index ()
+  (magit-dash-pr-test/with-temp-dir
     (let* ((pr-info `((number . 42)
                       (title . "Fix the thing")
                       (state . "OPEN")
@@ -140,7 +140,7 @@
                       :files (list '(:path "pr-info.json" :type "metadata")
                                    '(:path "pr-review-threads.json" :type "review-threads")
                                    '(:path "pr-issue-comments.json" :type "issue-comments")))))
-      (magit-dash-gh-pr--step-finalize ctx)
+      (magit-dash-pr--step-finalize ctx)
       (should (file-exists-p (expand-file-name "index.json" dir)))
       (let* ((raw (with-temp-buffer
                     (insert-file-contents (expand-file-name "index.json" dir))
@@ -155,29 +155,29 @@
         (should (= 3                        (map-elt index 'artifact_count)))
         (should (= 2                        (length (map-elt index 'threads))))))))
 
-(ert-deftest magit-dash-gh-pr/step-finalize-all-resolved ()
+(ert-deftest magit-dash-pr/step-finalize-all-resolved ()
   "When all threads are resolved, has_unresolved_threads is :false."
-  (magit-dash-gh-pr-test/with-temp-dir
+  (magit-dash-pr-test/with-temp-dir
     (let* ((pr-info `((number . 1) (title . "Done") (state . "MERGED")
                       (author . ((login . "alice"))) (headRefName . "main")
                       (reviewDecision . "APPROVED")))
            (threads '((:resolved t) (:resolved t)))
            (ctx (list :dir dir :pr-info pr-info :threads threads :files nil)))
-      (magit-dash-gh-pr--step-finalize ctx)
+      (magit-dash-pr--step-finalize ctx)
       (let* ((raw (with-temp-buffer
                     (insert-file-contents (expand-file-name "index.json" dir))
                     (buffer-string)))
              (index (json-parse-string raw :object-type 'alist)))
         (should (eq :false (map-elt index 'has_unresolved_threads)))))))
 
-(ert-deftest magit-dash-gh-pr/step-finalize-no-threads ()
+(ert-deftest magit-dash-pr/step-finalize-no-threads ()
   "When there are no threads, has_unresolved_threads is :false."
-  (magit-dash-gh-pr-test/with-temp-dir
+  (magit-dash-pr-test/with-temp-dir
     (let* ((pr-info `((number . 2) (title . "Simple") (state . "OPEN")
                       (author . ((login . "bob"))) (headRefName . "feat")
                       (reviewDecision . nil)))
            (ctx (list :dir dir :pr-info pr-info :threads nil :files nil)))
-      (magit-dash-gh-pr--step-finalize ctx)
+      (magit-dash-pr--step-finalize ctx)
       (let* ((raw (with-temp-buffer
                     (insert-file-contents (expand-file-name "index.json" dir))
                     (buffer-string)))
@@ -186,9 +186,9 @@
 
 ;;; Pipeline: step-threads mocking
 
-(ert-deftest magit-dash-gh-pr/step-threads-calls-gh ()
+(ert-deftest magit-dash-pr/step-threads-calls-gh ()
   "step-threads invokes gh api graphql with correct args."
-  (magit-dash-gh-pr-test/with-temp-dir
+  (magit-dash-pr-test/with-temp-dir
     (let* ((gh-args nil)
            (fake-graphql-output
             (json-serialize
@@ -218,116 +218,116 @@
                  (lambda (args _dir on-success &optional _on-error)
                    (setq gh-args args)
                    (funcall on-success fake-graphql-output)))
-                ((symbol-function 'magit-dash-gh-pr--step-comments)
+                ((symbol-function 'magit-dash-pr--step-comments)
                  (lambda (_ctx) (setq comments-called t))))
-        (magit-dash-gh-pr--step-threads ctx)
+        (magit-dash-pr--step-threads ctx)
         (should comments-called)
         (should (member "graphql" gh-args))
         (should (file-exists-p (expand-file-name "pr-review-threads.json" dir)))))))
 
-;;; magit-dash-gh-pr-dashboard--find-local-path
+;;; magit-dash-pr-dashboard--find-local-path
 
 (defvar magit-dash-repo-list)
 
-(defun magit-dash-gh-pr-test/make-repos (&rest path-pairs)
+(defun magit-dash-pr-test/make-repos (&rest path-pairs)
   "Return a list of magit-dash-repo structs from PATH-PAIRS (name path ...)."
   (let (repos)
     (while path-pairs
       (push (magit-dash-repo--make :name (pop path-pairs) :path (pop path-pairs)) repos))
     (nreverse repos)))
 
-(ert-deftest magit-dash-gh-pr/find-local-path-match ()
+(ert-deftest magit-dash-pr/find-local-path-match ()
   "Returns path when repo name matches a registered entry's directory."
   (let ((magit-dash-repo-list
-         (magit-dash-gh-pr-test/make-repos "test-1" "/home/user/projects/myrepo"
+         (magit-dash-pr-test/make-repos "test-1" "/home/user/projects/myrepo"
                                       "test-2" "/home/user/projects/other-repo")))
     (should (equal "/home/user/projects/myrepo"
-                   (magit-dash-gh-pr-dashboard--find-local-path "owner/myrepo")))))
+                   (magit-dash-pr-dashboard--find-local-path "owner/myrepo")))))
 
-(ert-deftest magit-dash-gh-pr/find-local-path-no-match ()
+(ert-deftest magit-dash-pr/find-local-path-no-match ()
   "Returns nil when no registered entry matches."
   (let ((magit-dash-repo-list
-         (magit-dash-gh-pr-test/make-repos "test" "/home/user/projects/myrepo")))
-    (should-not (magit-dash-gh-pr-dashboard--find-local-path "owner/unknown"))))
+         (magit-dash-pr-test/make-repos "test" "/home/user/projects/myrepo")))
+    (should-not (magit-dash-pr-dashboard--find-local-path "owner/unknown"))))
 
-(ert-deftest magit-dash-gh-pr/find-local-path-empty-list ()
+(ert-deftest magit-dash-pr/find-local-path-empty-list ()
   "Returns nil when magit-dash-repo-list is empty."
   (let ((magit-dash-repo-list nil))
-    (should-not (magit-dash-gh-pr-dashboard--find-local-path "owner/repo"))))
+    (should-not (magit-dash-pr-dashboard--find-local-path "owner/repo"))))
 
-;;; magit-dash-gh-pr-dashboard-fetch-ci
+;;; magit-dash-pr-dashboard-fetch-ci
 
-(ert-deftest magit-dash-gh-pr/dashboard-fetch-ci-calls-ci-fetch ()
+(ert-deftest magit-dash-pr/dashboard-fetch-ci-calls-ci-fetch ()
   "fetch-ci extracts pr-number and local path, then calls magit-dash-gh-actions-fetch-for-pr."
   (let ((fetch-args nil))
-    (cl-letf (((symbol-function 'magit-dash-gh-pr-dashboard--entry-at-point)
+    (cl-letf (((symbol-function 'magit-dash-pr-dashboard--entry-at-point)
                (lambda () '(:number 42 :repo "owner/myrepo" :pr nil)))
-              ((symbol-function 'magit-dash-gh-pr-dashboard--find-local-path)
+              ((symbol-function 'magit-dash-pr-dashboard--find-local-path)
                (lambda (_) "/repos/myrepo"))
               ((symbol-function 'magit-dash-gh-actions-fetch-for-pr)
                (lambda (num path) (setq fetch-args (list num path)))))
-      (magit-dash-gh-pr-dashboard-fetch-ci)
+      (magit-dash-pr-dashboard-fetch-ci)
       (should (equal '(42 "/repos/myrepo") fetch-args)))))
 
-(ert-deftest magit-dash-gh-pr/dashboard-fetch-ci-no-local-path ()
+(ert-deftest magit-dash-pr/dashboard-fetch-ci-no-local-path ()
   "fetch-ci signals user-error when no local checkout is registered."
-  (cl-letf (((symbol-function 'magit-dash-gh-pr-dashboard--entry-at-point)
+  (cl-letf (((symbol-function 'magit-dash-pr-dashboard--entry-at-point)
              (lambda () '(:number 5 :repo "owner/unknown-repo" :pr nil)))
-            ((symbol-function 'magit-dash-gh-pr-dashboard--find-local-path)
+            ((symbol-function 'magit-dash-pr-dashboard--find-local-path)
              (lambda (_) nil)))
-    (should-error (magit-dash-gh-pr-dashboard-fetch-ci) :type 'user-error)))
+    (should-error (magit-dash-pr-dashboard-fetch-ci) :type 'user-error)))
 
-;;; magit-gh-pr-dash and worktree operations
+;;; magit-dash-pr and worktree operations
 
-(ert-deftest magit-dash-gh-pr/dash-creates-buffer ()
-  "magit-gh-pr-dash creates *magit-gh-pr-dash* buffer."
+(ert-deftest magit-dash-pr/dash-creates-buffer ()
+  "magit-dash-pr creates *magit-dash-pr* buffer."
   (cl-letf (((symbol-function 'magit-dash-gh--check-gh) #'ignore)
-            ((symbol-function 'magit-dash-gh-pr-dashboard-refresh) #'ignore))
+            ((symbol-function 'magit-dash-pr-dashboard-refresh) #'ignore))
     (unwind-protect
-        (let ((buf (get-buffer-create magit-dash-gh-pr-buffer-name)))
-          (magit-gh-pr-dash)
-          (should (equal (buffer-name (get-buffer magit-dash-gh-pr-buffer-name)) "*magit-gh-pr-dash*"))
+        (let ((buf (get-buffer-create magit-dash-pr-buffer-name)))
+          (magit-dash-pr)
+          (should (equal (buffer-name (get-buffer magit-dash-pr-buffer-name)) "*magit-dash-pr*"))
           (with-current-buffer buf
-            (should (eq major-mode 'magit-dash-gh-pr-dashboard-mode))))
-      (when-let* ((buf (get-buffer magit-dash-gh-pr-buffer-name)))
+            (should (eq major-mode 'magit-dash-pr-dashboard-mode))))
+      (when-let* ((buf (get-buffer magit-dash-pr-buffer-name)))
         (kill-buffer buf)))))
 
-(ert-deftest magit-dash-gh-pr/default-filters-aggregate-all-open ()
-  "magit-dash-gh-pr-dashboard-mode sets default filters with :author nil to aggregate all open PRs."
+(ert-deftest magit-dash-pr/default-filters-aggregate-all-open ()
+  "magit-dash-pr-dashboard-mode sets default filters with :author nil to aggregate all open PRs."
   (with-temp-buffer
-    (magit-dash-gh-pr-dashboard-mode)
-    (let ((filters magit-dash-gh-pr-dashboard--filters))
+    (magit-dash-pr-dashboard-mode)
+    (let ((filters magit-dash-pr-dashboard--filters))
       (should (equal "open" (plist-get filters :state)))
       (should-not (plist-get filters :author)))))
 
-(ert-deftest magit-dash-gh-pr/open-worktree-opens-existing ()
+(ert-deftest magit-dash-pr/open-worktree-opens-existing ()
   "open-worktree switches directly to existing worktree."
   (let ((setup-path nil))
-    (cl-letf (((symbol-function 'magit-dash-gh-pr-dashboard--entry-at-point)
+    (cl-letf (((symbol-function 'magit-dash-pr-dashboard--entry-at-point)
                (lambda () '(:number 42 :repo "owner/myrepo" :pr nil)))
-              ((symbol-function 'magit-dash-gh-pr-dashboard--find-local-path)
+              ((symbol-function 'magit-dash-pr-dashboard--find-local-path)
                (lambda (_) "/tmp/myrepo"))
               ((symbol-function 'file-directory-p)
                (lambda (dir) (string-suffix-p ".wt/pr-42" dir)))
               ((symbol-function 'magit-status-setup-buffer)
                (lambda (path) (setq setup-path path))))
-      (magit-dash-gh-pr-dashboard-open-worktree)
+      (magit-dash-pr-dashboard-open-worktree)
       (should (equal (expand-file-name "/tmp/myrepo/.wt/pr-42") setup-path)))))
 
-(ert-deftest magit-dash-gh-pr/open-worktree-fetches-and-creates ()
+(ert-deftest magit-dash-pr/open-worktree-fetches-and-creates ()
   "open-worktree runs git fetch and git worktree add when worktree does not yet exist."
   (let ((git-calls nil)
         (setup-path nil))
-    (cl-letf (((symbol-function 'magit-dash-gh-pr-dashboard--entry-at-point)
+    (cl-letf (((symbol-function 'magit-dash-pr-dashboard--entry-at-point)
                (lambda () '(:number 42 :repo "owner/myrepo" :pr nil)))
-              ((symbol-function 'magit-dash-gh-pr-dashboard--find-local-path)
+              ((symbol-function 'magit-dash-pr-dashboard--find-local-path)
                (lambda (_) "/tmp/myrepo"))
               ((symbol-function 'file-directory-p) (lambda (_) nil))
               ((symbol-function 'magit-call-git)
                (lambda (&rest args) (push args git-calls) 0))
               ((symbol-function 'magit-status-setup-buffer)
                (lambda (path) (setq setup-path path))))
-      (magit-dash-gh-pr-dashboard-open-worktree)
+      (magit-dash-pr-dashboard-open-worktree)
       (should (equal (expand-file-name "/tmp/myrepo/.wt/pr-42") setup-path))
       ;; Verify git fetch and git worktree add calls
       (should (seq-some (lambda (call)
@@ -341,22 +341,23 @@
                                (equal (nth 2 call) (expand-file-name "/tmp/myrepo/.wt/pr-42"))
                                (equal (nth 3 call) "pr-42")))
                         git-calls)))))
-;;; magit-dash-gh-pr-dashboard--build-format
+;;; magit-dash-pr-dashboard--build-format
 
-(ert-deftest magit-dash-gh-pr/build-format-caps-repo-width-with-entries ()
+(ert-deftest magit-dash-pr/build-format-caps-repo-width-with-entries ()
   "Repo column width is capped at the longest repo name + 3."
   (let* ((entries '(((:repo "owner/repo-short") ["repo-short" "1" "pass" "Title" "·" "1d" "0" "approved"])
                     ((:repo "owner/a-much-longer-repository-name") ["a-much-longer-repository-name" "2" "pass" "Title" "·" "1d" "0" "approved"])))
-         (fmt (magit-dash-gh-pr-dashboard--build-format 150 entries)))
+         (fmt (magit-dash-pr-dashboard--build-format 150 entries)))
     (should (equal "Repo" (car (aref fmt 0))))
     (should (= (+ (length "a-much-longer-repository-name") 3)
                (cadr (aref fmt 0))))))
 
-(ert-deftest magit-dash-gh-pr/build-format-show-org ()
+(ert-deftest magit-dash-pr/build-format-show-org ()
   "When show-org is non-nil, build-format includes Org and Repo columns, followed by PR#, CI, Title, WT, Updated."
-  (let* ((magit-dash-gh-pr-show-org t)
+  (let* ((magit-dash-pr-show-org t)
+         (magit-dash-pr-columns (append '((author . nil)) magit-dash-pr-columns))
          (entries '(((:repo "casaphq/my-repo") ["casaphq" "my-repo" "1" "pass" "Title" "·" "1d" "0" "approved"])))
-         (fmt (magit-dash-gh-pr-dashboard--build-format 150 entries)))
+         (fmt (magit-dash-pr-dashboard--build-format 150 entries)))
     (should (equal "Org" (car (aref fmt 0))))
     (should (equal "Repo" (car (aref fmt 1))))
     (should (equal "PR#" (car (aref fmt 2))))
@@ -365,114 +366,115 @@
     (should (equal "WT" (car (aref fmt 5))))
     (should (equal "Updated" (car (aref fmt 6))))))
 
-(ert-deftest magit-dash-gh-pr/build-format-fallback-no-entries ()
+(ert-deftest magit-dash-pr/build-format-fallback-no-entries ()
   "When no entries exist, Repo column falls back to available window space (min 12)."
-  (let ((fmt (magit-dash-gh-pr-dashboard--build-format 100 nil)))
+  (let* ((magit-dash-pr-columns (append '((author . nil)) magit-dash-pr-columns))
+         (fmt (magit-dash-pr-dashboard--build-format 100 nil)))
     (should (= (- 100 77) (cadr (aref fmt 0))))))
 
-(ert-deftest magit-dash-gh-pr/split-slug ()
+(ert-deftest magit-dash-pr/split-slug ()
   "Split slug correctly extracts owner and repo."
-  (should (equal '("owner" . "repo") (magit-dash-gh-pr--split-slug "owner/repo")))
-  (should (equal '("" . "standalone") (magit-dash-gh-pr--split-slug "standalone"))))
+  (should (equal '("owner" . "repo") (magit-dash-pr--split-slug "owner/repo")))
+  (should (equal '("" . "standalone") (magit-dash-pr--split-slug "standalone"))))
 
-(ert-deftest magit-dash-gh-pr/worktree-detection ()
+(ert-deftest magit-dash-pr/worktree-detection ()
   "Worktree detection checks local checkout and worktree directory."
-  (let ((magit-dash-repo-list (magit-dash-gh-pr-test/make-repos "test-repo" "/tmp/test-repo")))
+  (let ((magit-dash-repo-list (magit-dash-pr-test/make-repos "test-repo" "/tmp/test-repo")))
     (should (equal (expand-file-name "/tmp/test-repo/.wt/pr-10")
-                   (magit-dash-gh-pr-dashboard--worktree-path '(:number 10 :repo "owner/test-repo"))))
+                   (magit-dash-pr-dashboard--worktree-path '(:number 10 :repo "owner/test-repo"))))
     (cl-letf (((symbol-function 'file-directory-p)
                (lambda (path) (string-suffix-p ".wt/pr-10" path))))
-      (should (magit-dash-gh-pr-dashboard--worktree-exists-p '(:number 10 :repo "owner/test-repo")))
-      (should-not (magit-dash-gh-pr-dashboard--worktree-exists-p '(:number 11 :repo "owner/test-repo"))))))
+      (should (magit-dash-pr-dashboard--worktree-exists-p '(:number 10 :repo "owner/test-repo")))
+      (should-not (magit-dash-pr-dashboard--worktree-exists-p '(:number 11 :repo "owner/test-repo"))))))
 
-(ert-deftest magit-dash-gh-pr/open-dired ()
+(ert-deftest magit-dash-pr/open-dired ()
   "open-dired opens Dired in worktree directory."
   (let ((opened-dir nil))
-    (cl-letf (((symbol-function 'magit-dash-gh-pr-dashboard--entry-at-point)
+    (cl-letf (((symbol-function 'magit-dash-pr-dashboard--entry-at-point)
                (lambda () '(:number 42 :repo "owner/myrepo" :pr nil)))
-              ((symbol-function 'magit-dash-gh-pr-dashboard--worktree-path)
+              ((symbol-function 'magit-dash-pr-dashboard--worktree-path)
                (lambda (_) "/tmp/myrepo-pr-42"))
               ((symbol-function 'file-directory-p)
                (lambda (_) t))
               ((symbol-function 'dired)
                (lambda (d) (setq opened-dir d))))
-      (magit-dash-gh-pr-dashboard-open-dired)
+      (magit-dash-pr-dashboard-open-dired)
       (should (equal "/tmp/myrepo-pr-42" opened-dir)))))
 
 
-;;; magit-dash-gh-pr--parse-status-rollup
+;;; magit-dash-pr--parse-status-rollup
 
-(ert-deftest magit-dash-gh-pr/parse-status-rollup-nil ()
+(ert-deftest magit-dash-pr/parse-status-rollup-nil ()
   "Empty or nil rollup returns nil."
-  (should-not (magit-dash-gh-pr--parse-status-rollup nil))
-  (should-not (magit-dash-gh-pr--parse-status-rollup []))
-  (should-not (magit-dash-gh-pr--parse-status-rollup '())))
+  (should-not (magit-dash-pr--parse-status-rollup nil))
+  (should-not (magit-dash-pr--parse-status-rollup []))
+  (should-not (magit-dash-pr--parse-status-rollup '())))
 
-(ert-deftest magit-dash-gh-pr/parse-status-rollup-legacy-state ()
+(ert-deftest magit-dash-pr/parse-status-rollup-legacy-state ()
   "Single alist with state field returns that state."
-  (should (equal "SUCCESS" (magit-dash-gh-pr--parse-status-rollup '((state . "SUCCESS")))))
-  (should (equal "FAILURE" (magit-dash-gh-pr--parse-status-rollup '((state . "failure"))))))
+  (should (equal "SUCCESS" (magit-dash-pr--parse-status-rollup '((state . "SUCCESS")))))
+  (should (equal "FAILURE" (magit-dash-pr--parse-status-rollup '((state . "failure"))))))
 
-(ert-deftest magit-dash-gh-pr/parse-status-rollup-success ()
+(ert-deftest magit-dash-pr/parse-status-rollup-success ()
   "All successful check runs produce SUCCESS."
   (let ((rollup (list '((status . "COMPLETED") (conclusion . "SUCCESS"))
                       '((status . "COMPLETED") (conclusion . "SKIPPED")))))
-    (should (equal "SUCCESS" (magit-dash-gh-pr--parse-status-rollup rollup)))))
+    (should (equal "SUCCESS" (magit-dash-pr--parse-status-rollup rollup)))))
 
-(ert-deftest magit-dash-gh-pr/parse-status-rollup-failure-priority ()
+(ert-deftest magit-dash-pr/parse-status-rollup-failure-priority ()
   "Failure takes priority over pending or success."
   (let ((rollup (list '((status . "COMPLETED") (conclusion . "SUCCESS"))
                       '((status . "IN_PROGRESS") (conclusion . ""))
                       '((status . "COMPLETED") (conclusion . "FAILURE")))))
-    (should (equal "FAILURE" (magit-dash-gh-pr--parse-status-rollup rollup)))))
+    (should (equal "FAILURE" (magit-dash-pr--parse-status-rollup rollup)))))
 
-(ert-deftest magit-dash-gh-pr/parse-status-rollup-pending-priority ()
+(ert-deftest magit-dash-pr/parse-status-rollup-pending-priority ()
   "Pending takes priority over success when there are no failures."
   (let ((rollup (list '((status . "COMPLETED") (conclusion . "SUCCESS"))
                       '((status . "IN_PROGRESS") (conclusion . "")))))
-    (should (equal "PENDING" (magit-dash-gh-pr--parse-status-rollup rollup)))))
+    (should (equal "PENDING" (magit-dash-pr--parse-status-rollup rollup)))))
 
-(ert-deftest magit-dash-gh-pr/refresh-does-not-clear-entries-while-fetching ()
-  "Calling `magit-dash-gh-pr-dashboard-refresh' does not clear `tabulated-list-entries' before fetch completes."
+(ert-deftest magit-dash-pr/refresh-does-not-clear-entries-while-fetching ()
+  "Calling `magit-dash-pr-dashboard-refresh' does not clear `tabulated-list-entries' before fetch completes."
   (with-temp-buffer
-    (magit-dash-gh-pr-dashboard-mode)
+    (magit-dash-pr-dashboard-mode)
     (setq tabulated-list-entries '(((:repo "o/r" :number 1) ["o/r" "1" "pass" "T" "·" "1d" "0" "approved"])))
     (cl-letf (((symbol-function 'magit-dash-gh--run-process)
                (lambda (_args _dir _on-success &optional _on-error)
                  nil)))
-      (magit-dash-gh-pr-dashboard-refresh)
+      (magit-dash-pr-dashboard-refresh)
       (should (= 1 (length tabulated-list-entries))))))
 
 
 ;;; Round 3: View switcher, window split, and quit tests
 
-(ert-deftest magit-dash-gh-pr/build-args-review-requested ()
+(ert-deftest magit-dash-pr/build-args-review-requested ()
   "build-args includes --review-requested when specified."
-  (let ((args (magit-dash-gh-pr-dashboard--build-args
+  (let ((args (magit-dash-pr-dashboard--build-args
                (list :state "open" :review-requested "@me"))))
     (should (member "--review-requested" args))
     (should (member "@me" args))))
 
-(ert-deftest magit-dash-gh-pr/switch-view-presets ()
+(ert-deftest magit-dash-pr/switch-view-presets ()
   "switch-view updates filters according to preset view keys."
   (let ((refreshed nil)
-        (magit-dash-gh-pr-dashboard--filters nil))
-    (cl-letf (((symbol-function 'magit-dash-gh-pr-dashboard-refresh)
+        (magit-dash-pr-dashboard--filters nil))
+    (cl-letf (((symbol-function 'magit-dash-pr-dashboard-refresh)
                (lambda () (setq refreshed t))))
       ;; 1. my-prs
-      (magit-dash-gh-pr-dashboard-switch-view "my-prs")
-      (should (equal "@me" (plist-get magit-dash-gh-pr-dashboard--filters :author)))
-      (should (equal "open" (plist-get magit-dash-gh-pr-dashboard--filters :state)))
+      (magit-dash-pr-dashboard-switch-view "my-prs")
+      (should (equal "@me" (plist-get magit-dash-pr-dashboard--filters :author)))
+      (should (equal "open" (plist-get magit-dash-pr-dashboard--filters :state)))
       (should refreshed)
       ;; 2. needs-review
       (setq refreshed nil)
-      (magit-dash-gh-pr-dashboard-switch-view "needs-review")
-      (should (equal "@me" (plist-get magit-dash-gh-pr-dashboard--filters :review-requested)))
+      (magit-dash-pr-dashboard-switch-view "needs-review")
+      (should (equal "@me" (plist-get magit-dash-pr-dashboard--filters :review-requested)))
       ;; 3. closed
-      (magit-dash-gh-pr-dashboard-switch-view "closed")
-      (should (equal "closed" (plist-get magit-dash-gh-pr-dashboard--filters :state))))))
+      (magit-dash-pr-dashboard-switch-view "closed")
+      (should (equal "closed" (plist-get magit-dash-pr-dashboard--filters :state))))))
 
-(ert-deftest magit-dash-gh-pr/quit-window-deletes-split ()
+(ert-deftest magit-dash-pr/quit-window-deletes-split ()
   "quit buries buffer and deletes window when multiple windows exist."
   (let ((buried nil)
         (deleted nil))
@@ -482,91 +484,91 @@
                (lambda (&rest _) (setq buried t)))
               ((symbol-function 'delete-window)
                (lambda (&rest _) (setq deleted t))))
-      (magit-dash-gh-pr-dashboard-quit)
+      (magit-dash-pr-dashboard-quit)
       (should buried)
       (should deleted))))
 
 
 ;;; Column toggling tests
 
-(ert-deftest magit-dash-gh-pr/columns-defaults ()
+(ert-deftest magit-dash-pr/columns-defaults ()
   "PR dashboard has expected default columns enabled, disabled, and ordered."
-  (should (eq nil (alist-get 'org magit-dash-gh-pr-columns)))
-  (should (eq t (alist-get 'repo magit-dash-gh-pr-columns)))
-  (should (eq t (alist-get 'pr magit-dash-gh-pr-columns)))
-  (should (eq t (alist-get 'ci magit-dash-gh-pr-columns)))
-  (should (eq t (alist-get 'title magit-dash-gh-pr-columns)))
-  (should (eq t (alist-get 'worktree magit-dash-gh-pr-columns)))
-  (should (eq t (alist-get 'updated magit-dash-gh-pr-columns)))
-  (should (equal '(repo pr ci title worktree updated comments review)
-                 (magit-dash-gh-pr--active-columns)))
+  (should (eq nil (alist-get 'org magit-dash-pr-columns)))
+  (should (eq t (alist-get 'repo magit-dash-pr-columns)))
+  (should (eq t (alist-get 'pr magit-dash-pr-columns)))
+  (should (eq t (alist-get 'ci magit-dash-pr-columns)))
+  (should (eq t (alist-get 'title magit-dash-pr-columns)))
+  (should (eq t (alist-get 'worktree magit-dash-pr-columns)))
+  (should (eq t (alist-get 'updated magit-dash-pr-columns)))
+  (should (equal '(repo pr author ci title worktree updated comments review)
+                 (magit-dash-pr--active-columns)))
   (let ((was-on (bound-and-true-p magit-dash-global-mode)))
     (unwind-protect
         (progn
           (unless was-on (magit-dash-global-mode 1))
-          (should (memq 'magit-dash-gh-pr-columns savehist-additional-variables)))
+          (should (memq 'magit-dash-pr-columns savehist-additional-variables)))
       (unless was-on
         (magit-dash-global-mode -1)))))
 
-(ert-deftest magit-dash-gh-pr/toggle-column ()
+(ert-deftest magit-dash-pr/toggle-column ()
   "Toggling a column flips its enabled state and syncs show-org."
-  (let ((magit-dash-gh-pr-columns
+  (let ((magit-dash-pr-columns
          '((org . nil) (repo . t) (pr . t) (ci . t) (title . t) (worktree . t) (updated . t) (age . nil) (comments . t) (review . t)))
-        (magit-dash-gh-pr-show-org nil))
-    (cl-letf (((symbol-function 'magit-dash-gh-pr-dashboard-refresh) #'ignore))
-      (magit-dash-gh-pr-toggle-column 'org)
-      (should (eq t (magit-dash-gh-pr--column-enabled-p 'org)))
-      (should (eq t magit-dash-gh-pr-show-org))
-      (magit-dash-gh-pr-toggle-column 'ci)
-      (should-not (magit-dash-gh-pr--column-enabled-p 'ci)))))
+        (magit-dash-pr-show-org nil))
+    (cl-letf (((symbol-function 'magit-dash-pr-dashboard-refresh) #'ignore))
+      (magit-dash-pr-toggle-column 'org)
+      (should (eq t (magit-dash-pr--column-enabled-p 'org)))
+      (should (eq t magit-dash-pr-show-org))
+      (magit-dash-pr-toggle-column 'ci)
+      (should-not (magit-dash-pr--column-enabled-p 'ci)))))
 
-(ert-deftest magit-dash-gh-pr/build-entry-respects-arbitrary-columns ()
+(ert-deftest magit-dash-pr/build-entry-respects-arbitrary-columns ()
   "build-entry outputs only the active columns."
-  (let ((magit-dash-gh-pr-columns
-         '((org . nil) (repo . t) (pr . t) (ci . nil) (title . nil) (worktree . nil) (updated . nil) (age . nil) (comments . nil) (review . nil)))
+  (let ((magit-dash-pr-columns
+         '((org . nil) (repo . t) (pr . t) (author . nil) (base . nil) (ci . nil) (title . nil) (worktree . nil) (updated . nil) (age . nil) (comments . nil) (review . nil)))
         (pr '((number . 10) (title . "T") (updatedAt . "") (comments . 0))))
-    (let* ((entry (magit-dash-gh-pr-dashboard--build-entry pr "owner/repo"))
+    (let* ((entry (magit-dash-pr-dashboard--build-entry pr "owner/repo"))
            (vec (cadr entry)))
       (should (= 2 (length vec)))
       (should (equal "repo" (aref vec 0)))
       (should (equal "10" (aref vec 1))))))
 
 
-(ert-deftest magit-dash-gh-pr/worktree-path-format-options ()
+(ert-deftest magit-dash-pr/worktree-path-format-options ()
   "Test custom worktree path formatting options: sibling, dot-wt, and custom string."
   (let ((entry '(:number 42 :repo "owner/myrepo" :pr nil)))
-    (cl-letf (((symbol-function 'magit-dash-gh-pr-dashboard--find-local-path)
+    (cl-letf (((symbol-function 'magit-dash-pr-dashboard--find-local-path)
                (lambda (_) "/tmp/myrepo"))
               ((symbol-function 'file-directory-p) (lambda (_) nil)))
       ;; Default: sibling
-      (let ((magit-dash-gh-pr-worktree-path-format 'sibling))
+      (let ((magit-dash-pr-worktree-path-format 'sibling))
         (should (equal (expand-file-name "/tmp/myrepo-pr-42")
-                       (magit-dash-gh-pr-dashboard--worktree-path entry))))
+                       (magit-dash-pr-dashboard--worktree-path entry))))
       ;; dot-wt
-      (let ((magit-dash-gh-pr-worktree-path-format 'dot-wt))
+      (let ((magit-dash-pr-worktree-path-format 'dot-wt))
         (should (equal (expand-file-name "/tmp/myrepo/.wt/pr-42")
-                       (magit-dash-gh-pr-dashboard--worktree-path entry))))
+                       (magit-dash-pr-dashboard--worktree-path entry))))
       ;; Custom string template
-      (let ((magit-dash-gh-pr-worktree-path-format "%r/.worktrees/%n"))
+      (let ((magit-dash-pr-worktree-path-format "%r/.worktrees/%n"))
         (should (equal (expand-file-name "/tmp/myrepo/.worktrees/pr-42")
-                       (magit-dash-gh-pr-dashboard--worktree-path entry)))))))
+                       (magit-dash-pr-dashboard--worktree-path entry)))))))
 
-(ert-deftest magit-dash-gh-pr/open-worktree-mirrors-remote-branch ()
+(ert-deftest magit-dash-pr/open-worktree-mirrors-remote-branch ()
   "open-worktree uses headRefName as branch name while keeping worktree name as pr-NUM."
   (let ((git-calls nil)
         (setup-path nil))
-    (cl-letf (((symbol-function 'magit-dash-gh-pr-dashboard--entry-at-point)
+    (cl-letf (((symbol-function 'magit-dash-pr-dashboard--entry-at-point)
                (lambda () '(:number 42 :repo "owner/myrepo"
                             :pr ((headRefName . "feature/cool-idea")))))
-              ((symbol-function 'magit-dash-gh-pr-dashboard--find-local-path)
+              ((symbol-function 'magit-dash-pr-dashboard--find-local-path)
                (lambda (_) "/tmp/myrepo"))
               ((symbol-function 'file-directory-p) (lambda (_) nil))
               ((symbol-function 'magit-call-git)
                (lambda (&rest args) (push args git-calls) 0))
               ((symbol-function 'magit-status-setup-buffer)
                (lambda (path) (setq setup-path path))))
-      (let ((magit-dash-gh-pr-worktree-path-format 'dot-wt))
-        (magit-dash-gh-pr-dashboard-open-worktree)
+      (let ((magit-dash-pr-worktree-path-format 'dot-wt))
+        (magit-dash-pr-dashboard-open-worktree)
         (should (equal (expand-file-name "/tmp/myrepo/.wt/pr-42") setup-path))
         ;; Verify fetch used remote branch name
         (should (seq-some (lambda (call)
@@ -582,19 +584,19 @@
                                  (equal (nth 3 call) "feature/cool-idea")))
                           git-calls))))))
 
-(ert-deftest magit-dash-gh-pr/worktree-detection-finds-dot-wt ()
+(ert-deftest magit-dash-pr/worktree-detection-finds-dot-wt ()
   "worktree-exists-p detects existing worktrees in .wt directory."
   (let ((entry '(:number 10 :repo "owner/test-repo" :pr nil)))
-    (cl-letf (((symbol-function 'magit-dash-gh-pr-dashboard--find-local-path)
+    (cl-letf (((symbol-function 'magit-dash-pr-dashboard--find-local-path)
                (lambda (_) "/tmp/test-repo"))
               ((symbol-function 'file-directory-p)
                (lambda (path)
                  (member (directory-file-name path)
                          (list (expand-file-name "/tmp/test-repo")
                                (expand-file-name "/tmp/test-repo/.wt/pr-10"))))))
-      (should (magit-dash-gh-pr-dashboard--worktree-exists-p entry)))))
+      (should (magit-dash-pr-dashboard--worktree-exists-p entry)))))
 
-(ert-deftest magit-dash-gh-pr/build-entry-updated-column ()
+(ert-deftest magit-dash-pr/build-entry-updated-column ()
   "build-entry populates columns in order: repo, pr, ci, title, worktree, updated, comments, review."
   (let* ((pr '((number . 15)
                (title . "Fix stuff")
@@ -604,7 +606,8 @@
                (reviewDecision . nil)
                (statusCheckRollup . ((state . "FAILURE")))
                (url . "https://example.com/15")))
-         (entry (magit-dash-gh-pr-dashboard--build-entry pr "owner/myrepo"))
+         (magit-dash-pr-columns (append '((author . nil)) magit-dash-pr-columns))
+         (entry (magit-dash-pr-dashboard--build-entry pr "owner/myrepo"))
          (id (car entry))
          (vec (cadr entry)))
     ;; id should store :updated and :head-ref
@@ -624,20 +627,20 @@
 
 ;;; Worktree commands & review tests
 
-(ert-deftest magit-dash-gh-pr/dashboard-create-worktree-no-switch ()
+(ert-deftest magit-dash-pr/dashboard-create-worktree-no-switch ()
   "dashboard-create-worktree creates worktree without opening magit status when switch is nil."
   (let ((git-calls nil)
         (setup-called nil))
-    (cl-letf (((symbol-function 'magit-dash-gh-pr-dashboard--entry-at-point)
+    (cl-letf (((symbol-function 'magit-dash-pr-dashboard--entry-at-point)
                (lambda () '(:number 42 :repo "owner/myrepo" :pr nil)))
-              ((symbol-function 'magit-dash-gh-pr-dashboard--find-local-path)
+              ((symbol-function 'magit-dash-pr-dashboard--find-local-path)
                (lambda (_) "/tmp/myrepo"))
               ((symbol-function 'file-directory-p) (lambda (_) nil))
               ((symbol-function 'magit-call-git)
                (lambda (&rest args) (push args git-calls) 0))
               ((symbol-function 'magit-status-setup-buffer)
                (lambda (_) (setq setup-called t))))
-      (let ((res (magit-dash-gh-pr-dashboard-create-worktree nil nil)))
+      (let ((res (magit-dash-pr-dashboard-create-worktree nil nil)))
         (should (equal (expand-file-name "/tmp/myrepo/.wt/pr-42") res))
         (should-not setup-called)
         (should (seq-some (lambda (call)
@@ -645,108 +648,109 @@
                                  (equal (nth 1 call) "add")))
                           git-calls))))))
 
-(ert-deftest magit-dash-gh-pr/dashboard-mode-map-keys ()
-  "magit-dash-gh-pr-dashboard-mode-map uses two-letter combinations for cw, ca, ci and mark keys."
-  (let ((m magit-dash-gh-pr-dashboard-mode-map))
-    (should (eq (lookup-key m (kbd "c w")) #'magit-dash-gh-pr-dashboard-create-worktree))
-    (should (eq (lookup-key m (kbd "c a")) #'magit-dash-gh-pr-dashboard-create-all-worktrees))
-    (should (eq (lookup-key m (kbd "c i")) #'magit-dash-gh-pr-dashboard-fetch-ci))
-    (when (magit-dash-gh-pr-code-review-available-p)
-      (should (eq (lookup-key m (kbd "R"))   #'magit-dash-gh-pr-dashboard-code-review))
-      (should (eq (lookup-key m (kbd "c r")) #'magit-dash-gh-pr-dashboard-code-review)))
-    (should (eq (lookup-key m (kbd "b"))   #'magit-dash-gh-pr-dashboard-open-browser))
-    (should (eq (lookup-key m (kbd "m m")) #'magit-dash-gh-pr-dashboard-toggle-mark))
-    (should (eq (lookup-key m (kbd "m u")) #'magit-dash-gh-pr-dashboard-unmark))
-    (should (eq (lookup-key m (kbd "m c")) #'magit-dash-gh-pr-dashboard-unmark-all))
-    (should (eq (lookup-key m (kbd "m a")) #'magit-dash-gh-pr-dashboard-mark-all))
-    (should (eq (lookup-key m (kbd "SPC")) #'magit-dash-gh-pr-dashboard-toggle-mark))
-    (should (eq (lookup-key m (kbd "*")) #'magit-dash-gh-pr-dashboard-mark-all))
-    (should (eq (lookup-key m (kbd "a")) #'magit-dash-gh-pr-dashboard-create-all-worktrees))))
+(ert-deftest magit-dash-pr/dashboard-mode-map-keys ()
+  "magit-dash-pr-dashboard-mode-map uses two-letter combinations for cw, ca, ci and mark keys."
+  (let ((m magit-dash-pr-dashboard-mode-map))
+    (should (eq (lookup-key m (kbd "c w")) #'magit-dash-pr-dashboard-create-worktree))
+    (should (eq (lookup-key m (kbd "c a")) #'magit-dash-pr-dashboard-create-all-worktrees))
+    (should (eq (lookup-key m (kbd "c i")) #'magit-dash-pr-dashboard-fetch-ci))
+    (when (magit-dash-pr-code-review-available-p)
+      (should (eq (lookup-key m (kbd "R"))   #'magit-dash-pr-dashboard-code-review))
+      (should (eq (lookup-key m (kbd "c r")) #'magit-dash-pr-dashboard-code-review)))
+    (should (eq (lookup-key m (kbd "b"))   #'magit-dash-pr-dashboard-open-browser))
+    (should (eq (lookup-key m (kbd "m m")) #'magit-dash-pr-dashboard-menu))
+    (should (eq (lookup-key m (kbd "m t")) #'magit-dash-pr-dashboard-toggle-mark))
+    (should (eq (lookup-key m (kbd "m u")) #'magit-dash-pr-dashboard-unmark))
+    (should (eq (lookup-key m (kbd "m c")) #'magit-dash-pr-dashboard-unmark-all))
+    (should (eq (lookup-key m (kbd "m a")) #'magit-dash-pr-dashboard-mark-all))
+    (should (eq (lookup-key m (kbd "SPC")) #'magit-dash-pr-dashboard-toggle-mark))
+    (should (eq (lookup-key m (kbd "*")) #'magit-dash-pr-dashboard-mark-all))
+    (should (eq (lookup-key m (kbd "a")) #'magit-dash-pr-dashboard-create-all-worktrees))))
 
-(ert-deftest magit-dash-gh-pr/dashboard-menu-includes-worktree-options ()
-  "magit-dash-gh-pr-dashboard-menu contains create, create-all, review, clean, and mark commands."
-  (let ((layout (get 'magit-dash-gh-pr-dashboard-menu 'transient--layout)))
+(ert-deftest magit-dash-pr/dashboard-menu-includes-worktree-options ()
+  "magit-dash-pr-dashboard-menu contains create, create-all, review, clean, and mark commands."
+  (let ((layout (get 'magit-dash-pr-dashboard-menu 'transient--layout)))
     (should layout)
     (let ((flat (format "%S" layout)))
-      (should (string-match-p "magit-dash-gh-pr-dashboard-code-review" flat))
-      (should (string-match-p "magit-dash-gh-pr-dashboard-create-worktree" flat))
-      (should (string-match-p "magit-dash-gh-pr-dashboard-create-all-worktrees" flat))
-      (should (string-match-p "magit-dash-gh-pr-dashboard-review-worktrees" flat))
-      (should (string-match-p "magit-dash-gh-pr-dashboard-clean-merged-worktrees" flat))
-      (should (string-match-p "magit-dash-gh-pr-dashboard-toggle-mark" flat))
-      (should (string-match-p "magit-dash-gh-pr-dashboard-unmark-all" flat)))))
+      (should (string-match-p "magit-dash-pr-dashboard-code-review" flat))
+      (should (string-match-p "magit-dash-pr-dashboard-create-worktree" flat))
+      (should (string-match-p "magit-dash-pr-dashboard-create-all-worktrees" flat))
+      (should (string-match-p "magit-dash-pr-dashboard-review-worktrees" flat))
+      (should (string-match-p "magit-dash-pr-dashboard-clean-merged-worktrees" flat))
+      (should (string-match-p "magit-dash-pr-dashboard-toggle-mark" flat))
+      (should (string-match-p "magit-dash-pr-dashboard-unmark-all" flat)))))
 
-(ert-deftest magit-dash-gh-pr/dashboard-pr-url-extraction ()
-  "magit-dash-gh-pr-dashboard--pr-url resolves URLs from strings, plists, and alists."
+(ert-deftest magit-dash-pr/dashboard-pr-url-extraction ()
+  "magit-dash-pr-dashboard--pr-url resolves URLs from strings, plists, and alists."
   (should (equal "https://github.com/foo/bar/pull/10"
-                 (magit-dash-gh-pr-dashboard--pr-url "https://github.com/foo/bar/pull/10")))
+                 (magit-dash-pr-dashboard--pr-url "https://github.com/foo/bar/pull/10")))
   ;; Entry with :pr alist having 'url
   (let ((entry '(:number 12 :repo "org/repo" :pr ((url . "https://github.com/org/repo/pull/12")))))
     (should (equal "https://github.com/org/repo/pull/12"
-                   (magit-dash-gh-pr-dashboard--pr-url entry))))
+                   (magit-dash-pr-dashboard--pr-url entry))))
   ;; Entry with :pr plist having :url
   (let ((entry '(:number 15 :repo "org/repo" :pr (:url "https://github.com/org/repo/pull/15"))))
     (should (equal "https://github.com/org/repo/pull/15"
-                   (magit-dash-gh-pr-dashboard--pr-url entry))))
+                   (magit-dash-pr-dashboard--pr-url entry))))
   ;; Entry without explicit url synthesizes from repo and number
   (let ((entry '(:number 20 :repo "myorg/cool-proj" :pr nil)))
     (should (equal "https://github.com/myorg/cool-proj/pull/20"
-                   (magit-dash-gh-pr-dashboard--pr-url entry)))))
+                   (magit-dash-pr-dashboard--pr-url entry)))))
 
-(ert-deftest magit-dash-gh-pr/dashboard-code-review-opens ()
-  "magit-dash-gh-pr-dashboard-code-review passes URL to code-review-start."
+(ert-deftest magit-dash-pr/dashboard-code-review-opens ()
+  "magit-dash-pr-dashboard-code-review passes URL to code-review-start."
   (let ((called-url nil))
     (cl-letf (((symbol-function 'code-review-start)
                (lambda (url) (setq called-url url))))
-      (magit-dash-gh-pr-dashboard-code-review
+      (magit-dash-pr-dashboard-code-review
        '(:number 42 :repo "tychoish/magit-dash" :pr ((url . "https://github.com/tychoish/magit-dash/pull/42"))))
       (should (equal "https://github.com/tychoish/magit-dash/pull/42" called-url)))))
 
-(ert-deftest magit-dash-gh-pr/code-review-requires-url-and-package ()
-  "magit-dash-gh-pr-code-review validates URL and package availability."
-  (should-error (magit-dash-gh-pr-code-review "") :type 'user-error)
-  (should-error (magit-dash-gh-pr-code-review nil) :type 'user-error)
+(ert-deftest magit-dash-pr/code-review-requires-url-and-package ()
+  "magit-dash-pr-code-review validates URL and package availability."
+  (should-error (magit-dash-pr-code-review "") :type 'user-error)
+  (should-error (magit-dash-pr-code-review nil) :type 'user-error)
   (cl-letf (((symbol-function 'fboundp) (lambda (_) nil))
             ((symbol-function 'require) (lambda (&rest _) nil)))
-    (should-error (magit-dash-gh-pr-code-review "https://github.com/o/r/pull/1")
+    (should-error (magit-dash-pr-code-review "https://github.com/o/r/pull/1")
                   :type 'user-error)))
 
-(ert-deftest magit-dash-gh-pr/code-review-conditional-activation ()
+(ert-deftest magit-dash-pr/code-review-conditional-activation ()
   "Keybindings and menu for code-review are only active when package is available."
   (unwind-protect
       (progn
         ;; When unavailable
-        (cl-letf (((symbol-function 'magit-dash-gh-pr-code-review-available-p) (lambda () nil)))
-          (magit-dash-gh-pr-dashboard--setup-code-review-keys)
-          (should-not (lookup-key magit-dash-gh-pr-dashboard-mode-map (kbd "R")))
-          (should-not (lookup-key magit-dash-gh-pr-dashboard-mode-map (kbd "c r"))))
+        (cl-letf (((symbol-function 'magit-dash-pr-code-review-available-p) (lambda () nil)))
+          (magit-dash-pr-dashboard--setup-code-review-keys)
+          (should-not (lookup-key magit-dash-pr-dashboard-mode-map (kbd "R")))
+          (should-not (lookup-key magit-dash-pr-dashboard-mode-map (kbd "c r"))))
         ;; When available
-        (cl-letf (((symbol-function 'magit-dash-gh-pr-code-review-available-p) (lambda () t)))
-          (magit-dash-gh-pr-dashboard--setup-code-review-keys)
-          (should (eq (lookup-key magit-dash-gh-pr-dashboard-mode-map (kbd "R"))
-                      #'magit-dash-gh-pr-dashboard-code-review))
-          (should (eq (lookup-key magit-dash-gh-pr-dashboard-mode-map (kbd "c r"))
-                      #'magit-dash-gh-pr-dashboard-code-review))))
-    (magit-dash-gh-pr-dashboard--setup-code-review-keys)))
+        (cl-letf (((symbol-function 'magit-dash-pr-code-review-available-p) (lambda () t)))
+          (magit-dash-pr-dashboard--setup-code-review-keys)
+          (should (eq (lookup-key magit-dash-pr-dashboard-mode-map (kbd "R"))
+                      #'magit-dash-pr-dashboard-code-review))
+          (should (eq (lookup-key magit-dash-pr-dashboard-mode-map (kbd "c r"))
+                      #'magit-dash-pr-dashboard-code-review))))
+    (magit-dash-pr-dashboard--setup-code-review-keys)))
 
-(ert-deftest magit-dash-gh-pr/dashboard-menu-opens ()
+(ert-deftest magit-dash-pr/dashboard-menu-opens ()
   "The dashboard transient can set up its complete keymap."
   (with-temp-buffer
     (unwind-protect
         (progn
-          (magit-dash-gh-pr-dashboard-menu)
+          (magit-dash-pr-dashboard-menu)
           (should (eq (lookup-key transient--transient-map (kbd "m c"))
-                      #'magit-dash-gh-pr-dashboard-unmark-all)))
+                      #'magit-dash-pr-dashboard-unmark-all)))
       (when transient--prefix (transient-quit-all)))))
 
-(ert-deftest magit-dash-gh-pr/delete-worktree-refuses-on-uncommitted ()
+(ert-deftest magit-dash-pr/delete-worktree-refuses-on-uncommitted ()
   "delete-worktree refuses to remove worktree if uncommitted changes exist."
   (cl-letf (((symbol-function 'magit-dash-worktree-uncommitted-changes-p)
              (lambda (_) t)))
-    (should-error (magit-dash-gh-pr-delete-worktree "/tmp/myrepo/.wt/pr-42" "/tmp/myrepo")
+    (should-error (magit-dash-pr-delete-worktree "/tmp/myrepo/.wt/pr-42" "/tmp/myrepo")
                   :type 'user-error)))
 
-(ert-deftest magit-dash-gh-pr/delete-worktree-removes-clean ()
+(ert-deftest magit-dash-pr/delete-worktree-removes-clean ()
   "delete-worktree removes clean worktree via git worktree remove and prunes."
   (let ((git-calls nil))
     (cl-letf (((symbol-function 'magit-dash-worktree-uncommitted-changes-p)
@@ -756,7 +760,7 @@
                  (when (equal prog "git")
                    (push args git-calls))
                  0)))
-      (should (magit-dash-gh-pr-delete-worktree "/tmp/myrepo/.wt/pr-42" "/tmp/myrepo"))
+      (should (magit-dash-pr-delete-worktree "/tmp/myrepo/.wt/pr-42" "/tmp/myrepo"))
       ;; Check worktree remove call
       (should (seq-some (lambda (args)
                           (and (member "worktree" args)
@@ -769,13 +773,13 @@
                                (member "prune" args)))
                         git-calls)))))
 
-(ert-deftest magit-dash-gh-pr/review-worktrees-prompts-and-renames-mismatched ()
+(ert-deftest magit-dash-pr/review-worktrees-prompts-and-renames-mismatched ()
   "review-worktrees prompts to rename worktree when path does not match PR format."
   (let ((git-calls nil)
         (prompted nil)
         (prs '(((number . 42) (headRefName . "feature-42") (state . "OPEN"))))
         (wts '(((path . "/tmp/myrepo-pr-42") (branch . "feature-42")))))
-    (cl-letf (((symbol-function 'magit-dash-gh-pr--git-worktrees) (lambda (_) wts))
+    (cl-letf (((symbol-function 'magit-dash-pr--git-worktrees) (lambda (_) wts))
               ((symbol-function 'file-directory-p) (lambda (_) t))
               ((symbol-function 'magit-dash-worktree-uncommitted-changes-p) (lambda (_) nil))
               ((symbol-function 'y-or-n-p)
@@ -787,7 +791,7 @@
                  (when (equal prog "git")
                    (push args git-calls))
                  0)))
-      (let ((res (magit-dash-gh-pr-review-worktrees "/tmp/myrepo" t prs)))
+      (let ((res (magit-dash-pr-review-worktrees "/tmp/myrepo" t prs)))
         (should prompted)
         (should (= 1 (plist-get res :renamed)))
         (should (seq-some (lambda (args)
@@ -795,61 +799,61 @@
                                  (member "move" args)))
                           git-calls))))))
 
-(ert-deftest magit-dash-gh-pr/review-worktrees-skips-matching ()
+(ert-deftest magit-dash-pr/review-worktrees-skips-matching ()
   "review-worktrees counts matching worktree without prompt."
   (let ((prompted nil)
         (prs '(((number . 42) (headRefName . "feature-42") (state . "OPEN"))))
         (wts `(((path . ,(expand-file-name "/tmp/myrepo/.wt/pr-42")) (branch . "feature-42")))))
-    (cl-letf (((symbol-function 'magit-dash-gh-pr--git-worktrees) (lambda (_) wts))
+    (cl-letf (((symbol-function 'magit-dash-pr--git-worktrees) (lambda (_) wts))
               ((symbol-function 'file-directory-p) (lambda (_) t))
               ((symbol-function 'y-or-n-p) (lambda (_) (setq prompted t) t)))
-      (let ((res (magit-dash-gh-pr-review-worktrees "/tmp/myrepo" t prs)))
+      (let ((res (magit-dash-pr-review-worktrees "/tmp/myrepo" t prs)))
         (should-not prompted)
         (should (= 1 (plist-get res :matching)))
         (should (= 0 (plist-get res :renamed)))))))
 
-(ert-deftest magit-dash-gh-pr/review-worktrees-skips-merged-with-uncommitted ()
+(ert-deftest magit-dash-pr/review-worktrees-skips-merged-with-uncommitted ()
   "review-worktrees skips merged PR worktree if it has uncommitted changes."
   (let ((deleted nil)
         (prs '(((number . 42) (headRefName . "pr-42") (state . "MERGED"))))
         (wts `(((path . ,(expand-file-name "/tmp/myrepo/.wt/pr-42")) (branch . "pr-42")))))
-    (cl-letf (((symbol-function 'magit-dash-gh-pr--git-worktrees) (lambda (_) wts))
+    (cl-letf (((symbol-function 'magit-dash-pr--git-worktrees) (lambda (_) wts))
               ((symbol-function 'file-directory-p) (lambda (_) t))
               ((symbol-function 'magit-dash-worktree-uncommitted-changes-p) (lambda (_) t))
-              ((symbol-function 'magit-dash-gh-pr-delete-worktree) (lambda (&rest _) (setq deleted t))))
-      (let ((res (magit-dash-gh-pr-review-worktrees "/tmp/myrepo" t prs)))
+              ((symbol-function 'magit-dash-pr-delete-worktree) (lambda (&rest _) (setq deleted t))))
+      (let ((res (magit-dash-pr-review-worktrees "/tmp/myrepo" t prs)))
         (should-not deleted)
         (should (= 1 (plist-get res :skipped)))
         (should (= 0 (plist-get res :deleted)))))))
 
-(ert-deftest magit-dash-gh-pr/review-worktrees-deletes-merged-clean ()
+(ert-deftest magit-dash-pr/review-worktrees-deletes-merged-clean ()
   "review-worktrees deletes clean worktree for merged PR."
   (let ((deleted nil)
         (prs '(((number . 42) (headRefName . "pr-42") (state . "MERGED"))))
         (wts `(((path . ,(expand-file-name "/tmp/myrepo/.wt/pr-42")) (branch . "pr-42")))))
-    (cl-letf (((symbol-function 'magit-dash-gh-pr--git-worktrees) (lambda (_) wts))
+    (cl-letf (((symbol-function 'magit-dash-pr--git-worktrees) (lambda (_) wts))
               ((symbol-function 'file-directory-p) (lambda (_) t))
               ((symbol-function 'magit-dash-worktree-uncommitted-changes-p) (lambda (_) nil))
               ((symbol-function 'y-or-n-p) (lambda (_) t))
-              ((symbol-function 'magit-dash-gh-pr-delete-worktree) (lambda (&rest _) (setq deleted t))))
-      (let ((res (magit-dash-gh-pr-review-worktrees "/tmp/myrepo" t prs)))
+              ((symbol-function 'magit-dash-pr-delete-worktree) (lambda (&rest _) (setq deleted t))))
+      (let ((res (magit-dash-pr-review-worktrees "/tmp/myrepo" t prs)))
         (should deleted)
         (should (= 1 (plist-get res :deleted)))))))
 
-(ert-deftest magit-dash-gh-pr/pr-merged-p-handles-null-and-cases ()
-  "magit-dash-gh-pr--pr-merged-p handles :null mergedAt, lowercase state, and open PRs."
+(ert-deftest magit-dash-pr/pr-merged-p-handles-null-and-cases ()
+  "magit-dash-pr--pr-merged-p handles :null mergedAt, lowercase state, and open PRs."
   ;; Open PR with :null mergedAt must NOT be considered merged
-  (should-not (magit-dash-gh-pr--pr-merged-p '((number . 1) (state . "OPEN") (mergedAt . :null))))
+  (should-not (magit-dash-pr--pr-merged-p '((number . 1) (state . "OPEN") (mergedAt . :null))))
   ;; Closed PR with :null mergedAt and no gh fallback is not merged
   (cl-letf (((symbol-function 'executable-find) (lambda (_) nil)))
-    (should-not (magit-dash-gh-pr--pr-merged-p '((number . 2) (state . "CLOSED") (mergedAt . :null)) "o/r" 2)))
+    (should-not (magit-dash-pr--pr-merged-p '((number . 2) (state . "CLOSED") (mergedAt . :null)) "o/r" 2)))
   ;; Merged PR by state (uppercase or lowercase)
-  (should (magit-dash-gh-pr--pr-merged-p '((number . 3) (state . "MERGED") (mergedAt . :null))))
-  (should (magit-dash-gh-pr--pr-merged-p '((number . 4) (state . "merged"))))
+  (should (magit-dash-pr--pr-merged-p '((number . 3) (state . "MERGED") (mergedAt . :null))))
+  (should (magit-dash-pr--pr-merged-p '((number . 4) (state . "merged"))))
   ;; Merged PR by mergedAt timestamp even when state is "closed" (from gh search prs)
-  (should (magit-dash-gh-pr--pr-merged-p '((number . 5) (state . "closed") (mergedAt . "2026-01-01T00:00:00Z")))))
+  (should (magit-dash-pr--pr-merged-p '((number . 5) (state . "closed") (mergedAt . "2026-01-01T00:00:00Z")))))
 
-(ert-deftest magit-dash-gh-pr/clean-merged-worktrees ()
+(ert-deftest magit-dash-pr/clean-merged-worktrees ()
   "clean-merged-worktrees deletes clean merged worktrees and skips dirty ones."
   (let ((deleted-paths nil)
         (prs '(((number . 1) (headRefName . "pr-1") (state . "MERGED"))
@@ -858,196 +862,196 @@
         (wts `(((path . ,(expand-file-name "/tmp/myrepo/.wt/pr-1")) (branch . "pr-1"))
                ((path . ,(expand-file-name "/tmp/myrepo/.wt/pr-2")) (branch . "pr-2"))
                ((path . ,(expand-file-name "/tmp/myrepo/.wt/pr-3")) (branch . "pr-3")))))
-    (cl-letf (((symbol-function 'magit-dash-gh-pr--fetch-repo-prs) (lambda (&rest _) prs))
-              ((symbol-function 'magit-dash-gh-pr--git-worktrees) (lambda (_) wts))
+    (cl-letf (((symbol-function 'magit-dash-pr--fetch-repo-prs) (lambda (&rest _) prs))
+              ((symbol-function 'magit-dash-pr--git-worktrees) (lambda (_) wts))
               ((symbol-function 'file-directory-p) (lambda (_) t))
               ((symbol-function 'magit-dash-worktree-uncommitted-changes-p)
                (lambda (path) (string-suffix-p "pr-2" path)))
               ((symbol-function 'y-or-n-p) (lambda (_) t))
-              ((symbol-function 'magit-dash-gh-pr-delete-worktree)
+              ((symbol-function 'magit-dash-pr-delete-worktree)
                (lambda (path &optional _) (push path deleted-paths))))
-      (let ((res (magit-dash-gh-pr-clean-merged-worktrees "/tmp/myrepo" t)))
+      (let ((res (magit-dash-pr-clean-merged-worktrees "/tmp/myrepo" t)))
         (should (equal (list (expand-file-name "/tmp/myrepo/.wt/pr-1")) deleted-paths))
         (should (= 1 (plist-get res :deleted)))
         (should (= 1 (plist-get res :skipped)))))))
 
-(ert-deftest magit-dash-gh-pr/clean-merged-protects-open-pr-on-reused-branch ()
+(ert-deftest magit-dash-pr/clean-merged-protects-open-pr-on-reused-branch ()
   "An open PR protects its worktree even when an older PR was merged."
   (let ((prs '(((number . 1) (headRefName . "shared") (state . "MERGED"))
                ((number . 2) (headRefName . "shared") (state . "OPEN"))))
         (wts '(((path . "/tmp/wt") (branch . "shared"))))
         deleted)
-    (cl-letf (((symbol-function 'magit-dash-gh-pr--fetch-repo-prs) (lambda (&rest _) prs))
-              ((symbol-function 'magit-dash-gh-pr--git-worktrees) (lambda (_) wts))
+    (cl-letf (((symbol-function 'magit-dash-pr--fetch-repo-prs) (lambda (&rest _) prs))
+              ((symbol-function 'magit-dash-pr--git-worktrees) (lambda (_) wts))
               ((symbol-function 'file-directory-p) (lambda (_) t))
-              ((symbol-function 'magit-dash-gh-pr-delete-worktree) (lambda (&rest _) (setq deleted t))))
-      (magit-dash-gh-pr-clean-merged-worktrees "/tmp/repo" nil)
+              ((symbol-function 'magit-dash-pr-delete-worktree) (lambda (&rest _) (setq deleted t))))
+      (magit-dash-pr-clean-merged-worktrees "/tmp/repo" nil)
       (should-not deleted))))
 
-(ert-deftest magit-dash-gh-pr/clean-merged-looks-up-older-numbered-worktrees ()
+(ert-deftest magit-dash-pr/clean-merged-looks-up-older-numbered-worktrees ()
   "Look up numbered worktrees absent from the recent PR list."
   (let ((wts '(((path . "/tmp/repo/.wt/pr-42") (branch . "old-branch"))
                ((path . "/tmp/repo/.wt/pr-43") (branch . "unknown"))))
         deleted)
-    (cl-letf (((symbol-function 'magit-dash-gh-pr--fetch-repo-prs) (lambda (&rest _) nil))
-              ((symbol-function 'magit-dash-gh-pr--fetch-pr)
+    (cl-letf (((symbol-function 'magit-dash-pr--fetch-repo-prs) (lambda (&rest _) nil))
+              ((symbol-function 'magit-dash-pr--fetch-pr)
                (lambda (_repo number _dir)
                  (when (= number 42) '((number . 42) (state . "MERGED")))))
-              ((symbol-function 'magit-dash-gh-pr--git-worktrees) (lambda (_) wts))
+              ((symbol-function 'magit-dash-pr--git-worktrees) (lambda (_) wts))
               ((symbol-function 'file-directory-p) (lambda (_) t))
               ((symbol-function 'magit-dash-worktree-uncommitted-changes-p) (lambda (_) nil))
-              ((symbol-function 'magit-dash-gh-pr-delete-worktree)
+              ((symbol-function 'magit-dash-pr-delete-worktree)
                (lambda (path &optional _) (push path deleted))))
-      (let ((counts (magit-dash-gh-pr-clean-merged-worktrees "/tmp/repo" nil)))
+      (let ((counts (magit-dash-pr-clean-merged-worktrees "/tmp/repo" nil)))
         (should (equal deleted '("/tmp/repo/.wt/pr-42")))
         (should (= 1 (plist-get counts :deleted)))
         (should (= 1 (plist-get counts :skipped)))))))
 
-(ert-deftest magit-dash-gh-pr/clean-merged-prefers-number-to-old-branch-match ()
+(ert-deftest magit-dash-pr/clean-merged-prefers-number-to-old-branch-match ()
   "A numbered worktree is not attributed to an unrelated closed PR on its branch."
   (let ((prs '(((number . 1) (headRefName . "shared") (state . "MERGED"))))
         (wts '(((path . "/tmp/repo/.wt/pr-42") (branch . "shared"))))
         deleted)
-    (cl-letf (((symbol-function 'magit-dash-gh-pr--fetch-repo-prs) (lambda (&rest _) prs))
-              ((symbol-function 'magit-dash-gh-pr--fetch-pr)
+    (cl-letf (((symbol-function 'magit-dash-pr--fetch-repo-prs) (lambda (&rest _) prs))
+              ((symbol-function 'magit-dash-pr--fetch-pr)
                (lambda (_repo number _dir) `((number . ,number) (state . "CLOSED"))))
-              ((symbol-function 'magit-dash-gh-pr--git-worktrees) (lambda (_) wts))
-              ((symbol-function 'magit-dash-gh-pr--pr-merged-p)
+              ((symbol-function 'magit-dash-pr--git-worktrees) (lambda (_) wts))
+              ((symbol-function 'magit-dash-pr--pr-merged-p)
                (lambda (pr &rest _) (equal (alist-get 'state pr) "MERGED")))
               ((symbol-function 'file-directory-p) (lambda (_) t))
-              ((symbol-function 'magit-dash-gh-pr-delete-worktree) (lambda (&rest _) (setq deleted t))))
-      (magit-dash-gh-pr-clean-merged-worktrees "/tmp/repo" nil)
+              ((symbol-function 'magit-dash-pr-delete-worktree) (lambda (&rest _) (setq deleted t))))
+      (magit-dash-pr-clean-merged-worktrees "/tmp/repo" nil)
       (should-not deleted))))
 
-(ert-deftest magit-dash-gh-pr/clean-entry-skips-open-pr ()
+(ert-deftest magit-dash-pr/clean-entry-skips-open-pr ()
   "Marked open PRs are never deleted by merged cleanup."
   (let ((entry '(:number 2 :repo "o/r" :pr ((number . 2) (state . "OPEN"))))
         deleted)
-    (cl-letf (((symbol-function 'magit-dash-gh-pr-dashboard--find-local-path) (lambda (_) "/tmp/repo"))
-              ((symbol-function 'magit-dash-gh-pr--find-existing-worktree) (lambda (&rest _) "/tmp/wt"))
+    (cl-letf (((symbol-function 'magit-dash-pr-dashboard--find-local-path) (lambda (_) "/tmp/repo"))
+              ((symbol-function 'magit-dash-pr--find-existing-worktree) (lambda (&rest _) "/tmp/wt"))
               ((symbol-function 'file-directory-p) (lambda (_) t))
-              ((symbol-function 'magit-dash-gh-pr-delete-worktree) (lambda (&rest _) (setq deleted t))))
-      (should (eq :skipped (magit-dash-gh-pr--clean-worktree-for-entry entry nil)))
+              ((symbol-function 'magit-dash-pr-delete-worktree) (lambda (&rest _) (setq deleted t))))
+      (should (eq :skipped (magit-dash-pr--clean-worktree-for-entry entry nil)))
       (should-not deleted))))
 
-(ert-deftest magit-dash-gh-pr/create-all-worktrees-respects-view-and-confirmation ()
+(ert-deftest magit-dash-pr/create-all-worktrees-respects-view-and-confirmation ()
   "Only view entries without worktrees are proposed and created after confirmation."
   (with-temp-buffer
-    (magit-dash-gh-pr-dashboard-mode)
-    (setq magit-dash-gh-pr-dashboard--filters '(:repo "o/r" :author "@me"))
+    (magit-dash-pr-dashboard-mode)
+    (setq magit-dash-pr-dashboard--filters '(:repo "o/r" :author "@me"))
     (setq tabulated-list-entries
           '(((:repo "o/r" :number 10 :pr ((headRefName . "existing"))) [])
             ((:repo "o/r" :number 20 :pr ((headRefName . "feature"))) [])))
     (let (created proposed (confirm nil)
-          (magit-dash-gh-pr--pending-worktrees (make-hash-table :test #'equal)))
-      (cl-letf (((symbol-function 'magit-dash-gh-pr-dashboard--find-local-path) (lambda (_) "/tmp"))
-                ((symbol-function 'magit-dash-gh-pr--find-existing-worktree)
+          (magit-dash-pr--pending-worktrees (make-hash-table :test #'equal)))
+      (cl-letf (((symbol-function 'magit-dash-pr-dashboard--find-local-path) (lambda (_) "/tmp"))
+                ((symbol-function 'magit-dash-pr--find-existing-worktree)
                  (lambda (_dir number &optional _) (when (= number 10) "/tmp/existing")))
-                ((symbol-function 'magit-dash-gh-pr--fetch-repo-prs)
+                ((symbol-function 'magit-dash-pr--fetch-repo-prs)
                  (lambda (&rest _) (ert-fail "Must not fetch repository PRs")))
-                ((symbol-function 'magit-dash-gh-pr-dashboard-refresh)
+                ((symbol-function 'magit-dash-pr-dashboard-refresh)
                  (lambda () (ert-fail "Must not refresh the view")))
-                ((symbol-function 'magit-dash-gh-pr-dashboard--rebuild-entries) #'ignore)
+                ((symbol-function 'magit-dash-pr-dashboard--rebuild-entries) #'ignore)
                 ((symbol-function 'yes-or-no-p)
                  (lambda (_prompt)
                    (setq proposed (with-current-buffer "*PR worktrees to create*" (buffer-string)))
                    confirm))
-                ((symbol-function 'magit-dash-gh-pr--create-batch-async)
+                ((symbol-function 'magit-dash-pr--create-batch-async)
                  (lambda (targets &rest _)
                    (setq created (mapcar (lambda (target) (plist-get (car target) :number)) targets)))))
-        (magit-dash-gh-pr-create-all-worktrees)
+        (magit-dash-pr-create-all-worktrees)
         (should-not created)
         (should (string-match-p "o/r #20  feature" proposed))
         (should-not (string-match-p "o/r #10" proposed))
         (setq confirm t)
-        (let ((result (magit-dash-gh-pr-dashboard-create-all-worktrees)))
+        (let ((result (magit-dash-pr-dashboard-create-all-worktrees)))
           (should (equal created '(20)))
           (should (= 1 (plist-get result :queued)))
           (should (= 1 (plist-get result :existing))))))))
 
-(ert-deftest magit-dash-gh-pr/batch-creates-after-fetch-and-clears-pending ()
+(ert-deftest magit-dash-pr/batch-creates-after-fetch-and-clears-pending ()
   (let* ((entry '(:repo "o/r" :number 20 :pr ((headRefName . "feature"))))
-         (magit-dash-gh-pr--pending-worktrees (make-hash-table :test #'equal))
+         (magit-dash-pr--pending-worktrees (make-hash-table :test #'equal))
          calls callback)
-    (puthash '("o/r" . 20) t magit-dash-gh-pr--pending-worktrees)
-    (cl-letf (((symbol-function 'magit-dash-gh-pr-dashboard--find-local-path) (lambda (_) "/tmp"))
-              ((symbol-function 'magit-dash-gh-pr--find-existing-worktree) (lambda (&rest _) nil))
-              ((symbol-function 'magit-dash-gh-pr-dashboard--rebuild-entries) #'ignore)
-              ((symbol-function 'magit-dash-gh-pr--compute-worktree-path) (lambda (&rest _) "/tmp/pr-20"))
+    (puthash '("o/r" . 20) t magit-dash-pr--pending-worktrees)
+    (cl-letf (((symbol-function 'magit-dash-pr-dashboard--find-local-path) (lambda (_) "/tmp"))
+              ((symbol-function 'magit-dash-pr--find-existing-worktree) (lambda (&rest _) nil))
+              ((symbol-function 'magit-dash-pr-dashboard--rebuild-entries) #'ignore)
+              ((symbol-function 'magit-dash-pr--compute-worktree-path) (lambda (&rest _) "/tmp/pr-20"))
               ((symbol-function 'magit-dash-worktree-symlink-worktree) #'ignore)
-              ((symbol-function 'magit-dash-gh-pr--run-git-async)
+              ((symbol-function 'magit-dash-pr--run-git-async)
                (lambda (_dir args cb) (push args calls) (setq callback cb))))
-      (magit-dash-gh-pr--create-batch-async (list (cons entry "feature")) (current-buffer) 0 0)
+      (magit-dash-pr--create-batch-async (list (cons entry "feature")) (current-buffer) 0 0)
       (should (equal (caar calls) "fetch"))
-      (should (gethash '("o/r" . 20) magit-dash-gh-pr--pending-worktrees))
+      (should (gethash '("o/r" . 20) magit-dash-pr--pending-worktrees))
       (funcall callback 0 "")
       (should (equal (car calls) '("worktree" "add" "/tmp/pr-20" "feature")))
       (funcall callback 0 "")
-      (should-not (gethash '("o/r" . 20) magit-dash-gh-pr--pending-worktrees)))))
+      (should-not (gethash '("o/r" . 20) magit-dash-pr--pending-worktrees)))))
 
-(ert-deftest magit-dash-gh-pr/batch-fetch-failure-does-not-add-worktree ()
-  (let ((magit-dash-gh-pr--pending-worktrees (make-hash-table :test #'equal))
+(ert-deftest magit-dash-pr/batch-fetch-failure-does-not-add-worktree ()
+  (let ((magit-dash-pr--pending-worktrees (make-hash-table :test #'equal))
         calls callback)
-    (puthash '("o/r" . 20) t magit-dash-gh-pr--pending-worktrees)
-    (cl-letf (((symbol-function 'magit-dash-gh-pr-dashboard--find-local-path) (lambda (_) "/tmp"))
-              ((symbol-function 'magit-dash-gh-pr--find-existing-worktree) (lambda (&rest _) nil))
-              ((symbol-function 'magit-dash-gh-pr-dashboard--rebuild-entries) #'ignore)
-              ((symbol-function 'magit-dash-gh-pr--run-git-async)
+    (puthash '("o/r" . 20) t magit-dash-pr--pending-worktrees)
+    (cl-letf (((symbol-function 'magit-dash-pr-dashboard--find-local-path) (lambda (_) "/tmp"))
+              ((symbol-function 'magit-dash-pr--find-existing-worktree) (lambda (&rest _) nil))
+              ((symbol-function 'magit-dash-pr-dashboard--rebuild-entries) #'ignore)
+              ((symbol-function 'magit-dash-pr--run-git-async)
                (lambda (_dir args cb) (push args calls) (setq callback cb))))
-      (magit-dash-gh-pr--create-batch-async
+      (magit-dash-pr--create-batch-async
        (list (cons '(:repo "o/r" :number 20) "feature")) (current-buffer) 0 0)
       (funcall callback 1 "fetch failed")
       (should (= 1 (length calls)))
-      (should-not (gethash '("o/r" . 20) magit-dash-gh-pr--pending-worktrees)))))
+      (should-not (gethash '("o/r" . 20) magit-dash-pr--pending-worktrees)))))
 
-(ert-deftest magit-dash-gh-pr/fetch-pr-uses-account-aware-runner ()
+(ert-deftest magit-dash-pr/fetch-pr-uses-account-aware-runner ()
   (let (called)
     (cl-letf (((symbol-function 'executable-find) (lambda (_) t))
               ((symbol-function 'magit-dash-gh--call-process)
                (lambda (args dir)
                  (setq called (list args dir))
                  '(0 . "{\"number\":42,\"state\":\"MERGED\"}"))))
-      (should (equal (alist-get 'number (magit-dash-gh-pr--fetch-pr "o/r" 42 "/tmp/")) 42))
+      (should (equal (alist-get 'number (magit-dash-pr--fetch-pr "o/r" 42 "/tmp/")) 42))
       (should (equal (cadr called) "/tmp/"))
       (should (equal (seq-take (car called) 3) '("pr" "view" "42"))))))
 
-(ert-deftest magit-dash-gh-pr/create-all-worktrees-requires-dashboard ()
+(ert-deftest magit-dash-pr/create-all-worktrees-requires-dashboard ()
   (with-temp-buffer
-    (should-error (magit-dash-gh-pr-create-all-worktrees) :type 'user-error)))
+    (should-error (magit-dash-pr-create-all-worktrees) :type 'user-error)))
 
-(ert-deftest magit-dash-gh-pr/match-worktree-to-pr ()
+(ert-deftest magit-dash-pr/match-worktree-to-pr ()
   "Test matching worktrees to pull requests by branch and directory."
   (let ((prs '(((number . 10) (headRefName . "feat/login"))
                ((number . 20) (headRefName . "fix-bug"))
                ((number . 30) (headRefName . "other")))))
     (cl-letf (((symbol-function 'file-directory-p) (lambda (_) t)))
       ;; Match by branch
-      (let ((matched (magit-dash-gh-pr--match-worktree-to-pr
+      (let ((matched (magit-dash-pr--match-worktree-to-pr
                       '((path . "/tmp/repo/.wt/custom") (branch . "feat/login"))
                       prs)))
         (should (= 10 (alist-get 'number matched))))
 
       ;; Match by directory name pr-NUM
-      (let ((matched (magit-dash-gh-pr--match-worktree-to-pr
+      (let ((matched (magit-dash-pr--match-worktree-to-pr
                       '((path . "/tmp/repo/.wt/pr-20") (branch . "detached"))
                       prs)))
         (should (= 20 (alist-get 'number matched))))
 
       ;; No match
-      (let ((matched (magit-dash-gh-pr--match-worktree-to-pr
+      (let ((matched (magit-dash-pr--match-worktree-to-pr
                       '((path . "/tmp/repo/.wt/random") (branch . "unknown"))
                       prs)))
         (should-not matched)))))
 
-(ert-deftest magit-dash-gh-pr/path-equal-p ()
+(ert-deftest magit-dash-pr/path-equal-p ()
   "Test path equality comparisons."
-  (should (magit-dash-gh-pr--path-equal-p "/tmp/foo/bar" "/tmp/foo/bar/"))
-  (should (magit-dash-gh-pr--path-equal-p "/tmp/foo/bar/" "/tmp/foo/bar"))
-  (should-not (magit-dash-gh-pr--path-equal-p "/tmp/foo/bar" "/tmp/foo/baz"))
-  (should-not (magit-dash-gh-pr--path-equal-p nil "/tmp/foo/bar"))
-  (should-not (magit-dash-gh-pr--path-equal-p "/tmp/foo/bar" nil)))
+  (should (magit-dash-pr--path-equal-p "/tmp/foo/bar" "/tmp/foo/bar/"))
+  (should (magit-dash-pr--path-equal-p "/tmp/foo/bar/" "/tmp/foo/bar"))
+  (should-not (magit-dash-pr--path-equal-p "/tmp/foo/bar" "/tmp/foo/baz"))
+  (should-not (magit-dash-pr--path-equal-p nil "/tmp/foo/bar"))
+  (should-not (magit-dash-pr--path-equal-p "/tmp/foo/bar" nil)))
 
-(ert-deftest magit-dash-gh-pr/move-worktree ()
+(ert-deftest magit-dash-pr/move-worktree ()
   "Test git worktree move invocation and symlink updating."
   (let ((git-calls nil)
         (symlinked nil))
@@ -1058,127 +1062,196 @@
               ((symbol-function 'file-exists-p) (lambda (_) nil))
               ((symbol-function 'magit-dash-worktree-symlink-worktree)
                (lambda (wt-dir repo-dir) (setq symlinked (list wt-dir repo-dir)))))
-      (let ((res (magit-dash-gh-pr--move-worktree "/tmp/repo" "/tmp/repo/old" "/tmp/repo/new")))
+      (let ((res (magit-dash-pr--move-worktree "/tmp/repo" "/tmp/repo/old" "/tmp/repo/new")))
         (should res)
         (should (equal (list (expand-file-name "/tmp/repo/new") (expand-file-name "/tmp/repo"))
                        symlinked))
         (should (seq-some (lambda (call) (and (member "worktree" call) (member "move" call)))
                           git-calls))))))
 
-(ert-deftest magit-dash-gh-pr/dashboard-create-worktree-renames-mismatched ()
+(ert-deftest magit-dash-pr/dashboard-create-worktree-renames-mismatched ()
   "dashboard-create-worktree prompts and renames existing worktree at non-matching path."
   (let* ((entry '(:number 42 :repo "org/myrepo" :pr ((number . 42) (headRefName . "feature"))))
          (moved nil)
          (prompted nil))
-    (cl-letf (((symbol-function 'magit-dash-gh-pr-dashboard--find-local-path)
+    (cl-letf (((symbol-function 'magit-dash-pr-dashboard--find-local-path)
                (lambda (_) "/tmp/myrepo"))
               ((symbol-function 'file-directory-p) (lambda (_) t))
-              ((symbol-function 'magit-dash-gh-pr--find-existing-worktree)
+              ((symbol-function 'magit-dash-pr--find-existing-worktree)
                (lambda (&rest _) "/tmp/myrepo/other-dir"))
               ((symbol-function 'y-or-n-p)
                (lambda (_) (setq prompted t) t))
-              ((symbol-function 'magit-dash-gh-pr--move-worktree)
+              ((symbol-function 'magit-dash-pr--move-worktree)
                (lambda (_repo old new) (setq moved (list old new)) t)))
-      (let ((res (magit-dash-gh-pr-dashboard-create-worktree entry nil)))
+      (let ((res (magit-dash-pr-dashboard-create-worktree entry nil)))
         (should prompted)
         (should (equal (list (expand-file-name "/tmp/myrepo/other-dir")
                              (expand-file-name "/tmp/myrepo/.wt/pr-42"))
                        moved))
         (should (equal (expand-file-name "/tmp/myrepo/.wt/pr-42") res))))))
 
-(ert-deftest magit-dash-gh-pr/dashboard-review-and-clean-commands ()
+(ert-deftest magit-dash-pr/dashboard-review-and-clean-commands ()
   "Test dashboard interactive wrappers for review and clean worktrees."
   (let ((reviewed nil)
         (cleaned nil)
         (entry '(:number 1 :repo "org/myrepo")))
-    (cl-letf (((symbol-function 'magit-dash-gh-pr-dashboard--entry-at-point)
+    (cl-letf (((symbol-function 'magit-dash-pr-dashboard--entry-at-point)
                (lambda () entry))
-              ((symbol-function 'magit-dash-gh-pr-dashboard--find-local-path)
+              ((symbol-function 'magit-dash-pr-dashboard--find-local-path)
                (lambda (_) "/tmp/myrepo"))
-              ((symbol-function 'magit-dash-gh-pr-review-worktrees)
+              ((symbol-function 'magit-dash-pr-review-worktrees)
                (lambda (path prompt) (setq reviewed (list path prompt))))
-              ((symbol-function 'magit-dash-gh-pr-clean-merged-worktrees)
+              ((symbol-function 'magit-dash-pr-clean-merged-worktrees)
                (lambda (path prompt) (setq cleaned (list path prompt))))
-              ((symbol-function 'magit-dash-gh-pr-dashboard-refresh) #'ignore))
-      (magit-dash-gh-pr-dashboard-review-worktrees)
+              ((symbol-function 'magit-dash-pr-dashboard-refresh) #'ignore))
+      (magit-dash-pr-dashboard-review-worktrees)
       (should (equal (list "/tmp/myrepo" t) reviewed))
 
-      (magit-dash-gh-pr-dashboard-clean-merged-worktrees)
+      (magit-dash-pr-dashboard-clean-merged-worktrees)
       (should (equal (list "/tmp/myrepo" t) cleaned)))))
 
-(ert-deftest magit-dash-gh-pr/dashboard-clean-selected-merged-pr ()
+(ert-deftest magit-dash-pr/dashboard-clean-selected-merged-pr ()
   "When the selected PR at point is merged and has an existing worktree, clean-merged-worktrees cleans it directly."
   (let ((cleaned-entry nil)
         (entry '(:number 42 :repo "org/myrepo" :pr ((number . 42) (state . "MERGED")))))
-    (cl-letf (((symbol-function 'magit-dash-gh-pr-dashboard--entry-at-point)
+    (cl-letf (((symbol-function 'magit-dash-pr-dashboard--entry-at-point)
                (lambda () entry))
-              ((symbol-function 'magit-dash-gh-pr-dashboard--find-local-path)
+              ((symbol-function 'magit-dash-pr-dashboard--find-local-path)
                (lambda (_) "/tmp/myrepo"))
-              ((symbol-function 'magit-dash-gh-pr-dashboard--worktree-exists-p)
+              ((symbol-function 'magit-dash-pr-dashboard--worktree-exists-p)
                (lambda (_) t))
-              ((symbol-function 'magit-dash-gh-pr--clean-worktree-for-entry)
+              ((symbol-function 'magit-dash-pr--clean-worktree-for-entry)
                (lambda (e prompt) (setq cleaned-entry (list e prompt)) :deleted))
-              ((symbol-function 'magit-dash-gh-pr-dashboard-refresh) #'ignore))
-      (magit-dash-gh-pr-dashboard-clean-merged-worktrees)
+              ((symbol-function 'magit-dash-pr-dashboard-refresh) #'ignore))
+      (magit-dash-pr-dashboard-clean-merged-worktrees)
       (should (equal (list entry t) cleaned-entry)))))
 
-(ert-deftest magit-dash-gh-pr/mark-and-bulk-operations ()
+(ert-deftest magit-dash-pr/mark-and-bulk-operations ()
   "Test marking, unmarking, mark-all, unmark-all, and bulk create/clean worktree operations."
   (with-temp-buffer
-    (magit-dash-gh-pr-dashboard-mode)
+    (magit-dash-pr-dashboard-mode)
     (let* ((pr1 '((number . 10) (title . "First PR") (updatedAt . "") (comments . 0)))
            (pr2 '((number . 20) (title . "Second PR") (updatedAt . "") (comments . 0)))
-           (e1 (magit-dash-gh-pr-dashboard--build-entry pr1 "org/repo1"))
-           (e2 (magit-dash-gh-pr-dashboard--build-entry pr2 "org/repo2")))
+           (e1 (magit-dash-pr-dashboard--build-entry pr1 "org/repo1"))
+           (e2 (magit-dash-pr-dashboard--build-entry pr2 "org/repo2")))
       (setq tabulated-list-entries (list e1 e2))
       (tabulated-list-print t)
       (goto-char (point-min))
       ;; Toggle mark on first entry
-      (magit-dash-gh-pr-dashboard-toggle-mark)
-      (should (equal '(("org/repo1" . 10)) magit-dash-gh-pr-dashboard--marked-entries))
+      (magit-dash-pr-dashboard-toggle-mark)
+      (should (equal '(("org/repo1" . 10)) magit-dash-pr-dashboard--marked-entries))
       ;; Verify visual indicator "*" on PR# column (index 1)
       (should (string-prefix-p "*" (substring-no-properties (aref (cadr (car tabulated-list-entries)) 1))))
       ;; Mark all
-      (magit-dash-gh-pr-dashboard-mark-all)
-      (should (= 2 (length magit-dash-gh-pr-dashboard--marked-entries)))
+      (magit-dash-pr-dashboard-mark-all)
+      (should (= 2 (length magit-dash-pr-dashboard--marked-entries)))
       ;; Bulk create worktrees for marked PRs
       (let ((created-nums nil))
-        (cl-letf (((symbol-function 'magit-dash-gh-pr--create-worktree-for-entry)
+        (cl-letf (((symbol-function 'magit-dash-pr--create-worktree-for-entry)
                    (lambda (entry &optional _)
                      (push (plist-get entry :number) created-nums)
                      "/tmp/wt")))
-          (magit-dash-gh-pr-dashboard-create-worktree)
+          (magit-dash-pr-dashboard-create-worktree)
           (should (equal '(20 10) created-nums))
           ;; Marks are cleared after bulk operation
-          (should (null magit-dash-gh-pr-dashboard--marked-entries))))
+          (should (null magit-dash-pr-dashboard--marked-entries))))
       ;; Mark all again and test bulk clean
-      (magit-dash-gh-pr-dashboard-mark-all)
+      (magit-dash-pr-dashboard-mark-all)
       (let ((cleaned-nums nil))
-        (cl-letf (((symbol-function 'magit-dash-gh-pr--clean-worktree-for-entry)
+        (cl-letf (((symbol-function 'magit-dash-pr--clean-worktree-for-entry)
                    (lambda (entry &optional _)
                      (push (plist-get entry :number) cleaned-nums)
                      :deleted)))
-          (magit-dash-gh-pr-dashboard-clean-merged-worktrees)
+          (magit-dash-pr-dashboard-clean-merged-worktrees)
           (should (equal '(20 10) cleaned-nums))
-          (should (null magit-dash-gh-pr-dashboard--marked-entries)))))))
+          (should (null magit-dash-pr-dashboard--marked-entries)))))))
 
-(ert-deftest magit-dash-gh-pr/tracking-cache-roundtrip ()
-  (let ((magit-dash-gh-pr--tracking-cache (make-hash-table :test #'equal))
+(ert-deftest magit-dash-pr/tracking-cache-roundtrip ()
+  (let ((magit-dash-pr--tracking-cache (make-hash-table :test #'equal))
         (pr (list :number 3 :repo "o/r" :bucket 'ready :threads-open 0
                   :approvals 1 :failing nil :stack-parent 2 :ticket "FND-1")))
-    (let ((tr (plist-get (magit-dash-gh-pr-attach-tracking pr) :tracking)))
+    (let ((tr (plist-get (magit-dash-pr-attach-tracking pr) :tracking)))
       (should (eq 'new (plist-get tr :delta-type)))
       (should (equal "ready to merge" (plist-get tr :action-summary)))
       (should (= 2 (plist-get tr :stack-parent)))
       (should (equal "FND-1" (plist-get tr :ticket))))
-    (should (zerop (hash-table-count magit-dash-gh-pr--tracking-cache)))
-    (magit-dash-gh-pr-commit-tracking (list pr))
-    (should (equal '(:bucket ready) (list :bucket (plist-get (gethash "o/r#3" magit-dash-gh-pr--tracking-cache) :bucket))))
-    (let ((tr (plist-get (magit-dash-gh-pr-attach-tracking
+    (should (zerop (hash-table-count magit-dash-pr--tracking-cache)))
+    (magit-dash-pr-commit-tracking (list pr))
+    (should (equal '(:bucket ready) (list :bucket (plist-get (gethash "o/r#3" magit-dash-pr--tracking-cache) :bucket))))
+    (let ((tr (plist-get (magit-dash-pr-attach-tracking
                           (plist-put (copy-sequence pr) :bucket 'blocked))
                          :tracking)))
       (should (eq 'bucket-changed (plist-get tr :delta-type)))
       (should (eq 'ready (plist-get tr :previous-bucket))))))
 
-(provide 'test-magit-dash-gh-pr)
-;;; test-magit-dash-gh-pr.el ends here
+;;;; author/base columns, CI filter, limit, bindings
+
+(ert-deftest magit-dash-pr/author-and-base-columns ()
+  "Author shows the login; Base is off by default and shows the target branch."
+  (let ((magit-dash-pr-columns (copy-tree magit-dash-pr--default-columns)))
+    (should (magit-dash-pr--column-enabled-p 'author))
+    (should-not (magit-dash-pr--column-enabled-p 'base))
+    (setf (alist-get 'base magit-dash-pr-columns) t)
+    (let* ((pr '((number . 7) (title . "t") (author . ((login . "alice")))
+                 (baseRefName . "main")))
+           (cells (cadr (magit-dash-pr-dashboard--build-entry pr "o/r")))
+           (cols (magit-dash-pr--active-columns)))
+      (should (equal "alice" (aref cells (seq-position cols 'author))))
+      (should (equal "main" (aref cells (seq-position cols 'base)))))))
+
+(ert-deftest magit-dash-pr/author-column-defaults-when-missing-from-persisted ()
+  "A persisted alist lacking `author' still falls back to the default."
+  (let ((magit-dash-pr-columns '((repo . t))))
+    (should (magit-dash-pr--column-enabled-p 'author))
+    (should-not (magit-dash-pr--column-enabled-p 'base))))
+
+(ert-deftest magit-dash-pr/build-args-includes-limit ()
+  "Both listing forms pass --limit, defaulting to the custom variable."
+  (let ((magit-dash-pr-fetch-limit 100))
+    (dolist (filters '((:state "open" :repo "o/r") (:state "open")))
+      (let ((args (magit-dash-pr-dashboard--build-args filters)))
+        (should (equal "100" (cadr (member "--limit" args)))))
+      (should (equal "250" (cadr (member "--limit"
+                                         (magit-dash-pr-dashboard--build-args filters 250))))))))
+
+(ert-deftest magit-dash-pr/hide-failing-drops-failing-rows ()
+  "With --hide-failing set, only non-failing rows remain."
+  (let* ((mk (lambda (n state)
+               (magit-dash-pr-dashboard--build-entry
+                `((number . ,n) (statusCheckRollup . (((state . ,state)))))
+                "o/r")))
+         (entries (list (funcall mk 1 "SUCCESS") (funcall mk 2 "FAILURE"))))
+    (let ((magit-dash-pr-dashboard--hide-failing nil))
+      (should (= 2 (length (magit-dash-pr-dashboard--apply-ci-filter entries)))))
+    (let ((magit-dash-pr-dashboard--hide-failing t))
+      (should (equal '(1) (seq-map (lambda (e) (plist-get (car e) :number))
+                                   (magit-dash-pr-dashboard--apply-ci-filter entries)))))))
+
+(ert-deftest magit-dash-pr/keymap-mirrors-dash ()
+  "\"m m\" opens the menu, SPC toggles marks, \"f x\" hides failing CI."
+  (should (eq #'magit-dash-pr-dashboard-menu
+              (keymap-lookup magit-dash-pr-dashboard-mode-map "m m")))
+  (should (eq #'magit-dash-pr-dashboard-toggle-mark
+              (keymap-lookup magit-dash-pr-dashboard-mode-map "SPC")))
+  (should (eq #'magit-dash-pr-dashboard-toggle-hide-failing
+              (keymap-lookup magit-dash-pr-dashboard-mode-map "f x"))))
+
+(ert-deftest magit-dash-pr/print-preserves-point-by-key ()
+  "Redraw with rebuilt ids keeps point on the same PR."
+  (with-temp-buffer
+    (magit-dash-pr-dashboard-mode)
+    (let ((mk (lambda ()
+                (seq-map (lambda (n)
+                           (magit-dash-pr-dashboard--build-entry
+                            `((number . ,n) (title . "t")) "o/r"))
+                         '(1 2 3)))))
+      (setq tabulated-list-entries (funcall mk))
+      (tabulated-list-print t)
+      (goto-char (point-min))
+      (forward-line 2)
+      (setq tabulated-list-entries (funcall mk))
+      (magit-dash-pr-dashboard--print)
+      (should (= 3 (plist-get (tabulated-list-get-id) :number))))))
+
+(provide 'test-magit-dash-pr)
+;;; test-magit-dash-pr.el ends here
