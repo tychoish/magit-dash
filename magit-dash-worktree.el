@@ -33,11 +33,11 @@
 (declare-function asq-worktree-generate-name "agent-shell-queue")
 (declare-function asq-worktree-git-repo-root "agent-shell-queue")
 (declare-function annotated-completing-read "annotated-completing-read")
-(declare-function magit-dash-gh-pr-dashboard-open-worktree "magit-dash-gh-pr")
-(declare-function magit-dash-gh-pr-dashboard--current-repo-slug "magit-dash-gh-pr")
-(declare-function magit-dash-gh-pr-create-all-worktrees "magit-dash-gh-pr")
-(declare-function magit-dash-gh-pr-review-worktrees "magit-dash-gh-pr")
-(declare-function magit-dash-gh-pr-clean-merged-worktrees "magit-dash-gh-pr")
+(declare-function magit-dash-pr-dashboard-open-worktree "magit-dash-pr")
+(declare-function magit-dash-pr-dashboard--current-repo-slug "magit-dash-pr")
+(declare-function magit-dash-pr-create-all-worktrees "magit-dash-pr")
+(declare-function magit-dash-pr-review-worktrees "magit-dash-pr")
+(declare-function magit-dash-pr-clean-merged-worktrees "magit-dash-pr")
 
 
 ;; Forward declarations for magit-dash core functions and variables
@@ -336,12 +336,12 @@ Establishes configured symlinks for the new worktree."
 ;;;###autoload
 (defun magit-dash-worktree-from-pr (&optional pr-arg repo-dir)
   "Create and open a git worktree from a GitHub pull request.
-The worktree directory is created using `magit-dash-gh-pr-worktree-path-format',
+The worktree directory is created using `magit-dash-pr-worktree-path-format',
 and the local branch mirrors the remote branch name.
 Interactively, prompts for the PR number or selection in REPO-DIR (defaulting
 to the current repository or repository at point)."
   (interactive)
-  (require 'magit-dash-gh-pr)
+  (require 'magit-dash-pr)
   (let* ((dir (or repo-dir
                   (if (and (fboundp 'magit-dash--repo-at-point-p)
                            (magit-dash--repo-at-point-p))
@@ -349,7 +349,7 @@ to the current repository or repository at point)."
                     (or (magit-toplevel) default-directory))))
          (slug (or (ignore-errors
                      (let ((default-directory dir))
-                       (magit-dash-gh-pr-dashboard--current-repo-slug)))
+                       (magit-dash-pr-dashboard--current-repo-slug)))
                    (file-name-nondirectory (directory-file-name dir))))
          (pr-num
           (cond
@@ -374,7 +374,7 @@ to the current repository or repository at point)."
                   (string-to-number (match-string 1 choice))
                 (user-error "Invalid PR number: %s" choice)))))))
     (let ((entry (list :number pr-num :repo slug :pr nil)))
-      (magit-dash-gh-pr-dashboard-open-worktree entry))))
+      (magit-dash-pr-dashboard-open-worktree entry))))
 
 ;;;###autoload
 (defalias 'magit-dash-worktree-checkout-pr #'magit-dash-worktree-from-pr)
@@ -384,8 +384,8 @@ to the current repository or repository at point)."
   "Confirm and create worktrees for PRs in the current PR dashboard view.
 REPO-DIR is retained for compatibility; the dashboard view determines scope."
   (interactive)
-  (require 'magit-dash-gh-pr)
-  (magit-dash-gh-pr-create-all-worktrees repo-dir))
+  (require 'magit-dash-pr)
+  (magit-dash-pr-create-all-worktrees repo-dir))
 
 ;;;###autoload
 (defun magit-dash-worktree-review-prs (&optional repo-dir)
@@ -394,8 +394,8 @@ Prompts to rename worktrees that do not match the canonical PR naming format,
 and prompts to delete worktrees for merged PRs (refusing if uncommitted changes exist).
 Leaves branches intact until branch pruning."
   (interactive)
-  (require 'magit-dash-gh-pr)
-  (magit-dash-gh-pr-review-worktrees repo-dir t))
+  (require 'magit-dash-pr)
+  (magit-dash-pr-review-worktrees repo-dir t))
 
 ;;;###autoload
 (defun magit-dash-worktree-clean-merged-prs (&optional repo-dir)
@@ -403,8 +403,8 @@ Leaves branches intact until branch pruning."
 Leaves local branches intact until branch pruning.
 Refuses to delete any worktree with uncommitted changes."
   (interactive)
-  (require 'magit-dash-gh-pr)
-  (magit-dash-gh-pr-clean-merged-worktrees repo-dir t))
+  (require 'magit-dash-pr)
+  (magit-dash-pr-clean-merged-worktrees repo-dir t))
 
 (provide 'magit-dash-worktree)
 ;;; magit-dash-worktree.el ends here

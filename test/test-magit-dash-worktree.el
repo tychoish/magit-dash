@@ -177,15 +177,15 @@
       (should-error (magit-dash-worktree-delete) :type 'user-error))))
 
 (ert-deftest magit-dash-worktree/pr-wrappers-delegate ()
-  "Test that magit-dash-worktree PR wrapper commands delegate to magit-dash-gh-pr."
+  "Test that magit-dash-worktree PR wrapper commands delegate to magit-dash-pr."
   (let ((create-called nil)
         (review-called nil)
         (clean-called nil))
-    (cl-letf (((symbol-function 'magit-dash-gh-pr-create-all-worktrees)
+    (cl-letf (((symbol-function 'magit-dash-pr-create-all-worktrees)
                (lambda (&optional dir) (setq create-called dir)))
-              ((symbol-function 'magit-dash-gh-pr-review-worktrees)
+              ((symbol-function 'magit-dash-pr-review-worktrees)
                (lambda (&optional dir prompt prs) (setq review-called (list dir prompt prs))))
-              ((symbol-function 'magit-dash-gh-pr-clean-merged-worktrees)
+              ((symbol-function 'magit-dash-pr-clean-merged-worktrees)
                (lambda (&optional dir prompt) (setq clean-called (list dir prompt)))))
       (magit-dash-worktree-create-for-all-prs "/tmp/test-repo")
       (should (equal "/tmp/test-repo" create-called))

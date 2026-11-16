@@ -35,26 +35,26 @@
 
 (require 'magit-dash-gh)
 (require 'magit-dash-gh-ci)
-(require 'magit-dash-gh-pr)
+(require 'magit-dash-pr)
 (require 'magit-dash-gh-actions)
 
 (declare-function magit-dash-open "magit-dash")
 (declare-function magit-dash-open-repo "magit-dash-open")
 (declare-function magit-dash-repo-path "magit-dash")
 (declare-function magit-dash-stage-all "magit-dash")
-(declare-function magit-dash-gh-pr-dashboard-open-worktree "magit-dash-gh-pr")
+(declare-function magit-dash-pr-dashboard-open-worktree "magit-dash-pr")
 (declare-function magit-dash-ci-dispatch-fix-operation "magit-dash-gh-ci")
 (declare-function agent-shell-workflow-dispatch "agent-shell-workflow")
 (declare-function magit-dash-gh-actions-fetch "magit-dash-gh-actions")
 (declare-function magit-dash-gh-actions-fetch-for-pr "magit-dash-gh-actions")
-(declare-function magit-gh-pr-dash "magit-dash-gh-pr")
+(declare-function magit-dash-pr "magit-dash-pr")
 (declare-function magit-gh-actions "magit-gh")
 (declare-function magit-gh-pr-checks "magit-gh")
 (declare-function magit-gh-pr-diff "magit-gh")
-(declare-function magit-dash-gh-prune-merged-branches "magit-dash-gh")
+(declare-function magit-dash-prune-merged-branches "magit-dash-gh")
 (declare-function magit-dash-gh-auth-switch "magit-dash-gh")
-(declare-function magit-dash-gh-pr-fetch "magit-dash-gh-pr")
-(declare-function magit-dash-gh-pr-code-review-available-p "magit-dash-gh-pr")
+(declare-function magit-dash-pr-fetch "magit-dash-pr")
+(declare-function magit-dash-pr-code-review-available-p "magit-dash-pr")
 (declare-function magit-dash-gh-workflow-run "magit-dash-gh-actions")
 
 (defgroup magit-dash-status nil
@@ -400,7 +400,7 @@ Calls CALLBACK with list of PR plists."
          (title (truncate-string-to-width (or (plist-get pr :title) "") 46 0 nil "…"))
          (rev (magit-dash-status--format-review-decision (plist-get pr :review-decision)))
          (age (if-let* ((up (plist-get pr :updated-at)))
-                  (format "(%s)" (magit-dash-gh-pr-dashboard--format-age up))
+                  (format "(%s)" (magit-dash-pr-dashboard--format-age up))
                 "")))
     (format "  %s  %s  %-46s %s %s"
             (propertize num 'face 'magit-dash-status-pr-number-face)
@@ -428,9 +428,9 @@ Calls CALLBACK with list of PR plists."
 
 (defvar-keymap magit-dash-status-prs-section-map
   :doc "Keymap for authored PRs section heading in `magit-status'."
-  "<remap> <magit-visit-thing>" #'magit-gh-pr-dash
-  "RET"                         #'magit-gh-pr-dash
-  "C-m"                         #'magit-gh-pr-dash)
+  "<remap> <magit-visit-thing>" #'magit-dash-pr
+  "RET"                         #'magit-dash-pr
+  "C-m"                         #'magit-dash-pr)
 
 (defclass magit-dash-status-ci-section (magit-section)
   ((keymap :initform 'magit-dash-status-ci-section-map)))
@@ -473,7 +473,7 @@ Calls CALLBACK with list of PR plists."
                                    "workflow"))
                    (age        (if-let* ((up (or (plist-get cached :updated-at)
                                                  (plist-get cached :created-at))))
-                                   (format "(%s)" (magit-dash-gh-pr-dashboard--format-age up))
+                                   (format "(%s)" (magit-dash-pr-dashboard--format-age up))
                                  "")))
               (insert (format "%s %s [%s]\n" sym age wf))))
            ((or (eq cached :empty) (and has-time (null cached)))
@@ -705,7 +705,7 @@ Calls CALLBACK with list of PR plists."
          (num (and (listp pr) (plist-get pr :number)))
          (top (magit-dash-status--repo-root)))
     (if (and num top)
-        (magit-dash-gh-pr-dashboard-open-worktree
+        (magit-dash-pr-dashboard-open-worktree
          (list :number num :repo (file-name-nondirectory (directory-file-name top))))
       (user-error "No pull request at point"))))
 
@@ -736,7 +736,7 @@ Calls CALLBACK with list of PR plists."
   (interactive)
   (let* ((pr (magit-dash-status--current-pr))
          (num (and (listp pr) (plist-get pr :number))))
-    (magit-dash-gh-pr-fetch num)))
+    (magit-dash-pr-fetch num)))
 
 (defun magit-dash-status-pr-refresh ()
   "Force refresh of PR status for current repository."
@@ -760,7 +760,7 @@ Calls CALLBACK with list of PR plists."
   (let* ((pr (magit-dash-status--current-pr))
          (url (and (listp pr) (plist-get pr :url))))
     (if (and url (not (string-empty-p url)))
-        (magit-dash-gh-pr-code-review url)
+        (magit-dash-pr-code-review url)
       (user-error "No pull request URL available"))))
 
 (transient-define-prefix magit-dash-status-pr-menu ()
@@ -770,7 +770,7 @@ Calls CALLBACK with list of PR plists."
    ("d" "View diff"                    magit-dash-status-pr-diff
     :inapt-if-not magit-dash-status--has-pr-at-point-p)
    ("r" "Code review"                  magit-dash-status-pr-code-review
-    :if magit-dash-gh-pr-code-review-available-p
+    :if magit-dash-pr-code-review-available-p
     :inapt-if-not magit-dash-status--has-pr-at-point-p)
    ("w" "Open in worktree"             magit-dash-status-pr-worktree
     :inapt-if-not magit-dash-status--has-pr-at-point-p)
@@ -779,7 +779,7 @@ Calls CALLBACK with list of PR plists."
    ("k" "Checks / CI status"           magit-dash-status-pr-checks)
    ("t" "Fetch comments/threads"       magit-dash-status-pr-fetch-threads
     :inapt-if-not magit-dash-status--has-pr-at-point-p)
-   ("o" "Open PR dashboard"            magit-gh-pr-dash)
+   ("o" "Open PR dashboard"            magit-dash-pr)
    ("g" "Refresh PR data"              magit-dash-status-pr-refresh)
    ("q" "Quit"                         transient-quit-one)])
 
@@ -808,13 +808,13 @@ Calls CALLBACK with list of PR plists."
   "Magit Dash operations and repository tools."
   ["Dashboards"
    ("d" "Repository dashboard"         magit-dash-open)
-   ("p" "PR dashboard"                 magit-gh-pr-dash)
+   ("p" "PR dashboard"                 magit-dash-pr)
    ("o" "Open / switch repository"     magit-dash-open-repo)]
   ["Actions"
    ("a" "Stage all"                    magit-dash-stage-all)
-   ("y" "Prune merged branches"        magit-dash-gh-prune-merged-branches)
+   ("y" "Prune merged branches"        magit-dash-prune-merged-branches)
    ("l" "Fetch CI logs"                magit-dash-gh-actions-fetch)
-   ("c" "Fetch PR comments"            magit-dash-gh-pr-fetch)
+   ("c" "Fetch PR comments"            magit-dash-pr-fetch)
    ("w" "Trigger workflow run"         magit-dash-gh-workflow-run)
    ("u" "Switch users"                 magit-dash-gh-auth-switch)
    ("r" "Refresh status data"          magit-dash-status-refresh-all)]

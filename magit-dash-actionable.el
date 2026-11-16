@@ -11,7 +11,7 @@
 ;;; Code:
 
 (require 'magit-dash)
-(require 'magit-dash-gh-pr-status)
+(require 'magit-dash-pr-status)
 (require 'tabulated-list)
 (require 'transient)
 (require 'seq)
@@ -121,7 +121,7 @@ of other buffers."
            (prs-raw nil)
            (prs-err nil))
       (condition-case err
-          (setq prs-raw (magit-dash-gh-pr-status-collect-all))
+          (setq prs-raw (magit-dash-pr-status-collect-all))
         (error
          (setq prs-err err)))
       (let* ((attention-prs (when prs-raw

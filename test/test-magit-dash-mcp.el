@@ -37,7 +37,7 @@
                    (lambda (_dir)
                      (list `((path . ,tmp-repo) (branch . "main") (head . "111"))
                            `((path . ,tmp-wt) (branch . "feat-x") (head . "222")))))
-                  ((symbol-function 'magit-dash-gh-pr--fetch-repo-prs)
+                  ((symbol-function 'magit-dash-pr--fetch-repo-prs)
                    (lambda (_slug _state &optional _dir)
                      (list '((number . 42)
                              (state . "OPEN")
@@ -52,10 +52,10 @@
                   ((symbol-function 'magit-dash-worktree-create)
                    (lambda (_main wt-path branch _base)
                      (format "%s/%s" wt-path branch)))
-                  ((symbol-function 'magit-dash-gh-pr-delete-worktree)
+                  ((symbol-function 'magit-dash-pr-delete-worktree)
                    (lambda (wt-path _main)
                      (setq deleted-wt (expand-file-name wt-path))))
-                  ((symbol-function 'magit-dash-gh-pr-review-worktrees)
+                  ((symbol-function 'magit-dash-pr-review-worktrees)
                    (lambda (_dir _prompt-p)
                      '(:renamed 1 :deleted 2 :matching 3 :skipped 0))))
           ;; 1. list
@@ -104,14 +104,14 @@
     (unwind-protect
         (cl-letf (((symbol-function 'magit-dash-mcp--resolve-repo-slug)
                    (lambda (_repo _dir) "org/repo"))
-                  ((symbol-function 'magit-dash-gh-pr--create-worktree-for-entry)
+                  ((symbol-function 'magit-dash-pr--create-worktree-for-entry)
                    (lambda (entry &optional _switch-p)
                      (let ((num (plist-get entry :number)))
                        (push num created-nums)
                        (format "/tmp/wt-pr-%d" num))))
-                  ((symbol-function 'magit-dash-gh-pr-review-worktrees)
+                  ((symbol-function 'magit-dash-pr-review-worktrees)
                    (lambda (_dir _prompt) '(:renamed 0 :deleted 0 :matching 0 :skipped 0)))
-                  ((symbol-function 'magit-dash-gh-pr--fetch-repo-prs)
+                  ((symbol-function 'magit-dash-pr--fetch-repo-prs)
                    (lambda (_slug _state &optional _dir)
                      (list '((number . 10) (headRefName . "b10"))
                            '((number . 20) (headRefName . "b20")))))
@@ -139,11 +139,11 @@
     (unwind-protect
         (cl-letf (((symbol-function 'magit-dash-mcp--resolve-repo-slug)
                    (lambda (_repo _dir) "org/repo"))
-                  ((symbol-function 'magit-dash-gh-pr--clean-worktree-for-entry)
+                  ((symbol-function 'magit-dash-pr--clean-worktree-for-entry)
                    (lambda (entry _prompt-p)
                      (push (plist-get entry :number) cleaned-entries)
                      :deleted))
-                  ((symbol-function 'magit-dash-gh-pr-clean-merged-worktrees)
+                  ((symbol-function 'magit-dash-pr-clean-merged-worktrees)
                    (lambda (_dir _prompt-p)
                      '(:deleted 2 :skipped 1)))
                   ((symbol-function 'magit-dash-gh--default-branch)
@@ -191,15 +191,15 @@
   "Run `magit_dash_pr_status' with REPO-LIST registered; return its result.
 When ALL is non-nil omit `repo' so the author-wide collection is used."
   (let ((tmp-repo (make-temp-file "md-mcp-status-" t))
-        (magit-dash-gh-pr--tracking-cache (or cache (make-hash-table :test #'equal))))
+        (magit-dash-pr--tracking-cache (or cache (make-hash-table :test #'equal))))
     (unwind-protect
-        (let ((magit-dash-gh-pr-status-required-approvals 2)
+        (let ((magit-dash-pr-status-required-approvals 2)
               (magit-dash-repo-list repo-list))
           (cl-letf (((symbol-function 'magit-dash-mcp--resolve-repo-slug)
                      (lambda (_repo _dir) "org/repo"))
-                    ((symbol-function 'magit-dash-gh-pr-status--fetch)
+                    ((symbol-function 'magit-dash-pr-status--fetch)
                      (lambda (_slug _dir) (magit-dash-mcp-test--status-response)))
-                    ((symbol-function 'magit-dash-gh-pr-status--fetch-search)
+                    ((symbol-function 'magit-dash-pr-status--fetch-search)
                      (lambda (_q _dir) (magit-dash-mcp-test--status-response))))
             (magit-dash-mcp-call-tool
              "magit_dash_pr_status" (append (if all nil (list :repo tmp-repo)) extra))))
@@ -255,7 +255,7 @@ When ALL is non-nil omit `repo' so the author-wide collection is used."
 
 (ert-deftest magit-dash-mcp/fingerprint-nil-fields-and-json ()
   "Fingerprint tolerates nil :repo/:state; omitted-repo result serializes."
-  (should (stringp (magit-dash-gh-pr-tracking-fingerprint
+  (should (stringp (magit-dash-pr-tracking-fingerprint
                     (list (list :number 1 :repo nil :state nil :bucket nil)))))
   (let* ((res (magit-dash-mcp-test--status-bucket nil t))
          (json (json-serialize res)))

@@ -813,10 +813,10 @@ even when other real candidates exist."
         (should-not branch-deleted)))))
 
 (ert-deftest magit-dash-gh/dispatch-clean-merged-worktrees ()
-  "Dispatch clean merged worktrees delegates to magit-dash-gh-pr-clean-merged-worktrees."
+  "Dispatch clean merged worktrees delegates to magit-dash-pr-clean-merged-worktrees."
   (let ((called nil)
         (scanned nil))
-    (cl-letf (((symbol-function 'magit-dash-gh-pr-clean-merged-worktrees)
+    (cl-letf (((symbol-function 'magit-dash-pr-clean-merged-worktrees)
                (lambda (path prompt)
                  (setq called (list path prompt))))
               ((symbol-function 'magit-dash-gh--prune-scan)
@@ -832,7 +832,7 @@ even when other real candidates exist."
         (magit-dash-gh--cache (make-hash-table :test #'equal)))
     (magit-dash-gh--cache-set "/tmp/r" :prune-state
                               (list :merged-worktrees '(("/tmp/r/.wt/pr-42" . ("pr-42" . nil)))))
-    (cl-letf (((symbol-function 'magit-dash-gh-pr-delete-worktree)
+    (cl-letf (((symbol-function 'magit-dash-pr-delete-worktree)
                (lambda (path repo) (setq called-with (list path repo))))
               ((symbol-function 'magit-dash-gh--prune-scan)
                (lambda () (setq scanned t))))
@@ -847,7 +847,7 @@ even when other real candidates exist."
         (magit-dash-gh--cache (make-hash-table :test #'equal)))
     (magit-dash-gh--cache-set "/tmp/r" :prune-state
                               (list :candidates '(("a" . nil) ("b" . nil))))
-    (cl-letf (((symbol-function 'magit-dash-gh-pr-clean-merged-worktrees)
+    (cl-letf (((symbol-function 'magit-dash-pr-clean-merged-worktrees)
                (lambda (path prompt) (setq wts-cleaned (list path prompt))))
               ((symbol-function 'magit-dash-gh--prune-delete-branches)
                (lambda (branches path prompt) (setq branches-pruned (list branches path prompt))))

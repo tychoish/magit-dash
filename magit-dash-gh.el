@@ -31,11 +31,11 @@
 (declare-function magit-branch-delete "magit-branch")
 (declare-function magit-dash-gh-actions-fetch "magit-dash-gh-actions")
 (declare-function magit-dash-gh-workflow-run "magit-dash-gh-actions")
-(declare-function magit-dash-gh-pr-fetch "magit-dash-gh-pr")
+(declare-function magit-dash-pr-fetch "magit-dash-pr")
 (declare-function magit-dash-open "magit-dash")
 (declare-function magit-dash-open-repo "magit-dash-open")
 (declare-function yaml-encode "yaml")
-(declare-function magit-gh-pr-dash "magit-dash-gh-pr")
+(declare-function magit-dash-pr "magit-dash-pr")
 (declare-function magit-dash-status-refresh-all "magit-dash-status")
 (declare-function magit-dash-repo-p "magit-dash")
 (declare-function magit-dash-repo-name "magit-dash")
@@ -286,10 +286,10 @@ Signals `user-error' when not inside a git repository."
             (seq-filter (lambda (b) (not (string-empty-p b)))
                         (split-string (buffer-string) "\n" t "[ \t\n]+"))))))))
 
-(defvar magit-dash-gh-prune-pr-limit 50
+(defvar magit-dash-prune-pr-limit 50
   "Maximum number of PRs to fetch from GitHub on each incremental scan.")
 
-(defvar magit-dash-gh-prune-cache-dir nil
+(defvar magit-dash-prune-cache-dir nil
   "Directory for per-repo closed-PR cache files, or nil to disable disk caching.")
 
 (defun magit-dash-gh--pr-closed-p (pr)
@@ -334,13 +334,13 @@ Prioritises cached info and local git references before calling
 (defun magit-dash-gh--prune-cache-file ()
   "Return cache file path for current repo, or nil when caching is disabled.
 Uses repo directory basename plus a short hash for uniqueness."
-  (when magit-dash-gh-prune-cache-dir
+  (when magit-dash-prune-cache-dir
     (let* ((dir (magit-dash-gh--repo-dir))
 	   (basename (file-name-nondirectory (directory-file-name dir)))
 	   (short-hash (substring (secure-hash 'sha1 dir) 0 8)))
       (expand-file-name
        (format "%s-%s.eld" basename short-hash)
-       magit-dash-gh-prune-cache-dir))))
+       magit-dash-prune-cache-dir))))
 
 (defun magit-dash-gh--prune-load-cache ()
   "Return a hash table of headRefName→PR-alist from the repo's cache file.
@@ -362,20 +362,20 @@ or the file is unreadable."
 
 (defun magit-dash-gh--prune-save-cache (table)
   "Persist the closed-PR hash TABLE to the repo cache file.
-No-op when `magit-dash-gh-prune-cache-dir' is nil."
+No-op when `magit-dash-prune-cache-dir' is nil."
   (when-let* ((file (magit-dash-gh--prune-cache-file)))
-    (make-directory magit-dash-gh-prune-cache-dir t)
+    (make-directory magit-dash-prune-cache-dir t)
     (with-temp-file file
       (prin1 (seq-uniq (map-values table)) (current-buffer)))))
 
 (defun magit-dash-gh--fetch-closed-prs (&optional table)
   "Fetch recent PRs from GitHub, merge into TABLE, persist and return it.
 TABLE defaults to the on-disk cache for the current repo.
-Uses a single gh call fetching up to `magit-dash-gh-prune-pr-limit' PRs."
+Uses a single gh call fetching up to `magit-dash-prune-pr-limit' PRs."
   (let* ((default-directory (magit-dash-gh--repo-dir))
 	 (table (or table (magit-dash-gh--prune-load-cache)))
 	 (cmd (format "gh pr list --state all --limit %d --json number,state,headRefName,title"
-		      magit-dash-gh-prune-pr-limit))
+		      magit-dash-prune-pr-limit))
 	 (output (with-magit-gh-account (magit-dash-gh--repo-account default-directory)
                    (string-trim (shell-command-to-string cmd)))))
     (when (string-prefix-p "[" output)
@@ -621,15 +621,15 @@ Throws `magit-dash-gh--prune-exit' to terminate the menu loop."
      ((equal label "refresh")
       (magit-dash-gh--prune-scan))
      ((equal label "clean merged worktrees")
-      (require 'magit-dash-gh-pr nil t)
-      (if (fboundp 'magit-dash-gh-pr-clean-merged-worktrees)
-          (magit-dash-gh-pr-clean-merged-worktrees path t)
-        (user-error "magit-dash-gh-pr-clean-merged-worktrees is not available"))
+      (require 'magit-dash-pr nil t)
+      (if (fboundp 'magit-dash-pr-clean-merged-worktrees)
+          (magit-dash-pr-clean-merged-worktrees path t)
+        (user-error "magit-dash-pr-clean-merged-worktrees is not available"))
       (magit-dash-gh--prune-scan))
      ((equal label "clean worktrees & prune all branches")
-      (require 'magit-dash-gh-pr nil t)
-      (when (fboundp 'magit-dash-gh-pr-clean-merged-worktrees)
-        (magit-dash-gh-pr-clean-merged-worktrees path t))
+      (require 'magit-dash-pr nil t)
+      (when (fboundp 'magit-dash-pr-clean-merged-worktrees)
+        (magit-dash-pr-clean-merged-worktrees path t))
       (when candidates
         (magit-dash-gh--prune-delete-branches (seq-map #'car candidates) path t))
       (magit-dash-gh--prune-scan))
@@ -644,16 +644,16 @@ Throws `magit-dash-gh--prune-exit' to terminate the menu loop."
      ((assoc label candidates)
       (magit-dash-gh--prune-delete-branches (list label) path nil))
      ((assoc label merged-wts)
-      (require 'magit-dash-gh-pr nil t)
-      (if (fboundp 'magit-dash-gh-pr-delete-worktree)
-          (magit-dash-gh-pr-delete-worktree label path)
-        (user-error "magit-dash-gh-pr-delete-worktree is not available"))
+      (require 'magit-dash-pr nil t)
+      (if (fboundp 'magit-dash-pr-delete-worktree)
+          (magit-dash-pr-delete-worktree label path)
+        (user-error "magit-dash-pr-delete-worktree is not available"))
       (magit-dash-gh--prune-scan))
      (t
       (user-error "Unknown menu label: %s" label)))))
 
 ;;;###autoload
-(defun magit-dash-gh-prune-merged-branches ()
+(defun magit-dash-prune-merged-branches ()
   "Open a menu to prune local branches whose PRs are merged or closed.
 
 Per-repo cache (candidates + marked list) lives on the unified global cache
@@ -687,17 +687,17 @@ menu'. The menu offers:
 	       (label (annotated-completing-read
 		       table
 		       :prompt "magit-gh prune => "
-		       :category 'magit-dash-gh-prune
+		       :category 'magit-dash-prune
 		       :require-match t)))
 	  (magit-dash-gh--prune-dispatch label path))))))
 
 ;;;###autoload
-(defun magit-dash-gh-prune-prefetch ()
+(defun magit-dash-prune-prefetch ()
   "Seed the in-memory closed-PR cache from disk for the current repo.
 Makes no GitHub API calls; safe to call on status load.
 Skips silently when caching is disabled, not in a git repo, or the
 in-memory cache is already populated."
-  (when (and magit-dash-gh-prune-cache-dir
+  (when (and magit-dash-prune-cache-dir
 	     (ignore-errors (magit-toplevel)))
     (let* ((path (magit-dash-gh--repo-dir))
            (state (magit-dash-gh--cache-get path :prune-state)))
@@ -707,9 +707,9 @@ in-memory cache is already populated."
                                (plist-put state :closed-prs table)))))))
 
 ;;;###autoload
-(defun magit-dash-gh-prune-lazy-prefetch ()
+(defun magit-dash-prune-lazy-prefetch ()
   "Seed the closed-PR cache for the current repo via a 3-second idle timer."
-  (run-with-idle-timer 3 nil #'magit-dash-gh-prune-prefetch))
+  (run-with-idle-timer 3 nil #'magit-dash-prune-prefetch))
 
 ;;; Shared utilities
 
@@ -816,7 +816,7 @@ signal."
           (message "magit-gh: gh %s failed: %s" (car args) msg)))
     (with-magit-gh-account (magit-dash-gh--repo-account dir)
       (let* ((default-directory dir)
-             (buf (generate-new-buffer " *magit-dash-gh-proc*"))
+             (buf (generate-new-buffer " *magit-dash-proc*"))
              (proc (make-process
                     :name "magit-gh"
                     :buffer buf
@@ -997,12 +997,12 @@ to the other configured account."
   "GitHub and Magit Dash operations."
   ["Dashboards"
    ("d" "Repository dashboard"         magit-dash-open)
-   ("p" "PR dashboard"                 magit-gh-pr-dash)
+   ("p" "PR dashboard"                 magit-dash-pr)
    ("o" "Open / switch repository"     magit-dash-open-repo)]
   ["Actions"
-   ("y" "Prune merged branches"        magit-dash-gh-prune-merged-branches)
+   ("y" "Prune merged branches"        magit-dash-prune-merged-branches)
    ("l" "Fetch CI logs"                magit-dash-gh-actions-fetch)
-   ("c" "Fetch PR comments"            magit-dash-gh-pr-fetch)
+   ("c" "Fetch PR comments"            magit-dash-pr-fetch)
    ("w" "Trigger workflow run"         magit-dash-gh-workflow-run)
    ("u" "Switch users"                 magit-dash-gh-auth-switch)
    ("r" "Refresh status data"          magit-dash-status-refresh-all)]

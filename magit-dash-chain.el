@@ -48,7 +48,7 @@
 (require 'subr-x)
 (require 'hitl-plan)
 (require 'magit-dash-gh)
-(require 'magit-dash-gh-pr-status)
+(require 'magit-dash-pr-status)
 (require 'magit-dash-worktree)
 
 (declare-function agent-shell-insert "agent-shell")
@@ -208,7 +208,7 @@ This is the only place git is invoked.  It refuses history rewriting
 (defun magit-dash-chain--fetch-prs (slug dir)
   "Return PR plists for repository SLUG (run from DIR), or nil without a SLUG.
 This is the seam tests stub; it performs the `gh' query."
-  (and slug (magit-dash-gh-pr-status-collect slug dir)))
+  (and slug (magit-dash-pr-status-collect slug dir)))
 
 (defun magit-dash-chain--parse-root (root)
   "Return (number . N) or (branch . NAME) for the ROOT argument."
@@ -223,7 +223,7 @@ This is the seam tests stub; it performs the `gh' query."
   "Discover the PR chain/tree under ROOT in REPO-DIR.
 ROOT is a PR number or a branch name.  BASE is the branch the chain
 lands on (default: the root PR's base, else the repository default).
-PRS is the list of open PR plists (see `magit-dash-gh-pr-status-collect');
+PRS is the list of open PR plists (see `magit-dash-pr-status-collect');
 edges are PR `:base' -> `:branch'.  Signal `user-error' on a cycle.
 Return a plist (:repo-dir :base :root :nodes :problems); :nodes are in
 topological (parents first, depth-first) order."
@@ -898,8 +898,8 @@ Refused branches still contain merges of the undone states"
 ;;;; Interactive entry points
 
 (declare-function hitl-plan-review "hitl-plan-ui")
-(declare-function magit-dash-gh-pr-dashboard--entry-at-point "magit-dash-gh-pr")
-(declare-function magit-dash-gh-pr-dashboard--find-local-path "magit-dash-gh-pr")
+(declare-function magit-dash-pr-dashboard--entry-at-point "magit-dash-pr")
+(declare-function magit-dash-pr-dashboard--find-local-path "magit-dash-pr")
 (declare-function magit-dash-mcp--resolve-repo-slug "magit-dash-mcp")
 (declare-function magit-dash--repo-at-point "magit-dash")
 (declare-function magit-dash-repo-path "magit-dash")
@@ -907,10 +907,10 @@ Refused branches still contain merges of the undone states"
 (defun magit-dash-chain--context ()
   "Return (REPO-DIR . ROOT-DEFAULT) from the dashboard entry at point, or nil."
   (cond
-   ((and (derived-mode-p 'tabulated-list-mode) (fboundp 'magit-dash-gh-pr-dashboard--entry-at-point)
-         (ignore-errors (magit-dash-gh-pr-dashboard--entry-at-point)))
-    (let* ((entry (magit-dash-gh-pr-dashboard--entry-at-point))
-           (path (magit-dash-gh-pr-dashboard--find-local-path (plist-get entry :repo))))
+   ((and (derived-mode-p 'tabulated-list-mode) (fboundp 'magit-dash-pr-dashboard--entry-at-point)
+         (ignore-errors (magit-dash-pr-dashboard--entry-at-point)))
+    (let* ((entry (magit-dash-pr-dashboard--entry-at-point))
+           (path (magit-dash-pr-dashboard--find-local-path (plist-get entry :repo))))
       (when path (cons path (and (plist-get entry :number)
                                  (number-to-string (plist-get entry :number)))))))
    ((and (derived-mode-p 'magit-dash-mode) (tabulated-list-get-id))

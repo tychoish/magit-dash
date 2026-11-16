@@ -29,8 +29,8 @@
 (require 'subr-x)
 (require 'mcpkit)
 (require 'magit-dash-gh)
-(require 'magit-dash-gh-pr)
-(require 'magit-dash-gh-pr-status)
+(require 'magit-dash-pr)
+(require 'magit-dash-pr-status)
 (require 'magit-dash-gh-ci)
 (require 'hitl-plan-mcp nil t)
 (require 'magit-dash-worktree)
@@ -87,8 +87,8 @@
           (cond
            ((file-directory-p expanded)
             expanded)
-           ((fboundp 'magit-dash-gh-pr-dashboard--find-local-path)
-            (or (magit-dash-gh-pr-dashboard--find-local-path trimmed)
+           ((fboundp 'magit-dash-pr-dashboard--find-local-path)
+            (or (magit-dash-pr-dashboard--find-local-path trimmed)
                 (when-let* ((r (seq-find (lambda (it)
                                            (and (not (magit-dash-repo-worktree it))
                                                 (or (equal (magit-dash-repo-name it) trimmed)
@@ -146,7 +146,7 @@
     (pcase action
       ("list"
        (let* ((all-wts (magit-dash-gh--git-worktrees repo-dir))
-              (prs (ignore-errors (magit-dash-gh-pr--fetch-repo-prs repo-slug "all" repo-dir)))
+              (prs (ignore-errors (magit-dash-pr--fetch-repo-prs repo-slug "all" repo-dir)))
               (def-branch (ignore-errors (let ((default-directory repo-dir))
                                            (magit-dash-gh--default-branch))))
               (git-merged (when def-branch
@@ -162,11 +162,11 @@
                          (dirty (and (not main-p)
                                      (file-directory-p wt-path)
                                      (magit-dash-worktree-uncommitted-changes-p wt-path)))
-                         (matched-pr (and prs (magit-dash-gh-pr--match-worktree-to-pr wt prs)))
+                         (matched-pr (and prs (magit-dash-pr--match-worktree-to-pr wt prs)))
                          (pr-num (and matched-pr (map-elt matched-pr 'number)))
                          (pr-state (and matched-pr (map-elt matched-pr 'state)))
                          (pr-merged (or (and matched-pr
-                                             (magit-dash-gh-pr--pr-merged-p matched-pr repo-slug pr-num repo-dir))
+                                             (magit-dash-pr--pr-merged-p matched-pr repo-slug pr-num repo-dir))
                                         (and wt-branch git-merged
                                              (not (null (member wt-branch git-merged)))))))
                     (list :path wt-path
@@ -186,7 +186,7 @@
               (_ (unless (and (stringp branch) (not (string-empty-p (string-trim branch))))
                    (error "Argument `branch' is required when action is \"create\"")))
               (wt-path (or (plist-get args :worktree_path)
-                           (magit-dash-gh-pr--compute-worktree-path repo-dir branch)))
+                           (magit-dash-pr--compute-worktree-path repo-dir branch)))
               (base-ref (plist-get args :base_ref))
               (created (magit-dash-worktree-create repo-dir wt-path branch base-ref)))
          (list :repo_dir repo-dir
@@ -197,13 +197,13 @@
        (let* ((wt-path (plist-get args :worktree_path))
               (_ (unless (and (stringp wt-path) (not (string-empty-p (string-trim wt-path))))
                    (error "Argument `worktree_path' is required when action is \"delete\""))))
-         (magit-dash-gh-pr-delete-worktree wt-path repo-dir)
+         (magit-dash-pr-delete-worktree wt-path repo-dir)
          (list :repo_dir repo-dir
                :action "delete"
                :worktree_path (expand-file-name wt-path)
                :deleted t)))
       ("review"
-       (let ((res (magit-dash-gh-pr-review-worktrees repo-dir nil)))
+       (let ((res (magit-dash-pr-review-worktrees repo-dir nil)))
          (list :repo_dir repo-dir
                :action "review"
                :renamed (or (plist-get res :renamed) 0)
@@ -243,7 +243,7 @@
           (dolist (num (seq-uniq pr-numbers))
             (let* ((entry (list :number num :repo repo-slug :pr nil))
                    (wt-path (condition-case nil
-                                (magit-dash-gh-pr--create-worktree-for-entry entry nil)
+                                (magit-dash-pr--create-worktree-for-entry entry nil)
                               (error nil))))
               (if wt-path
                   (push (list :pr_number num :worktree_path wt-path) created-paths)
@@ -258,8 +258,8 @@
                                  :null)
                 :worktrees (vconcat created-paths)))
       ;; Create worktrees for all open PRs in repo-dir
-      (magit-dash-gh-pr-review-worktrees repo-dir nil)
-      (let* ((open-prs (magit-dash-gh-pr--fetch-repo-prs repo-slug "open" repo-dir))
+      (magit-dash-pr-review-worktrees repo-dir nil)
+      (let* ((open-prs (magit-dash-pr--fetch-repo-prs repo-slug "open" repo-dir))
              (wts (magit-dash-gh--git-worktrees repo-dir))
              (created 0)
              (existing 0)
@@ -268,7 +268,7 @@
         (dolist (pr open-prs)
           (let* ((num (map-elt pr 'number))
                  (head (map-elt pr 'headRefName))
-                 (expected-path (magit-dash-gh-pr--compute-worktree-path repo-dir (format "pr-%d" num)))
+                 (expected-path (magit-dash-pr--compute-worktree-path repo-dir (format "pr-%d" num)))
                  (matched-wt (seq-find
                               (lambda (wt)
                                 (let ((wt-path (alist-get 'path wt)))
@@ -277,7 +277,7 @@
                                                      (directory-file-name (expand-file-name repo-dir))))
                                        (or (string= (directory-file-name (expand-file-name wt-path))
                                                     (directory-file-name (expand-file-name expected-path)))
-                                           (equal (magit-dash-gh-pr--match-worktree-to-pr wt (list pr)) pr)))))
+                                           (equal (magit-dash-pr--match-worktree-to-pr wt (list pr)) pr)))))
                               wts)))
             (if matched-wt
                 (progn
@@ -288,7 +288,7 @@
                         worktree-results))
               (let* ((entry (list :number num :repo repo-slug :pr pr))
                      (wt-path (condition-case nil
-                                  (magit-dash-gh-pr--create-worktree-for-entry entry nil)
+                                  (magit-dash-pr--create-worktree-for-entry entry nil)
                                 (error nil))))
                 (if wt-path
                     (progn
@@ -326,7 +326,7 @@
               (skipped 0))
           (dolist (num pr-numbers)
             (let* ((entry (list :number num :repo repo-slug :pr nil))
-                   (res (magit-dash-gh-pr--clean-worktree-for-entry entry nil)))
+                   (res (magit-dash-pr--clean-worktree-for-entry entry nil)))
               (cond
                ((eq res :deleted) (cl-incf deleted))
                ((eq res :skipped) (cl-incf skipped))
@@ -336,7 +336,7 @@
           (list :repo_dir repo-dir
                 :deleted deleted
                 :skipped skipped))
-      (let ((res (magit-dash-gh-pr-clean-merged-worktrees repo-dir nil)))
+      (let ((res (magit-dash-pr-clean-merged-worktrees repo-dir nil)))
         (list :repo_dir repo-dir
               :deleted (or (plist-get res :deleted) 0)
               :skipped (or (plist-get res :skipped) 0))))))
@@ -361,7 +361,7 @@
                         (not (memq (plist-get args :clean_worktrees_first) '(nil :false :json-false)))
                       t))
          (wt-res (when (and clean-wts (not dry-run))
-                   (magit-dash-gh-pr-clean-merged-worktrees repo-dir nil)))
+                   (magit-dash-pr-clean-merged-worktrees repo-dir nil)))
          (default-directory repo-dir)
          (def-branch (ignore-errors (magit-dash-gh--default-branch)))
          (candidates (magit-dash-gh--prune-scan))
@@ -434,14 +434,14 @@
          (repo-slug (and (not all)
                          (or (magit-dash-mcp--resolve-repo-slug repo repo-dir) repo)))
          (prs (if all
-                  (magit-dash-gh-pr-status-collect-all)
-                (magit-dash-gh-pr-status-collect repo-slug repo-dir)))
-         (tracked (mapcar #'magit-dash-gh-pr-attach-tracking prs)))
+                  (magit-dash-pr-status-collect-all)
+                (magit-dash-pr-status-collect repo-slug repo-dir)))
+         (tracked (mapcar #'magit-dash-pr-attach-tracking prs)))
     (when (eq (plist-get args :commit) t)
-      (magit-dash-gh-pr-commit-tracking prs))
+      (magit-dash-pr-commit-tracking prs))
     (list :repo (or repo-slug :null)
           :count (length tracked)
-          :fingerprint (magit-dash-gh-pr-tracking-fingerprint prs)
+          :fingerprint (magit-dash-pr-tracking-fingerprint prs)
           :prs (vconcat (mapcar #'magit-dash-mcp--pr-json tracked)))))
 
 (defmacro magit-dash-mcp--guard (&rest body)
@@ -477,7 +477,7 @@
                        (error "Cannot resolve repository slug for %s" repo))))
            (limit (plist-get args :limit))
            (max-chars (plist-get args :max_chars))
-           (threads (magit-dash-gh-pr-fetch-threads-graphql slug number limit max-chars repo-dir)))
+           (threads (magit-dash-pr-fetch-threads-graphql slug number limit max-chars repo-dir)))
       (list :repo slug
             :number number
             :untrusted t
