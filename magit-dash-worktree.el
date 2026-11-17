@@ -397,14 +397,5 @@ Leaves branches intact until branch pruning."
   (require 'magit-dash-pr)
   (magit-dash-pr-review-worktrees repo-dir t))
 
-;;;###autoload
-(defun magit-dash-worktree-clean-merged-prs (&optional repo-dir)
-  "Delete worktrees for merged PRs in REPO-DIR when clean.
-Leaves local branches intact until branch pruning.
-Refuses to delete any worktree with uncommitted changes."
-  (interactive)
-  (require 'magit-dash-pr)
-  (magit-dash-pr-clean-merged-worktrees repo-dir t))
-
 (provide 'magit-dash-worktree)
 ;;; magit-dash-worktree.el ends here

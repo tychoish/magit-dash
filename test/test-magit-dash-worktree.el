@@ -179,22 +179,16 @@
 (ert-deftest magit-dash-worktree/pr-wrappers-delegate ()
   "Test that magit-dash-worktree PR wrapper commands delegate to magit-dash-pr."
   (let ((create-called nil)
-        (review-called nil)
-        (clean-called nil))
+        (review-called nil))
     (cl-letf (((symbol-function 'magit-dash-pr-create-all-worktrees)
                (lambda (&optional dir) (setq create-called dir)))
               ((symbol-function 'magit-dash-pr-review-worktrees)
-               (lambda (&optional dir prompt prs) (setq review-called (list dir prompt prs))))
-              ((symbol-function 'magit-dash-pr-clean-merged-worktrees)
-               (lambda (&optional dir prompt) (setq clean-called (list dir prompt)))))
+               (lambda (&optional dir prompt prs) (setq review-called (list dir prompt prs)))))
       (magit-dash-worktree-create-for-all-prs "/tmp/test-repo")
       (should (equal "/tmp/test-repo" create-called))
 
       (magit-dash-worktree-review-prs "/tmp/test-repo")
-      (should (equal (list "/tmp/test-repo" t nil) review-called))
-
-      (magit-dash-worktree-clean-merged-prs "/tmp/test-repo")
-      (should (equal (list "/tmp/test-repo" t) clean-called)))))
+      (should (equal (list "/tmp/test-repo" t nil) review-called)))))
 
 (provide 'test-magit-dash-worktree)
 ;;; test-magit-dash-worktree.el ends here
