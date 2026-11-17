@@ -1544,6 +1544,51 @@ If the worktree does not exist yet, creates it first."
         (when (zerop (car result))
           (json-parse-string (cdr result) :object-type 'alist))))))
 
+(defun magit-dash-pr--worktree-pr-branch (wt)
+  "Return the PR head branch name for git worktree WT, or nil.
+Prefers the remote tracking branch (remote prefix stripped), then falls
+back to the local branch name (without any `wt/' prefix)."
+  (let* ((path (alist-get 'path wt))
+         (local (alist-get 'branch wt))
+         (upstream (when (and path local (file-directory-p path))
+                     (ignore-errors
+                      (let ((default-directory path))
+                       (with-temp-buffer
+                         (when (zerop (call-process
+                                       "git" nil (list (current-buffer) nil) nil
+                                       "rev-parse" "--abbrev-ref" "--symbolic-full-name"
+                                       (concat local "@{upstream}")))
+                           (let ((ref (string-trim (buffer-string))))
+                             (when (string-match "\\`[^/]+/\\(.+\\)\\'" ref)
+                               (match-string 1 ref))))))))))
+    (or upstream
+        (and local (string-remove-prefix "wt/" local)))))
+
+(defun magit-dash-pr--fetch-prs-for-branch (repo branch dir)
+  "Fetch all PRs in REPO whose head branch is BRANCH using DIR, or nil."
+  (when (and branch (executable-find "gh"))
+    (ignore-errors
+      (let ((result (magit-dash-gh--call-process
+                     (list "pr" "list" "-R" repo "--head" branch "--state" "all"
+                           "--limit" "30" "--json" "number,title,headRefName,state,mergedAt")
+                     dir)))
+        (when (zerop (car result))
+          (json-parse-string (cdr result) :object-type 'alist :array-type 'list))))))
+
+(defun magit-dash-pr--match-worktree-by-branch (wt prs repo dir)
+  "Return the PR for worktree WT chosen by its head branch name, or nil.
+Looks in PRS first, then asks GitHub for PRs on that branch in REPO from DIR.
+An open PR wins; otherwise the first (most recent) PR on the branch."
+  (when-let* ((branch (magit-dash-pr--worktree-pr-branch wt)))
+    (let ((candidates
+           (or (seq-filter (lambda (pr) (equal (map-elt pr 'headRefName) branch)) prs)
+               (magit-dash-pr--fetch-prs-for-branch repo branch dir))))
+      (or (seq-find (lambda (pr)
+                      (let ((st (map-elt pr 'state)))
+                        (and (stringp st) (string-equal (upcase st) "OPEN"))))
+                    candidates)
+          (car candidates)))))
+
 (defun magit-dash-pr--match-worktree-to-pr (wt prs)
   "Match git worktree WT to a pull request in PRS alist list.
 Matches by branch name (headRefName, pr-NUM, wt/...) or worktree directory name.
@@ -1755,9 +1800,10 @@ Returns a plist with :renamed, :deleted, :matching, and :skipped counts."
                     (magit-dash-pr--path-equal-p wt-path repo-dir)
                     (not (file-directory-p wt-path)))
           (let* ((wt-name (file-name-nondirectory (directory-file-name wt-path)))
-                 (number (when (string-match "\\(?:\\`\\|-\\)pr-\\([0-9]+\\)\\'" wt-name)
+                 (number (when (string-match "\\(?:\\`\\|-\\)pr-\\(?:[[:alnum:]]+-\\)*\\([0-9]+\\)\\'" wt-name)
                            (string-to-number (match-string 1 wt-name))))
-                 (matched (or (magit-dash-pr--match-worktree-to-pr
+                 (matched (or (magit-dash-pr--match-worktree-by-branch wt prs slug repo-dir)
+                              (magit-dash-pr--match-worktree-to-pr
                                wt (seq-filter (lambda (pr)
                                                 (let ((state (map-elt pr 'state)))
                                                   (and (stringp state)

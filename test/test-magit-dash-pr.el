@@ -907,21 +907,62 @@
         (should (= 1 (plist-get counts :deleted)))
         (should (= 1 (plist-get counts :skipped)))))))
 
-(ert-deftest magit-dash-pr/clean-merged-prefers-number-to-old-branch-match ()
-  "A numbered worktree is not attributed to an unrelated closed PR on its branch."
-  (let ((prs '(((number . 1) (headRefName . "shared") (state . "MERGED"))))
-        (wts '(((path . "/tmp/repo/.wt/pr-42") (branch . "shared"))))
+(ert-deftest magit-dash-pr/clean-merged-looks-up-pr-deps-named-worktrees ()
+  "A worktree named pr-deps-N is resolved by its trailing number."
+  (let ((wts '(((path . "/tmp/repo/.wt/pr-deps-11137") (branch . "dependabot/x"))))
         deleted)
-    (cl-letf (((symbol-function 'magit-dash-pr--fetch-repo-prs) (lambda (&rest _) prs))
+    (cl-letf (((symbol-function 'magit-dash-pr--fetch-repo-prs) (lambda (&rest _) nil))
               ((symbol-function 'magit-dash-pr--fetch-pr)
-               (lambda (_repo number _dir) `((number . ,number) (state . "CLOSED"))))
+               (lambda (_repo number _dir)
+                 (when (= number 11137) '((number . 11137) (state . "MERGED")))))
               ((symbol-function 'magit-dash-pr--git-worktrees) (lambda (_) wts))
-              ((symbol-function 'magit-dash-pr--pr-merged-p)
-               (lambda (pr &rest _) (equal (alist-get 'state pr) "MERGED")))
               ((symbol-function 'file-directory-p) (lambda (_) t))
-              ((symbol-function 'magit-dash-pr-delete-worktree) (lambda (&rest _) (setq deleted t))))
+              ((symbol-function 'magit-dash-worktree-uncommitted-changes-p) (lambda (_) nil))
+              ((symbol-function 'magit-dash-pr-delete-worktree)
+               (lambda (path &optional _) (push path deleted))))
       (magit-dash-pr-clean-merged-worktrees "/tmp/repo" nil)
-      (should-not deleted))))
+      (should (equal deleted '("/tmp/repo/.wt/pr-deps-11137"))))))
+
+(ert-deftest magit-dash-pr/clean-merged-matches-by-branch-not-dir-name ()
+  "The worktree branch, not its directory name, selects the PR."
+  (let ((wts '(((path . "/tmp/repo/.wt/whatever") (branch . "dependabot/x"))))
+        deleted)
+    (cl-letf (((symbol-function 'magit-dash-pr--fetch-repo-prs) (lambda (&rest _) nil))
+              ((symbol-function 'magit-dash-pr--fetch-prs-for-branch)
+               (lambda (_repo branch _dir)
+                 (when (equal branch "dependabot/x")
+                   '(((number . 11137) (headRefName . "dependabot/x") (state . "MERGED"))))))
+              ((symbol-function 'magit-dash-pr--worktree-pr-branch)
+               (lambda (wt) (alist-get 'branch wt)))
+              ((symbol-function 'magit-dash-pr--git-worktrees) (lambda (_) wts))
+              ((symbol-function 'file-directory-p) (lambda (_) t))
+              ((symbol-function 'magit-dash-worktree-uncommitted-changes-p) (lambda (_) nil))
+              ((symbol-function 'magit-dash-pr-delete-worktree)
+               (lambda (path &optional _) (push path deleted))))
+      (magit-dash-pr-clean-merged-worktrees "/tmp/repo" nil)
+      (should (equal deleted '("/tmp/repo/.wt/whatever"))))))
+
+(ert-deftest magit-dash-pr/worktree-pr-branch-prefers-upstream ()
+  "The tracking branch name (remote stripped) wins over the local name."
+  (let* ((dir (make-temp-file "wt" t))
+         (default-directory dir))
+    (unwind-protect
+        (progn
+          (call-process "git" nil nil nil "init" "-q" "-b" "local-name")
+          (call-process "git" nil nil nil "-c" "user.name=t" "-c" "user.email=t@t"
+                        "commit" "-q" "--allow-empty" "-m" "x")
+          (call-process "git" nil nil nil "update-ref" "refs/remotes/origin/feature/up" "HEAD")
+          (call-process "git" nil nil nil "config" "remote.origin.url" "/nonexistent")
+          (call-process "git" nil nil nil "config" "remote.origin.fetch"
+                        "+refs/heads/*:refs/remotes/origin/*")
+          (call-process "git" nil nil nil "config" "branch.local-name.remote" "origin")
+          (call-process "git" nil nil nil "config" "branch.local-name.merge" "refs/heads/feature/up")
+          (should (equal "feature/up"
+                         (magit-dash-pr--worktree-pr-branch
+                          `((path . ,dir) (branch . "local-name")))))
+          (should (equal "x" (magit-dash-pr--worktree-pr-branch
+                              `((path . "/nonexistent") (branch . "wt/x"))))))
+      (delete-directory dir t))))
 
 (ert-deftest magit-dash-pr/clean-entry-skips-open-pr ()
   "Marked open PRs are never deleted by merged cleanup."
