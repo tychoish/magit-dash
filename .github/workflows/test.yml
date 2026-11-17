@@ -44,7 +44,7 @@ jobs:
           nongnu-mirror: "ustc"
 
       - name: Measure Code Coverage
-        uses: tychoish/elisp-ci/coverage@v0.1.2
+        uses: tychoish/elisp-ci/coverage@6dac0272217c29b41c067eb5327bf89f07946b8d
         with:
           report-format: "lcov"
           output-file: "coverage/lcov.info"
