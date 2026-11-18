@@ -133,6 +133,7 @@
 (defalias 'magit-dash-repo-symlinks #'magit-dash-repo-worktree-symlinks)
 (defalias 'magit-dash-repo-auto-sync-on-refresh #'magit-dash-repo-sync-on-refresh)
 (defalias 'magit-dash-repo-refresh-sync #'magit-dash-repo-sync-on-refresh)
+(defalias 'magit-dash-repo-labels #'magit-dash-repo-tags)
 
 (defvar magit-dash-repo-list '()
   "List of `magit-dash-repo' structs registered for dashboard display.
@@ -551,7 +552,25 @@ first)."
       (expand-file-name path-or-url)
     path-or-url))
 
-(cl-defun magit-dash-register (&key name path repo include-prs include-ci auto-fetch auto-pull auto-commit auto-push auto-sync-command hooks tags commands sort-hint worktree sync-branches timer clone-url remote-url worktree-symlinks symlinks remote-sync sync-on-refresh auto-sync-on-refresh refresh-sync fetch-on-refresh gh-account gh-host pr upstream-repo upstream upstream-branch)
+(defun magit-dash--normalize-tags (raw)
+  "Normalize RAW tags or labels into a list of symbols."
+  (cond
+   ((null raw) nil)
+   ((symbolp raw) (list raw))
+   ((stringp raw) (list (intern raw)))
+   ((listp raw)
+    (delq nil
+          (delete-dups
+           (mapcar (lambda (x)
+                     (cond
+                      ((null x) nil)
+                      ((symbolp x) x)
+                      ((stringp x) (intern x))
+                      (t nil)))
+                   raw))))
+   (t nil)))
+
+(cl-defun magit-dash-register (&key name path repo include-prs include-ci auto-fetch auto-pull auto-commit auto-push auto-sync-command hooks tags tag label labels commands sort-hint worktree sync-branches timer clone-url remote-url worktree-symlinks symlinks remote-sync sync-on-refresh auto-sync-on-refresh refresh-sync fetch-on-refresh gh-account gh-host pr upstream-repo upstream upstream-branch)
   "Register or replace a repository with NAME at absolute PATH.
 REPO is the upstream repository path or URL for bootstrapping.
 INCLUDE-PRS, INCLUDE-CI, AUTO-FETCH, AUTO-PULL, AUTO-COMMIT, AUTO-PUSH,
@@ -603,7 +622,10 @@ Keyword arguments:
                   explicit :hooks also passed.
   :sync-branches  list of branch names on which auto-pull and auto-push are
                   permitted; nil means any branch.
-  :tags           list of symbols for filtering in the dashboard.
+  :tags           list or atom of symbols or strings for filtering in the dashboard.
+  :tag            alias / singular form of :tags.
+  :label          alias for :tags.
+  :labels         alias for :tags.
   :commands       alist of (LABEL . FUNCTION) for the repo command picker.
   :sort-hint      number controlling display order; lower values appear first.
                   Repos without a sort-hint appear after all sorted repos.
@@ -671,7 +693,13 @@ Keyword arguments:
                           :merge-method rs-merge-method))))
                hosts))))
          (effective-commands (append commands remote-sync-commands))
-         (sync-refresh (or sync-on-refresh auto-sync-on-refresh refresh-sync)))
+         (sync-refresh (or sync-on-refresh auto-sync-on-refresh refresh-sync))
+         (effective-tags
+          (delete-dups
+           (append (magit-dash--normalize-tags tags)
+                   (magit-dash--normalize-tags tag)
+                   (magit-dash--normalize-tags label)
+                   (magit-dash--normalize-tags labels)))))
     (setq magit-dash-repo-list
           (thread-last magit-dash-repo-list
             (seq-remove (lambda (r)
@@ -688,7 +716,7 @@ Keyword arguments:
                            :auto-commit auto-commit
                            :auto-push auto-push
                            :hooks hooks
-                           :tags tags
+                           :tags effective-tags
                            :commands effective-commands
                            :sort-hint sort-hint
                            :worktree worktree
@@ -708,7 +736,7 @@ Keyword arguments:
 
 (defconst magit-dash--register-known-keys
   '(:name :path :repo :include-prs :include-ci :auto-fetch :auto-pull
-    :auto-commit :auto-push :auto-sync-command :hooks :tags :commands
+    :auto-commit :auto-push :auto-sync-command :hooks :tags :tag :label :labels :commands
     :sort-hint :worktree :sync-branches :timer :clone-url :remote-url
     :worktree-symlinks :symlinks :remote-sync :sync-on-refresh
     :auto-sync-on-refresh :refresh-sync :fetch-on-refresh :gh-account
@@ -2547,6 +2575,7 @@ fixed widths and are right-aligned."
     (keymap-set m "t t" #'magit-dash-filter-by-tag)
     (keymap-set m "t a" #'magit-dash-add-tag)
     (keymap-set m "t c" #'magit-dash-toggle-column)
+    (keymap-set m "t x" #'magit-dash-clear-tag-filter)
     (keymap-set m "t s" #'magit-dash-toggle-discovered-submodules)
     (keymap-set m "t w" #'magit-dash-toggle-discovered-worktrees)
 
@@ -2572,7 +2601,20 @@ fixed widths and are right-aligned."
   "Keymap for `magit-dash-mode'.")
 
 (defvar-local magit-dash--tag-filter nil
-  "When non-nil, a symbol: only repos tagged with this symbol are shown.")
+  "When non-nil, a symbol or list of symbols: only repos tagged with these are shown.")
+
+(defun magit-dash--repo-matches-tag-filter-p (repo filter)
+  "Return non-nil if REPO matches tag FILTER.
+FILTER may be nil (matches all), a symbol (matches if REPO has that tag),
+or a list of symbols (matches if REPO has all tags in FILTER)."
+  (cond
+   ((null filter) t)
+   ((listp filter)
+    (let ((tags (magit-dash--all-tags-for repo)))
+      (seq-every-p (lambda (tg) (memq tg tags)) filter)))
+   ((symbolp filter)
+    (memq filter (magit-dash--all-tags-for repo)))
+   (t t)))
 
 (defvar magit-dash--ephemeral-tags (make-hash-table :test #'equal)
   "Hash table mapping repo path strings to lists of ephemeral tag symbols.
@@ -3002,10 +3044,7 @@ of other buffers."
               (seq-filter
                (lambda (r)
                  (and (not (member (magit-dash-repo-path r) magit-dash--hidden-paths))
-                      (if magit-dash--tag-filter
-                          (memq magit-dash--tag-filter
-                                (magit-dash--all-tags-for r))
-                        t)))
+                      (magit-dash--repo-matches-tag-filter-p r magit-dash--tag-filter)))
                magit-dash-repo-list))
              (repos (seq-filter
                      (lambda (r)
@@ -3922,16 +3961,43 @@ Returns an interned symbol, `clear', or nil on quit."
      ((symbolp result) result)
      (t (intern result)))))
 
-(defun magit-dash-filter-by-tag ()
+(defun magit-dash-filter-by-tag (&optional tag)
   "Filter the dashboard by tag using annotated completion.
+When a filter is already active, allows narrowing (filtering down)
+by selecting additional tags, or selecting \"(clear)\" to reset.
 Select \"(clear)\" to show all repos; quitting leaves the filter
 unchanged."
   (interactive)
-  (when-let* ((tag (magit-dash--read-tag "Filter by tag: "
-                                                       :include-clear t)))
-    (setq magit-dash--tag-filter
-          (unless (eq tag 'clear) tag))
-    (magit-dash-refresh)))
+  (let* ((active-tags (cond
+                       ((null magit-dash--tag-filter) nil)
+                       ((listp magit-dash--tag-filter) magit-dash--tag-filter)
+                       (t (list magit-dash--tag-filter))))
+         (prompt (if active-tags
+                     (format "Filter down by tag (current: %s): "
+                             (mapconcat #'symbol-name active-tags ", "))
+                   "Filter by tag: "))
+         (selected (or tag (magit-dash--read-tag prompt :include-clear t))))
+    (when selected
+      (if (eq selected 'clear)
+          (progn
+            (setq magit-dash--tag-filter nil)
+            (message "magit-dash: tag filter cleared"))
+        (let ((new-filters
+               (if (memq selected active-tags)
+                   (delq selected active-tags)
+                 (append active-tags (list selected)))))
+          (setq magit-dash--tag-filter new-filters)
+          (message "magit-dash: filtering by tag%s: %s"
+                   (if (> (length new-filters) 1) "s" "")
+                   (mapconcat #'symbol-name new-filters ", "))))
+      (magit-dash-refresh))))
+
+(defun magit-dash-clear-tag-filter ()
+  "Clear any active tag filter in the dashboard."
+  (interactive)
+  (setq magit-dash--tag-filter nil)
+  (magit-dash-refresh)
+  (message "magit-dash: tag filter cleared"))
 
 (defun magit-dash-add-tag ()
   "Add an ephemeral session-local tag to the repository at point.
@@ -4431,9 +4497,7 @@ marked invisible or hidden via `magit-dash--hidden-paths'."
         (nreverse (delete-dups repos)))
     (seq-filter (lambda (r)
                   (and (not (member (magit-dash-repo-path r) magit-dash--hidden-paths))
-                       (if (bound-and-true-p magit-dash--tag-filter)
-                           (memq magit-dash--tag-filter (magit-dash--all-tags-for r))
-                         t)))
+                       (magit-dash--repo-matches-tag-filter-p r (bound-and-true-p magit-dash--tag-filter))))
                 magit-dash-repo-list)))
 
 (defun magit-dash--effective-repos ()
@@ -4707,7 +4771,13 @@ Indicates whether batch operations target all repos or marked repos."
      :inapt-if-not magit-dash--repo-at-point-p)]
    ["Dashboard"
     ("pr"  "PR views…"       magit-dash-pr-views-menu)
-    ("nt"  "Filter by tag"   magit-dash-filter-by-tag)
+    ("nt"  (lambda () (if magit-dash--tag-filter
+                         (format "Filter by tag [%s]"
+                                 (if (listp magit-dash--tag-filter)
+                                     (mapconcat #'symbol-name magit-dash--tag-filter ", ")
+                                   magit-dash--tag-filter))
+                       "Filter by tag"))
+     magit-dash-filter-by-tag)
     ("rt"  "Refresh by tag"  magit-dash-refresh-by-tag)
     ("hr"  (lambda () (if (magit-dash--has-marks-p) "Hide marked" "Hide repo"))
      magit-dash-hide-repo

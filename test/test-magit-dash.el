@@ -4779,3 +4779,50 @@ The bug was that add-text-properties returns t, not the modified string."
         ;; 3. Clean repos by recent timestamp
         (should (eq (nth 3 sorted) r-recent-clean))
         (should (eq (nth 4 sorted) r-older-clean))))))
+
+;;;; Tag Filtering Enhancements
+
+(ert-deftest magit-dash/tag-and-label-configuration ()
+  "Registering repos supports :tag, :tags, :label, and :labels with strings or symbols."
+  (let ((magit-dash-repo-list nil))
+    ;; Singular symbol tag
+    (magit-dash-register :name "r1" :path "/tmp/r1" :tag 'work)
+    (should (equal '(work) (magit-dash-repo-tags (car magit-dash-repo-list))))
+    (should (equal '(work) (magit-dash-repo-labels (car magit-dash-repo-list))))
+    ;; String label and symbols in labels
+    (magit-dash-register :name "r2" :path "/tmp/r2" :label "infra" :labels '(backend "api"))
+    (let ((r2 (seq-find (lambda (r) (equal (magit-dash-repo-name r) "r2")) magit-dash-repo-list)))
+      (should (equal '(infra backend api) (magit-dash-repo-tags r2))))))
+
+(ert-deftest magit-dash/filter-by-tag-narrowing ()
+  "Filtering by tag allows narrowing (filtering down) with multiple tags."
+  (let* ((r1 (magit-dash-repo--make :name "r1" :path "/tmp/r1" :tags '(work backend)))
+         (r2 (magit-dash-repo--make :name "r2" :path "/tmp/r2" :tags '(work frontend)))
+         (r3 (magit-dash-repo--make :name "r3" :path "/tmp/r3" :tags '(personal frontend)))
+         (magit-dash-repo-list (list r1 r2 r3)))
+    ;; Matching single tag
+    (should (magit-dash--repo-matches-tag-filter-p r1 'work))
+    (should (magit-dash--repo-matches-tag-filter-p r2 'work))
+    (should-not (magit-dash--repo-matches-tag-filter-p r3 'work))
+    ;; Narrowed list of tags (filtering down)
+    (should (magit-dash--repo-matches-tag-filter-p r1 '(work backend)))
+    (should-not (magit-dash--repo-matches-tag-filter-p r2 '(work backend)))
+    ;; Filter interaction
+    (with-temp-buffer
+      (magit-dash-mode)
+      (setq-local magit-dash--tag-filter nil)
+      ;; First filter down: work
+      (cl-letf (((symbol-function 'magit-dash--read-tag) (lambda (&rest _) 'work))
+                ((symbol-function 'magit-dash-refresh) #'ignore))
+        (magit-dash-filter-by-tag)
+        (should (equal magit-dash--tag-filter '(work))))
+      ;; Narrow further: backend
+      (cl-letf (((symbol-function 'magit-dash--read-tag) (lambda (&rest _) 'backend))
+                ((symbol-function 'magit-dash-refresh) #'ignore))
+        (magit-dash-filter-by-tag)
+        (should (equal magit-dash--tag-filter '(work backend))))
+      ;; Clear filter
+      (cl-letf (((symbol-function 'magit-dash--read-tag) (lambda (&rest _) 'clear))
+                ((symbol-function 'magit-dash-refresh) #'ignore))
+        (magit-dash-filter-by-tag)
+        (should-not magit-dash--tag-filter)))))
