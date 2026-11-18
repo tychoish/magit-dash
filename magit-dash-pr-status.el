@@ -55,9 +55,18 @@ of `magit-dash-register'."
 Reviewers that GitHub reports as bots are always ignored."
   :type '(repeat string))
 
-(defvar magit-dash-pr-status-max-prs 100
+(defcustom magit-dash-pr-status-include-archived nil
+  "Whether to include open PRs from archived repositories.
+When nil (the default), `archived:false' is added to search queries so
+archived repositories are ignored."
+  :type 'boolean
+  :group 'magit-dash-pr-status)
+
+(defcustom magit-dash-pr-status-max-prs 100
   "Maximum number of open PRs collected across all pages.
-A search with more results signals an error.")
+A search with more results signals an error."
+  :type 'natnum
+  :group 'magit-dash-pr-status)
 
 (defvar magit-dash-pr-status-page-size 20
   "Number of PRs requested per GraphQL page.
@@ -139,8 +148,10 @@ Signal `user-error' when SLUG is malformed or `gh' fails or returns
 something unparseable."
   (magit-dash-pr-status--check-slug slug)
   (magit-dash-pr-status--fetch-search
-   (format "repo:%s is:pr is:open author:%s"
-           slug magit-dash-pr-status-author)
+   (format "repo:%s is:pr is:open%s author:%s"
+           slug
+           (if magit-dash-pr-status-include-archived "" " archived:false")
+           magit-dash-pr-status-author)
    dir))
 
 ;; Transient GitHub gateway failures (502/503/504) are common and clear
@@ -419,7 +430,9 @@ data.  Signal `user-error' when the query fails; the tracking cache is
 never touched."
   (magit-dash-pr-status--parse
    (magit-dash-pr-status--fetch-search
-    (format "is:pr is:open author:%s" magit-dash-pr-status-author)
+    (format "is:pr is:open%s author:%s"
+            (if magit-dash-pr-status-include-archived "" " archived:false")
+            magit-dash-pr-status-author)
     (or dir default-directory))
    (lambda (pr)
      (magit-dash-pr-status--required-approvals (plist-get pr :repo)))))

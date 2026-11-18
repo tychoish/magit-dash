@@ -336,12 +336,25 @@
                            (magit-dash-pr-status-test/node
                             "o/a" 9 (magit-dash-pr-status-test/approved-by "x"))))))))
       (let ((prs (magit-dash-pr-status-collect-all "/tmp")))
-        (should (cl-some (lambda (a) (string-match-p "is:pr is:open author:@me\\'" a)) seen))
+        (should (cl-some (lambda (a) (string-match-p "is:pr is:open archived:false author:@me\\'" a)) seen))
         (should-not (cl-some (lambda (a) (string-match-p "repo:" a)) seen))
         (should (equal '("o/b" "o/a") (mapcar (lambda (p) (plist-get p :repo)) prs)))
         ;; o/a requires 2 approvals, o/b falls back to 1.
         (should (eq 'ready (plist-get (nth 0 prs) :bucket)))
         (should (eq 'reviews (plist-get (nth 1 prs) :bucket)))))))
+
+(ert-deftest magit-dash-pr-status/include-archived-option ()
+  (let ((seen nil)
+        (magit-dash-pr-status-include-archived t))
+    (cl-letf (((symbol-function 'magit-dash-gh--call-process)
+               (lambda (args _dir)
+                 (setq seen args)
+                 (cons 0 (json-encode
+                          (magit-dash-pr-status-test/search
+                           (magit-dash-pr-status-test/node "o/b" 4)))))))
+      (magit-dash-pr-status-collect-all "/tmp")
+      (should (cl-some (lambda (a) (string-match-p "is:pr is:open author:@me\\'" a)) seen))
+      (should-not (cl-some (lambda (a) (string-match-p "archived:false" a)) seen)))))
 
 (ert-deftest magit-dash-pr-status/collect-single-repo-sets-repo ()
   (cl-letf (((symbol-function 'magit-dash-pr-status--fetch)
