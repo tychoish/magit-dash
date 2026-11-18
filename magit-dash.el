@@ -2357,47 +2357,60 @@ Returns an empty string when nothing is set."
   (save-excursion
     (goto-char pos)
     (when-let* ((id (tabulated-list-get-id)))
-      (magit-dash-repo-path id))))
+      (if (magit-dash-repo-p id)
+          (magit-dash-repo-path id)
+        (and (stringp id) id)))))
 
 (defun magit-dash--goto-path (path)
   "Move point to the row for repo PATH; return non-nil if found."
-  (goto-char (point-min))
-  (let (found)
-    (while (and (not found) (not (eobp)))
-      (if (equal path (magit-dash--path-at (point)))
-          (setq found t)
-        (forward-line 1)))
-    found))
+  (when path
+    (goto-char (point-min))
+    (let (found)
+      (while (and (not found) (not (eobp)))
+        (if (equal path (magit-dash--path-at (point)))
+            (setq found t)
+          (forward-line 1)))
+      found)))
 
 (defun magit-dash--print ()
   "Redraw the table, keeping every window's point and scroll position.
 `tabulated-list-print' only restores point in the current window and
 matches rows with `equal' on the repo struct, so a redraw from a timer
 or async callback (or after repos are rebuilt) sent point to the top.
-Rows are matched here by repo path instead."
-  (let ((saved (seq-map (lambda (win)
-                          (list win
-                                (magit-dash--path-at (window-point win))
-                                (magit-dash--path-at (window-start win))
-                                (save-excursion
-                                  (goto-char (window-point win))
-                                  (current-column))))
-                        (get-buffer-window-list nil nil t))))
+Rows are matched here by repo path instead, with line/column fallbacks."
+  (let* ((buf (current-buffer))
+         (buf-path (magit-dash--path-at (point)))
+         (buf-line (line-number-at-pos (point)))
+         (buf-col (current-column))
+         (saved (seq-map (lambda (win)
+                           (with-selected-window win
+                             (list win
+                                   (magit-dash--path-at (window-point win))
+                                   (magit-dash--path-at (window-start win))
+                                   (current-column)
+                                   (line-number-at-pos (window-point win)))))
+                         (get-buffer-window-list buf nil t))))
     (tabulated-list-print t)
+    ;; 1. Always restore point in current-buffer
+    (if (and buf-path (magit-dash--goto-path buf-path))
+        (move-to-column buf-col)
+      (goto-char (point-min))
+      (forward-line (1- (max 1 (min buf-line (count-lines (point-min) (point-max))))))
+      (move-to-column buf-col))
+    ;; 2. Restore point and scroll in all live windows displaying the buffer
     (seq-do (lambda (entry)
-              (pcase-let ((`(,win ,point-path ,start-path ,col) entry))
-                (when (and point-path (window-live-p win))
-                  (save-excursion
+              (pcase-let ((`(,win ,point-path ,start-path ,col ,line) entry))
+                (when (window-live-p win)
+                  (save-selected-window
+                    (select-window win)
                     (when (and start-path (magit-dash--goto-path start-path))
-                      (set-window-start win (point) t)))
-                  (when (save-excursion (magit-dash--goto-path point-path))
-                    (save-excursion
-                      (magit-dash--goto-path point-path)
-                      (move-to-column col)
-                      (set-window-point win (point)))
-                    (when (eq win (selected-window))
-                      (magit-dash--goto-path point-path)
-                      (move-to-column col))))))
+                      (set-window-start win (point) t))
+                    (if (and point-path (magit-dash--goto-path point-path))
+                        (move-to-column col)
+                      (goto-char (point-min))
+                      (forward-line (1- (max 1 (min line (count-lines (point-min) (point-max))))))
+                      (move-to-column col))
+                    (set-window-point win (point))))))
             saved)))
 
 (defun magit-dash--build-format (repos)
