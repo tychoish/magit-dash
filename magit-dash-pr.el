@@ -2104,7 +2104,7 @@ Key groups mirror `magit-dash-menu': w worktree, c CI, f filter, m mark."
     ("wi"  "Open Dired in worktree"   magit-dash-pr-dashboard-open-dired)]
    ["Chain"
     ("wc"  "Plan chain merge (from PR)" magit-dash-chain-plan)
-    ("wC"  "Resume chain"             magit-dash-chain-resume)
+    ("wm"  "Resume chain"             magit-dash-chain-resume)
     ("wh"  "Open chain plan"          magit-dash-chain-open)]
    ["CI"
     ("cf"  "Fetch CI logs"            magit-dash-pr-dashboard-fetch-ci)]]

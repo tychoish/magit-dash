@@ -2644,6 +2644,15 @@ A conflict (e.g. \"b\" and \"bp\" coexisting) causes transient to raise
     (should unmark-suffix)
     (should (equal "mc" (plist-get unmark-suffix :key)))))
 
+(ert-deftest magit-dash/transient-menu-chain-resume-key ()
+  "Chain resume suffix in `magit-dash-menu' is bound to wm without capitals."
+  (let* ((suffixes (test-magit-dash--all-transient-suffixes 'magit-dash-menu))
+         (resume-suffix (seq-find (lambda (s)
+                                    (eq (plist-get s :command) 'magit-dash-chain-resume))
+                                  suffixes)))
+    (should resume-suffix)
+    (should (equal "wm" (plist-get resume-suffix :key)))))
+
 (ert-deftest magit-dash/transient-menu-no-batch-all-toggle ()
   "`magit-dash-menu' does not have the redundant ma toggle."
   (let* ((suffixes (test-magit-dash--all-transient-suffixes 'magit-dash-menu))

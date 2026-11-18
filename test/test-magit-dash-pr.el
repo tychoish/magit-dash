@@ -671,14 +671,17 @@
   "magit-dash-pr-dashboard-menu contains create, create-all, review, clean, and mark commands."
   (let ((layout (get 'magit-dash-pr-dashboard-menu 'transient--layout)))
     (should layout)
-    (let ((flat (format "%S" layout)))
+    (let ((flat (format "%S" layout))
+          (case-fold-search nil))
       (should (string-match-p "magit-dash-pr-dashboard-code-review" flat))
       (should (string-match-p "magit-dash-pr-dashboard-create-worktree" flat))
       (should (string-match-p "magit-dash-pr-dashboard-create-all-worktrees" flat))
       (should (string-match-p "magit-dash-pr-dashboard-review-worktrees" flat))
       (should (string-match-p "magit-dash-pr-dashboard-clean-merged-worktrees" flat))
       (should (string-match-p "magit-dash-pr-dashboard-toggle-mark" flat))
-      (should (string-match-p "magit-dash-pr-dashboard-unmark-all" flat)))))
+      (should (string-match-p "magit-dash-pr-dashboard-unmark-all" flat))
+      (should (string-match-p ":key \"wm\" :description \"Resume chain\" :command magit-dash-chain-resume" flat))
+      (should-not (string-match-p ":key \"wC\"" flat)))))
 
 (ert-deftest magit-dash-pr/dashboard-pr-url-extraction ()
   "magit-dash-pr-dashboard--pr-url resolves URLs from strings, plists, and alists."

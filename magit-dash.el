@@ -4502,7 +4502,7 @@ Indicates whether batch operations target all repos or marked repos."
     ("wt"  "Toggle"          magit-dash-toggle-discovered-worktrees)
     ("wc"  "Plan PR chain merge" magit-dash-chain-plan
      :inapt-if-not magit-dash--repo-at-point-p)
-    ("wC"  "Resume PR chain"  magit-dash-chain-resume)
+    ("wm"  "Resume PR chain"  magit-dash-chain-resume)
     ("wv"  "View stack"       magit-dash-stack-open)]
    ["Agent Shell"
     ("av"  "Actions needing attention" magit-dash-actionable-open)
