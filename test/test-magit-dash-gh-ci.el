@@ -299,7 +299,11 @@ passes nil explicitly to exercise the disabled case."
                                           (status . "COMPLETED"))))))
          (res-fail (magit-dash-gh-ci--parse-graphql-rollup rollup-fail)))
     (should (equal (plist-get res-success :conclusion) "success"))
-    (should (equal (plist-get res-fail :conclusion) "failure"))))
+    (should (equal (plist-get res-fail :conclusion) "failure"))
+    ;; Ensure :null and nil rollups do not trigger map-elt method errors
+    (should (null (magit-dash-gh-ci--parse-graphql-rollup :null)))
+    (should (null (magit-dash-gh-ci--parse-graphql-rollup nil)))
+    (should (null (magit-dash-gh-ci--parse-graphql-rollup :false)))))
 
 (provide 'test-magit-dash-gh-ci)
 ;;; test-magit-dash-gh-ci.el ends here

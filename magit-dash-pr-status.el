@@ -178,10 +178,11 @@ failure) or returns something unparseable.  Touches no cache."
 
 (defun magit-dash-pr-status--bot-p (author)
   "Return non-nil when review AUTHOR (a GraphQL actor alist) is ignorable."
-  (let ((login (or (map-elt author 'login) "")))
-    (or (equal (map-elt author '__typename) "Bot")
-        (string-suffix-p "[bot]" login)
-        (member login magit-dash-pr-status-ignored-reviewers))))
+  (when (and author (not (eq author :null)) (or (consp author) (hash-table-p author)))
+    (let ((login (or (map-elt author 'login) "")))
+      (or (equal (map-elt author '__typename) "Bot")
+          (string-suffix-p "[bot]" login)
+          (member login magit-dash-pr-status-ignored-reviewers)))))
 
 (defun magit-dash-pr-status--latest-states (reviews)
   "Return the latest decisive review state of each human in REVIEWS.
@@ -190,12 +191,15 @@ or PENDING is decisive, matching GitHub: a later comment does not retract
 an approval."
   (let ((latest (make-hash-table :test #'equal)))
     (dolist (review reviews)
-      (let ((author (map-elt review 'author))
-            (state (map-elt review 'state)))
-        (unless (or (null author)
-                    (magit-dash-pr-status--bot-p author)
-                    (member state '("COMMENTED" "PENDING")))
-          (puthash (map-elt author 'login) state latest))))
+      (when (and review (not (eq review :null)) (or (consp review) (hash-table-p review)))
+        (let ((author (map-elt review 'author))
+              (state (map-elt review 'state)))
+          (unless (or (null author)
+                      (eq author :null)
+                      (not (or (consp author) (hash-table-p author)))
+                      (magit-dash-pr-status--bot-p author)
+                      (member state '("COMMENTED" "PENDING")))
+            (puthash (map-elt author 'login) state latest)))))
     (hash-table-values latest)))
 
 (defun magit-dash-pr-status--approvals (reviews)

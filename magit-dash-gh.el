@@ -294,9 +294,10 @@ Signals `user-error' when not inside a git repository."
 
 (defun magit-dash-gh--pr-closed-p (pr)
   "Return non-nil when PR alist represents a merged or closed PR."
-  (let ((state (map-elt pr 'state)))
-    (and (stringp state)
-         (member (upcase state) '("MERGED" "CLOSED")))))
+  (and pr (not (eq pr :null)) (or (listp pr) (hash-table-p pr))
+       (let ((state (map-elt pr 'state)))
+         (and (stringp state)
+              (member (upcase state) '("MERGED" "CLOSED"))))))
 
 (defun magit-dash-gh--default-branch (&optional dir)
   "Return the repository's default branch name, falling back to `main'.
@@ -463,12 +464,14 @@ Stale marked branches are dropped from `:marked'. Returns new candidates."
 
 (defun magit-dash-gh--prune-format-annotation (pr)
   "Return a one-line annotation string describing PR alist."
-  (let ((num (map-elt pr 'number))
-        (state (map-elt pr 'state))
-        (title (map-elt pr 'title)))
-    (if num
-        (format "PR #%s %s: %s" num state title)
-      (format "Git %s: %s" state title))))
+  (if (or (null pr) (eq pr :null) (not (or (listp pr) (hash-table-p pr))))
+      ""
+    (let ((num (map-elt pr 'number))
+          (state (map-elt pr 'state))
+          (title (map-elt pr 'title)))
+      (if num
+          (format "PR #%s %s: %s" num state title)
+        (format "Git %s: %s" state title)))))
 
 (defun magit-dash-gh--prune-build-menu (candidates marked &optional merged-worktrees)
   "Build a hash-table menu for the prune command.
