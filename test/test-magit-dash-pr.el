@@ -1335,5 +1335,24 @@
         (should (eq res :deleted))
         (should (equal deleted "/tmp/repo/.wt/pr-30"))))))
 
+(ert-deftest magit-dash-pr/default-directory-resolution ()
+  "PR dashboard default-directory is worktree if context is in it, repo root otherwise."
+  (let ((repo-root "/home/user/project/")
+        (wt-path "/home/user/project/.wt/pr-42/"))
+    (cl-letf (((symbol-function 'magit-dash-pr-dashboard--find-local-path)
+               (lambda (_) "/home/user/project"))
+              ((symbol-function 'magit-dash-pr--git-worktrees)
+               (lambda (_)
+                 (list `((path . ,(directory-file-name wt-path))))))
+              ((symbol-function 'file-directory-p) #'identity))
+      ;; From within the worktree -> resolves to worktree
+      (should (string-prefix-p wt-path
+                               (magit-dash-pr--resolve-dashboard-default-directory
+                                "org/project" (concat wt-path "src/"))))
+      ;; From elsewhere -> resolves to main repo root
+      (should (equal (magit-dash-pr--resolve-dashboard-default-directory
+                      "org/project" "/home/user/other/")
+                     repo-root)))))
+
 (provide 'test-magit-dash-pr)
 ;;; test-magit-dash-pr.el ends here
