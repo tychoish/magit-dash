@@ -242,16 +242,21 @@
               (failed 0))
           (dolist (num (seq-uniq pr-numbers))
             (let* ((entry (list :number num :repo repo-slug :pr nil))
-                   (wt-path (condition-case nil
-                                (magit-dash-pr--create-worktree-for-entry entry nil)
-                              (error nil))))
-              (if wt-path
-                  (push (list :pr_number num :worktree_path wt-path) created-paths)
-                (cl-incf failed))))
+                   (existing-wt (or (magit-dash-pr--find-existing-worktree repo-dir num)
+                                    (magit-dash-pr-dashboard--worktree-path entry))))
+              (if (and existing-wt (file-directory-p existing-wt))
+                  (push (list :pr_number num :worktree_path existing-wt :status "existing") created-paths)
+                (let ((wt-path (condition-case nil
+                                   (magit-dash-pr--create-worktree-for-entry entry nil)
+                                 (error nil))))
+                  (if wt-path
+                      (push (list :pr_number num :worktree_path wt-path :status "created") created-paths)
+                    (cl-incf failed))))))
           (setq created-paths (nreverse created-paths))
           (list :repo_dir repo-dir
                 :repo repo-slug
-                :created (length created-paths)
+                :created (seq-count (lambda (x) (equal (plist-get x :status) "created")) created-paths)
+                :existing (seq-count (lambda (x) (equal (plist-get x :status) "existing")) created-paths)
                 :failed failed
                 :worktree_path (if (= (length created-paths) 1)
                                    (plist-get (car created-paths) :worktree_path)
@@ -269,21 +274,22 @@
           (let* ((num (map-elt pr 'number))
                  (head (map-elt pr 'headRefName))
                  (expected-path (magit-dash-pr--compute-worktree-path repo-dir (format "pr-%d" num)))
-                 (matched-wt (seq-find
-                              (lambda (wt)
-                                (let ((wt-path (alist-get 'path wt)))
-                                  (and wt-path
-                                       (not (string= (directory-file-name (expand-file-name wt-path))
-                                                     (directory-file-name (expand-file-name repo-dir))))
-                                       (or (string= (directory-file-name (expand-file-name wt-path))
-                                                    (directory-file-name (expand-file-name expected-path)))
-                                           (equal (magit-dash-pr--match-worktree-to-pr wt (list pr)) pr)))))
-                              wts)))
+                 (matched-wt (or (magit-dash-pr--find-existing-worktree repo-dir num head)
+                                 (seq-find
+                                  (lambda (wt)
+                                    (let ((wt-path (alist-get 'path wt)))
+                                      (and wt-path
+                                           (not (string= (directory-file-name (expand-file-name wt-path))
+                                                         (directory-file-name (expand-file-name repo-dir))))
+                                           (or (string= (directory-file-name (expand-file-name wt-path))
+                                                        (directory-file-name (expand-file-name expected-path)))
+                                               (equal (magit-dash-pr--match-worktree-to-pr wt (list pr)) pr)))))
+                                  wts))))
             (if matched-wt
-                (progn
+                (let ((wt-path (if (consp matched-wt) (alist-get 'path matched-wt) matched-wt)))
                   (cl-incf existing)
                   (push (list :pr_number num
-                              :worktree_path (alist-get 'path matched-wt)
+                              :worktree_path wt-path
                               :status "existing")
                         worktree-results))
               (let* ((entry (list :number num :repo repo-slug :pr pr))
@@ -308,7 +314,7 @@
 ;;;; Tool 3: clean_merged_worktrees
 
 (mcpkit-register-tool "clean_merged_worktrees" 'magit-dash
-  :description "Clean up local git worktrees whose associated pull requests have been merged."
+  :description "Clean up local git worktrees whose associated pull requests have been merged or closed."
   :input-schema
   '(:type "object"
     :properties (:repo (:type "string"
