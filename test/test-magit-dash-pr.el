@@ -1354,5 +1354,21 @@
                       "org/project" "/home/user/other/")
                      repo-root)))))
 
+(ert-deftest magit-dash-pr/conflicts-view-test ()
+  "Conflicts view can be switched to and correctly configures filters."
+  (with-temp-buffer
+    (magit-dash-pr-dashboard-mode)
+    (cl-letf (((symbol-function 'magit-dash-pr-dashboard-refresh) #'ignore))
+      (magit-dash-pr-dashboard-switch-view "conflicts")
+      (should (eq (plist-get magit-dash-pr-dashboard--filters :conflicts) t))
+      ;; Check args with :conflicts
+      (let ((args (magit-dash-pr-dashboard--build-args
+                   '(:repo "org/repo" :conflicts t))))
+        (should (member "number,title,state,mergedAt,author,createdAt,updatedAt,comments,reviewDecision,statusCheckRollup,isDraft,url,headRefName,baseRefName,mergeable,mergeStateStatus" args))
+        (should (seq-some (lambda (a) (string-match-p "CONFLICTING.*DIRTY" a)) args)))
+      ;; Check views menu binding
+      (let ((flat (format "%S" (get 'magit-dash-pr-views-menu 'transient--layout))))
+        (should (string-match-p ":key \"c\" :description \"Merge conflicts\" :command magit-dash-pr-dash-conflicts" flat))))))
+
 (provide 'test-magit-dash-pr)
 ;;; test-magit-dash-pr.el ends here
