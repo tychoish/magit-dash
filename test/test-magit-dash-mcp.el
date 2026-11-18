@@ -129,7 +129,23 @@
                       "create_worktree_for_pr"
                       (list :repo tmp-repo :all_open t))))
             (should (= (plist-get res :created) 2))
-            (should (equal (nreverse created-nums) '(10 20)))))
+            (should (equal (nreverse created-nums) '(10 20))))
+          ;; PR with existing worktree is filtered
+          (setq created-nums nil)
+          (let ((orig-dir-p (symbol-function 'file-directory-p)))
+            (cl-letf (((symbol-function 'magit-dash-pr--find-existing-worktree)
+                       (lambda (_dir num &optional _head)
+                         (when (= num 10) "/tmp/existing-wt-10")))
+                      ((symbol-function 'file-directory-p)
+                       (lambda (p)
+                         (or (string= p "/tmp/existing-wt-10")
+                             (funcall orig-dir-p p)))))
+              (let ((res (magit-dash-mcp-call-tool
+                          "create_worktree_for_pr"
+                          (list :repo tmp-repo :all_open t))))
+                (should (= (plist-get res :created) 1))
+                (should (= (plist-get res :existing) 1))
+                (should (equal created-nums '(20)))))))
       (delete-directory tmp-repo t))))
 
 (ert-deftest magit-dash-mcp/clean-merged-worktrees-and-prune-branches ()

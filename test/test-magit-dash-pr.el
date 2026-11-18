@@ -1297,5 +1297,26 @@
       (magit-dash-pr-dashboard--print)
       (should (= 3 (plist-get (tabulated-list-get-id) :number))))))
 
+(ert-deftest magit-dash-pr/create-worktrees-filters-existing ()
+  "Creating worktrees for open PRs filters out those that already exist."
+  (let ((e1 (list :number 10 :repo "org/repo" :head-ref "feat-10"))
+        (e2 (list :number 20 :repo "org/repo" :head-ref "feat-20"))
+        (created nil))
+    (cl-letf (((symbol-function 'magit-dash-pr-dashboard--find-local-path)
+               (lambda (_) "/tmp/repo"))
+              ((symbol-function 'magit-dash-pr--find-existing-worktree)
+               (lambda (_repo num &optional _branch)
+                 (when (= num 10) "/tmp/repo/.wt/pr-10")))
+              ((symbol-function 'magit-dash-pr--create-worktree-for-entry)
+               (lambda (entry &optional _)
+                 (push (plist-get entry :number) created))))
+      ;; Marked creation filters out e1 (num 10) and only creates e2 (num 20)
+      (cl-letf (((symbol-function 'derived-mode-p) (lambda (&rest _) t))
+                ((symbol-function 'magit-dash-pr-dashboard--marked-or-at-point-entries)
+                 (lambda () (list e1 e2)))
+                ((symbol-function 'magit-dash-pr-dashboard--rebuild-entries) #'ignore))
+        (magit-dash-pr-dashboard-create-worktree)
+        (should (equal created '(20)))))))
+
 (provide 'test-magit-dash-pr)
 ;;; test-magit-dash-pr.el ends here
