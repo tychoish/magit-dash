@@ -4597,7 +4597,8 @@ The bug was that add-text-properties returns t, not the modified string."
     (should (equal "tag/toggle" (cadr (assoc ?t (cdr m)))))
     (should (equal "mark/menu" (cadr (assoc ?m (cdr m)))))
     (should (equal "hide" (cadr (assoc ?h (cdr m)))))
-    (should (equal "command" (cadr (assoc ?x (cdr m)))))))
+    (should (equal "command" (cadr (assoc ?x (cdr m)))))
+    (should (equal "ci" (cadr (assoc ?C (cdr m)))))))
 
 (ert-deftest magit-dash/which-key-default-abbreviation-is-strip ()
   "Test that default abbreviation setting is 'strip."
@@ -4780,7 +4781,49 @@ The bug was that add-text-properties returns t, not the modified string."
         (should (eq (nth 3 sorted) r-recent-clean))
         (should (eq (nth 4 sorted) r-older-clean))))))
 
-;;;; Tag Filtering Enhancements
+;;;; Worktree, CI, and Tag Filtering Enhancements
+
+(ert-deftest magit-dash/transient-menu-worktree-in-second-row ()
+  "Worktree group is located in the second row of `magit-dash-menu'."
+  (let* ((layout (get 'magit-dash-menu 'transient--layout))
+         (rows (aref layout 2))
+         (row1 (aref (nth 0 rows) 2))
+         (row2 (aref (nth 1 rows) 2))
+         (row1-cols (if (vectorp row1) (append row1 nil) row1))
+         (row2-cols (if (vectorp row2) (append row2 nil) row2))
+         (find-col (lambda (cols title)
+                     (seq-find (lambda (col)
+                                 (equal (plist-get (aref col 1) :description) title))
+                               cols))))
+    ;; Row 1 has Navigate, CI, Upstream, Agent Shell, Cache, but NOT Worktree
+    (should (funcall find-col row1-cols "Navigate"))
+    (should (funcall find-col row1-cols "CI"))
+    (should-not (funcall find-col row1-cols "Worktree"))
+    ;; Row 2 has Repository, Worktree, and Batch
+    (should (funcall find-col row2-cols "Repository"))
+    (should (funcall find-col row2-cols "Worktree"))))
+
+(ert-deftest magit-dash/ci-direct-keybindings-and-menu ()
+  "CI operations are directly accessible via C and c key prefixes in `magit-dash-mode-map'."
+  (let ((m magit-dash-mode-map))
+    ;; C prefix
+    (should (eq (lookup-key m (kbd "C f")) #'magit-dash-gh-ci-fetch-at-point))
+    (should (eq (lookup-key m (kbd "C o")) #'magit-dash-gh-ci-open-at-point))
+    (should (eq (lookup-key m (kbd "C x")) #'magit-dash-gh-ci-fix-at-point))
+    (should (eq (lookup-key m (kbd "C w")) #'magit-dash-gh-workflow-run))
+    (should (eq (lookup-key m (kbd "C c")) #'magit-dash-ci-menu))
+    (should (eq (lookup-key m (kbd "C ?")) #'magit-dash-ci-menu))
+    ;; c prefix
+    (should (eq (lookup-key m (kbd "c f")) #'magit-dash-gh-ci-fetch-at-point))
+    (should (eq (lookup-key m (kbd "c x")) #'magit-dash-gh-ci-fix-at-point))
+    (should (eq (lookup-key m (kbd "c w")) #'magit-dash-gh-workflow-run))
+    (should (eq (lookup-key m (kbd "c i")) #'magit-dash-ci-menu))
+    ;; magit-dash-ci-menu transient layout
+    (let ((suffixes (test-magit-dash--all-transient-suffixes 'magit-dash-ci-menu)))
+      (should (seq-find (lambda (s) (equal "f" (plist-get s :key))) suffixes))
+      (should (seq-find (lambda (s) (equal "o" (plist-get s :key))) suffixes))
+      (should (seq-find (lambda (s) (equal "x" (plist-get s :key))) suffixes))
+      (should (seq-find (lambda (s) (equal "w" (plist-get s :key))) suffixes)))))
 
 (ert-deftest magit-dash/tag-and-label-configuration ()
   "Registering repos supports :tag, :tags, :label, and :labels with strings or symbols."
@@ -4826,8 +4869,6 @@ The bug was that add-text-properties returns t, not the modified string."
                 ((symbol-function 'magit-dash-refresh) #'ignore))
         (magit-dash-filter-by-tag)
         (should-not magit-dash--tag-filter)))))
-
-;;;; Worktree and Submodule Visibility Enhancements
 
 (ert-deftest magit-dash/repo-worktree-and-submodule-defaults ()
   "Repositories can configure hide/show for worktrees and submodules by default."

@@ -759,8 +759,8 @@ Keyword arguments:
 
 (defconst magit-dash--register-known-keys
   '(:name :path :repo :include-prs :include-ci :auto-fetch :auto-pull
-    :auto-commit :auto-push :auto-sync-command :hooks :tags :tag :label :labels :commands
-    :sort-hint :worktree :sync-branches :timer :clone-url :remote-url
+    :auto-commit :auto-push :auto-sync-command :hooks :tags :tag :label :labels
+    :commands :sort-hint :worktree :sync-branches :timer :clone-url :remote-url
     :worktree-symlinks :symlinks :remote-sync :sync-on-refresh
     :auto-sync-on-refresh :refresh-sync :fetch-on-refresh :gh-account
     :gh-host :pr :upstream-repo :upstream :upstream-branch
@@ -2664,11 +2664,24 @@ fixed widths and are right-aligned."
     (keymap-set m "p r" #'magit-dash-pr-views-menu)
     (keymap-set m "p d" #'magit-dash-pr)
 
+    ;; CI prefix: C
+    (keymap-set m "C"   (cons "ci" (make-sparse-keymap)))
+    (keymap-set m "C f" #'magit-dash-gh-ci-fetch-at-point)
+    (keymap-set m "C o" #'magit-dash-gh-ci-open-at-point)
+    (keymap-set m "C x" #'magit-dash-gh-ci-fix-at-point)
+    (keymap-set m "C w" #'magit-dash-gh-workflow-run)
+    (keymap-set m "C c" #'magit-dash-ci-menu)
+    (keymap-set m "C ?" #'magit-dash-ci-menu)
+
     ;; Commit prefix: c
     (keymap-set m "c"   (cons "commit" (make-sparse-keymap)))
     (keymap-set m "c c" #'magit-dash-magit-commit)
     (keymap-set m "c a" #'magit-dash-commit-all)
     (keymap-set m "c o" #'magit-dash-commit)
+    (keymap-set m "c f" #'magit-dash-gh-ci-fetch-at-point)
+    (keymap-set m "c x" #'magit-dash-gh-ci-fix-at-point)
+    (keymap-set m "c w" #'magit-dash-gh-workflow-run)
+    (keymap-set m "c i" #'magit-dash-ci-menu)
 
     ;; Sync & Stage prefix: s
     (keymap-set m "s"   (cons "sync/stage" (make-sparse-keymap)))
@@ -2715,9 +2728,9 @@ fixed widths and are right-aligned."
     (keymap-set m "t t" #'magit-dash-filter-by-tag)
     (keymap-set m "t a" #'magit-dash-add-tag)
     (keymap-set m "t c" #'magit-dash-toggle-column)
-    (keymap-set m "t x" #'magit-dash-clear-tag-filter)
     (keymap-set m "t s" #'magit-dash-toggle-submodules)
     (keymap-set m "t w" #'magit-dash-toggle-worktrees)
+    (keymap-set m "t x" #'magit-dash-clear-tag-filter)
 
     ;; Hide prefix: h (preserved as-is)
     (keymap-set m "h"   (cons "hide" (make-sparse-keymap)))
@@ -4362,6 +4375,18 @@ Prompts for agent config and session choice before creating the shell."
               (ci (magit-dash-gh--cache-get (magit-dash-repo-path repo) :ci-status)))
     (and (not (plist-get ci :none)))))
 
+(transient-define-prefix magit-dash-ci-menu ()
+  "Actions for GitHub CI for repository at point."
+  ["CI Operations"
+   ("f"  "Fetch CI status" magit-dash-gh-ci-fetch-at-point
+    :inapt-if-not magit-dash--repo-has-ci-p)
+   ("o"  "Open last run"   magit-dash-gh-ci-open-at-point
+    :inapt-if-not magit-dash--repo-has-ci-status-p)
+   ("x"  "Fix CI (agent)"  magit-dash-gh-ci-fix-at-point
+    :inapt-if-not magit-dash--repo-has-ci-p)
+   ("w"  "Trigger workflow" magit-dash-gh-workflow-run
+    :inapt-if-not magit-dash--repo-has-ci-p)])
+
 ;;;###autoload
 (defun magit-dash-open-other-window ()
   "Open the repository dashboard buffer in another window.
@@ -4800,23 +4825,6 @@ Indicates whether batch operations target all repos or marked repos."
     ("um"  "Merge upstream"  magit-dash-upstream-merge)
     ("ur"  "Rebase upstream" magit-dash-upstream-rebase)
     ("uf"  "Fetch upstream"  magit-dash-upstream-fetch)]
-   ["Worktree"
-    ("wp"  "Dispatch task"   magit-dash-open-worktree-dispatch
-     :inapt-if-not magit-dash--repo-at-point-p)
-    ("wa"  "Add"             magit-dash-worktree-add
-     :inapt-if-not magit-dash--can-add-worktree-p)
-    ("wr"  "From PR"         magit-dash-worktree-from-pr
-     :inapt-if-not magit-dash--repo-at-point-p)
-    ("wd"  "Delete"          magit-dash-worktree-delete
-     :inapt-if-not magit-dash--at-worktree-p)
-    ("ws"  "Sync symlinks"   magit-dash-worktree-sync-symlinks
-     :inapt-if-not magit-dash--repo-at-point-p)
-    ("wt"  "Toggle worktrees" magit-dash-toggle-worktrees
-     :inapt-if-not magit-dash--repo-at-point-p)
-    ("wc"  "Plan PR chain merge" magit-dash-chain-plan
-     :inapt-if-not magit-dash--repo-at-point-p)
-    ("wm"  "Resume PR chain"  magit-dash-chain-resume)
-    ("wv"  "View stack"       magit-dash-stack-open)]
    ["Agent Shell"
     ("av"  "Actions needing attention" magit-dash-actionable-open)
     ("as"  "Open"           magit-dash-agent-shell
@@ -4856,6 +4864,23 @@ Indicates whether batch operations target all repos or marked repos."
     ("rr"  (lambda () (if (magit-dash--has-marks-p) "Refresh marked" "Refresh row"))
      magit-dash-refresh-repo
      :inapt-if-not magit-dash--can-refresh-repo-p)]
+   ["Worktree"
+    ("wp"  "Dispatch task"   magit-dash-open-worktree-dispatch
+     :inapt-if-not magit-dash--repo-at-point-p)
+    ("wa"  "Add"             magit-dash-worktree-add
+     :inapt-if-not magit-dash--can-add-worktree-p)
+    ("wr"  "From PR"         magit-dash-worktree-from-pr
+     :inapt-if-not magit-dash--repo-at-point-p)
+    ("wd"  "Delete"          magit-dash-worktree-delete
+     :inapt-if-not magit-dash--at-worktree-p)
+    ("ws"  "Sync symlinks"   magit-dash-worktree-sync-symlinks
+     :inapt-if-not magit-dash--repo-at-point-p)
+    ("wt"  "Toggle worktrees" magit-dash-toggle-worktrees
+     :inapt-if-not magit-dash--repo-at-point-p)
+    ("wc"  "Plan PR chain merge" magit-dash-chain-plan
+     :inapt-if-not magit-dash--repo-at-point-p)
+    ("wm"  "Resume PR chain"  magit-dash-chain-resume)
+    ("wv"  "View stack"       magit-dash-stack-open)]
    [:description magit-dash--batch-group-title
     ("SPC" "Toggle mark"     magit-dash-toggle-mark
      :inapt-if-not magit-dash--repo-at-point-p
