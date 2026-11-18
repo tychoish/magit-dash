@@ -124,7 +124,10 @@
   (gh-host "github.com")
   (pr nil)
   (upstream-repo nil)
-  (upstream-branch nil))
+  (upstream-branch nil)
+  (show-worktrees 'default)
+  (show-submodules 'default)
+  (parent nil))
 
 (defalias 'magit-dash-repo-account #'magit-dash-repo-gh-account)
 (defalias 'magit-dash-repo-host #'magit-dash-repo-gh-host)
@@ -134,6 +137,8 @@
 (defalias 'magit-dash-repo-auto-sync-on-refresh #'magit-dash-repo-sync-on-refresh)
 (defalias 'magit-dash-repo-refresh-sync #'magit-dash-repo-sync-on-refresh)
 (defalias 'magit-dash-repo-labels #'magit-dash-repo-tags)
+(defalias 'magit-dash-repo-worktrees #'magit-dash-repo-show-worktrees)
+(defalias 'magit-dash-repo-submodules #'magit-dash-repo-show-submodules)
 
 (defvar magit-dash-repo-list '()
   "List of `magit-dash-repo' structs registered for dashboard display.
@@ -570,7 +575,7 @@ first)."
                    raw))))
    (t nil)))
 
-(cl-defun magit-dash-register (&key name path repo include-prs include-ci auto-fetch auto-pull auto-commit auto-push auto-sync-command hooks tags tag label labels commands sort-hint worktree sync-branches timer clone-url remote-url worktree-symlinks symlinks remote-sync sync-on-refresh auto-sync-on-refresh refresh-sync fetch-on-refresh gh-account gh-host pr upstream-repo upstream upstream-branch)
+(cl-defun magit-dash-register (&key name path repo include-prs include-ci auto-fetch auto-pull auto-commit auto-push auto-sync-command hooks tags tag label labels commands sort-hint worktree sync-branches timer clone-url remote-url worktree-symlinks symlinks remote-sync sync-on-refresh auto-sync-on-refresh refresh-sync fetch-on-refresh gh-account gh-host pr upstream-repo upstream upstream-branch (show-worktrees 'default) hide-worktrees (show-submodules 'default) hide-submodules)
   "Register or replace a repository with NAME at absolute PATH.
 REPO is the upstream repository path or URL for bootstrapping.
 INCLUDE-PRS, INCLUDE-CI, AUTO-FETCH, AUTO-PULL, AUTO-COMMIT, AUTO-PUSH,
@@ -626,6 +631,12 @@ Keyword arguments:
   :tag            alias / singular form of :tags.
   :label          alias for :tags.
   :labels         alias for :tags.
+  :show-worktrees boolean (t or nil) specifying whether auto-discovered
+                  worktrees for this repo are shown by default.
+  :hide-worktrees non-nil sets :show-worktrees to nil.
+  :show-submodules boolean (t or nil) specifying whether auto-discovered
+                  submodules for this repo are shown by default.
+  :hide-submodules non-nil sets :show-submodules to nil.
   :commands       alist of (LABEL . FUNCTION) for the repo command picker.
   :sort-hint      number controlling display order; lower values appear first.
                   Repos without a sort-hint appear after all sorted repos.
@@ -699,7 +710,17 @@ Keyword arguments:
            (append (magit-dash--normalize-tags tags)
                    (magit-dash--normalize-tags tag)
                    (magit-dash--normalize-tags label)
-                   (magit-dash--normalize-tags labels)))))
+                   (magit-dash--normalize-tags labels))))
+         (effective-show-worktrees
+          (cond
+           (hide-worktrees nil)
+           ((not (eq show-worktrees 'default)) show-worktrees)
+           (t 'default)))
+         (effective-show-submodules
+          (cond
+           (hide-submodules nil)
+           ((not (eq show-submodules 'default)) show-submodules)
+           (t 'default))))
     (setq magit-dash-repo-list
           (thread-last magit-dash-repo-list
             (seq-remove (lambda (r)
@@ -730,7 +751,9 @@ Keyword arguments:
                            :gh-host (or gh-host magit-dash-multi-github-host "github.com")
                            :pr pr
                            :upstream-repo upstream-target
-                           :upstream-branch upstream-branch))))))
+                           :upstream-branch upstream-branch
+                           :show-worktrees effective-show-worktrees
+                           :show-submodules effective-show-submodules))))))
   (when (and timer (fboundp 'magit-dash-register-sync-timer))
     (apply #'magit-dash-register-sync-timer :name name :repos (list name) timer)))
 
@@ -740,7 +763,8 @@ Keyword arguments:
     :sort-hint :worktree :sync-branches :timer :clone-url :remote-url
     :worktree-symlinks :symlinks :remote-sync :sync-on-refresh
     :auto-sync-on-refresh :refresh-sync :fetch-on-refresh :gh-account
-    :gh-host :pr :upstream-repo :upstream :upstream-branch)
+    :gh-host :pr :upstream-repo :upstream :upstream-branch
+    :show-worktrees :hide-worktrees :show-submodules :hide-submodules)
   "List of keyword arguments accepted by `magit-dash-register'.")
 
 (defun magit-dash--merge-plists (base override)
@@ -2067,7 +2091,8 @@ immediately after its parent and gets its own CI status fetched."
               :sort-hint sort-hint
               :include-ci include-ci
               :sync-on-refresh sync-on-refresh
-              :fetch-on-refresh fetch-on-refresh)))))
+              :fetch-on-refresh fetch-on-refresh
+              :parent main-path)))))
       (seq-remove #'null))))
 
 (defun magit-dash--prune-and-list-worktrees (path)
@@ -2130,7 +2155,8 @@ Missing/uninitialized submodules are marked with :submodule \\='missing."
                                (magit-dash-repo-name registered)
                              (file-name-nondirectory (directory-file-name rel-path))))
               :path abs-path
-              :submodule (if missing-p 'missing t))))))
+              :submodule (if missing-p 'missing t)
+              :parent main-path)))))
       (seq-remove #'null))))
 
 (defun magit-dash--rebuild-submodule-path-set ()
@@ -2238,25 +2264,139 @@ Name and Branch widths are computed dynamically in `magit-dash--build-format'.")
   (magit-dash-refresh))
 
 (defvar magit-dash-show-discovered-submodules nil
-  "When non-nil, auto-discovered submodules appear below their parent.")
-
-(defun magit-dash-toggle-discovered-submodules ()
-  "Toggle visibility of discovered submodules in the dashboard and refresh."
-  (interactive)
-  (setq magit-dash-show-discovered-submodules
-        (not magit-dash-show-discovered-submodules))
-  (magit-dash-refresh))
+  "When non-nil, auto-discovered submodules appear below their parent by default.")
 
 (defvar magit-dash-show-discovered-worktrees t
-  "When non-nil, auto-discovered worktrees appear below their parent
-in the dashboard.")
+  "When non-nil, auto-discovered worktrees appear below their parent by default.")
 
-(defun magit-dash-toggle-discovered-worktrees ()
-  "Toggle visibility of auto-discovered worktrees in the dashboard and refresh."
+(defvar magit-dash--repo-worktrees-visibility (make-hash-table :test #'equal)
+  "Session table mapping expanded repo path strings to worktree visibility boolean.")
+
+(defvar magit-dash--repo-submodules-visibility (make-hash-table :test #'equal)
+  "Session table mapping expanded repo path strings to submodule visibility boolean.")
+
+(defun magit-dash--repo-show-worktrees-p (repo)
+  "Return non-nil if auto-discovered worktrees should be shown for REPO."
+  (let* ((path (expand-file-name (magit-dash-repo-path repo)))
+         (session-val (gethash path magit-dash--repo-worktrees-visibility 'unset)))
+    (if (not (eq session-val 'unset))
+        session-val
+      (let ((conf (magit-dash-repo-show-worktrees repo)))
+        (cond
+         ((eq conf t) t)
+         ((null conf) nil)
+         (t magit-dash-show-discovered-worktrees))))))
+
+(defun magit-dash--repo-show-submodules-p (repo)
+  "Return non-nil if auto-discovered submodules should be shown for REPO."
+  (let* ((path (expand-file-name (magit-dash-repo-path repo)))
+         (session-val (gethash path magit-dash--repo-submodules-visibility 'unset)))
+    (if (not (eq session-val 'unset))
+        session-val
+      (let ((conf (magit-dash-repo-show-submodules repo)))
+        (cond
+         ((eq conf t) t)
+         ((null conf) nil)
+         (t magit-dash-show-discovered-submodules))))))
+
+(defun magit-dash--target-repo-for-toggle (&optional repo)
+  "Return REPO or the main repository associated with REPO or point."
+  (let* ((target (or repo (magit-dash--repo-at-point)))
+         (path (expand-file-name (magit-dash-repo-path target))))
+    (if (not (magit-dash-repo-worktree target))
+        target
+      (let ((parent-path (magit-dash-repo-parent target)))
+        (or (when parent-path
+              (seq-find (lambda (r)
+                          (equal (expand-file-name (magit-dash-repo-path r))
+                                 (expand-file-name parent-path)))
+                        magit-dash-repo-list))
+            (seq-find (lambda (r)
+                        (and (not (magit-dash-repo-worktree r))
+                             (let ((wts (magit-dash-gh--cache-get (magit-dash-repo-path r) :worktrees)))
+                               (seq-some (lambda (wt)
+                                           (equal (expand-file-name (magit-dash-repo-path wt)) path))
+                                         wts))))
+                      magit-dash-repo-list)
+            target)))))
+
+(defun magit-dash-toggle-worktrees (&optional repo)
+  "Toggle visibility of worktrees for REPO (defaults to repo at point).
+When point is not on a repository, prompts for one using `annotated-completing-read'."
   (interactive)
-  (setq magit-dash-show-discovered-worktrees
-        (not magit-dash-show-discovered-worktrees))
-  (magit-dash-refresh))
+  (let* ((target
+          (cond
+           (repo (magit-dash--target-repo-for-toggle repo))
+           ((magit-dash--repo-at-point-p)
+            (magit-dash--target-repo-for-toggle (magit-dash--repo-at-point)))
+           (t
+            (let* ((candidates
+                    (seq-map (lambda (r)
+                               (let* ((path (magit-dash-repo-path r))
+                                      (status (if (magit-dash--repo-show-worktrees-p r)
+                                                  "[worktrees shown] "
+                                                "[worktrees hidden] "))
+                                      (ann (concat status (magit-dash--repo-annotation r))))
+                                 (cons (magit-dash-repo-name r) (cons ann r))))
+                             (seq-filter (lambda (r) (not (magit-dash-repo-worktree r)))
+                                         magit-dash-repo-list)))
+                   (table (map-into candidates '(hash-table :test equal))))
+              (annotated-completing-read
+               table
+               :prompt "Toggle worktrees for repo: "
+               :require-match t
+               :category 'magit-dash-repo))))))
+    (when target
+      (let* ((path (expand-file-name (magit-dash-repo-path target)))
+             (current (magit-dash--repo-show-worktrees-p target))
+             (new-state (not current)))
+        (puthash path new-state magit-dash--repo-worktrees-visibility)
+        (magit-dash-refresh)
+        (message "magit-dash: worktrees %s for %s"
+                 (if new-state "shown" "hidden")
+                 (magit-dash-repo-name target))))))
+
+(defalias 'magit-dash-toggle-repo-worktrees #'magit-dash-toggle-worktrees)
+(defalias 'magit-dash-toggle-discovered-worktrees #'magit-dash-toggle-worktrees)
+
+(defun magit-dash-toggle-submodules (&optional repo)
+  "Toggle visibility of submodules for REPO (defaults to repo at point).
+When point is not on a repository, prompts for one using `annotated-completing-read'."
+  (interactive)
+  (let* ((target
+          (cond
+           (repo (magit-dash--target-repo-for-toggle repo))
+           ((magit-dash--repo-at-point-p)
+            (magit-dash--target-repo-for-toggle (magit-dash--repo-at-point)))
+           (t
+            (let* ((candidates
+                    (seq-map (lambda (r)
+                               (let* ((path (magit-dash-repo-path r))
+                                      (status (if (magit-dash--repo-show-submodules-p r)
+                                                  "[submodules shown] "
+                                                "[submodules hidden] "))
+                                      (ann (concat status (magit-dash--repo-annotation r))))
+                                 (cons (magit-dash-repo-name r) (cons ann r))))
+                             (seq-filter (lambda (r) (not (magit-dash-repo-submodule r)))
+                                         magit-dash-repo-list)))
+                   (table (map-into candidates '(hash-table :test equal))))
+              (annotated-completing-read
+               table
+               :prompt "Toggle submodules for repo: "
+               :require-match t
+               :category 'magit-dash-repo))))))
+    (when target
+      (let* ((path (expand-file-name (magit-dash-repo-path target)))
+             (current (magit-dash--repo-show-submodules-p target))
+             (new-state (not current)))
+        (puthash path new-state magit-dash--repo-submodules-visibility)
+        (magit-dash-refresh)
+        (message "magit-dash: submodules %s for %s"
+                 (if new-state "shown" "hidden")
+                 (magit-dash-repo-name target))))))
+
+(defalias 'magit-dash-toggle-repo-submodules #'magit-dash-toggle-submodules)
+(defalias 'magit-dash-toggle-discovered-submodules #'magit-dash-toggle-submodules)
 
 
 ;;;; Formatting helpers
@@ -2558,7 +2698,7 @@ fixed widths and are right-aligned."
     (keymap-set m "w r" #'magit-dash-worktree-from-pr)
     (keymap-set m "w k" #'magit-dash-worktree-delete)
     (keymap-set m "w s" #'magit-dash-worktree-sync-symlinks)
-    (keymap-set m "w t" #'magit-dash-toggle-discovered-worktrees)
+    (keymap-set m "w t" #'magit-dash-toggle-worktrees)
 
     ;; Agent Shell & Autosync prefix: a
     (keymap-set m "a"   (cons "agent/autosync" (make-sparse-keymap)))
@@ -2576,8 +2716,8 @@ fixed widths and are right-aligned."
     (keymap-set m "t a" #'magit-dash-add-tag)
     (keymap-set m "t c" #'magit-dash-toggle-column)
     (keymap-set m "t x" #'magit-dash-clear-tag-filter)
-    (keymap-set m "t s" #'magit-dash-toggle-discovered-submodules)
-    (keymap-set m "t w" #'magit-dash-toggle-discovered-worktrees)
+    (keymap-set m "t s" #'magit-dash-toggle-submodules)
+    (keymap-set m "t w" #'magit-dash-toggle-worktrees)
 
     ;; Hide prefix: h (preserved as-is)
     (keymap-set m "h"   (cons "hide" (make-sparse-keymap)))
@@ -2595,8 +2735,8 @@ fixed widths and are right-aligned."
     (keymap-set m "n"   #'magit-dash-sync)
     (keymap-set m "i"   #'magit-dash-add-tag)
     (keymap-set m "k"   #'magit-dash-worktree-delete)
-    (keymap-set m "M-s" #'magit-dash-toggle-discovered-submodules)
-    (keymap-set m "M-t" #'magit-dash-toggle-discovered-worktrees)
+    (keymap-set m "M-s" #'magit-dash-toggle-submodules)
+    (keymap-set m "M-t" #'magit-dash-toggle-worktrees)
     m)
   "Keymap for `magit-dash-mode'.")
 
@@ -2882,9 +3022,9 @@ registered entry is shown instead."
                              paths)))
     (seq-mapcat (lambda (repo)
                   (cons repo
-                        (append (when magit-dash-show-discovered-worktrees
+                        (append (when (magit-dash--repo-show-worktrees-p repo)
                                   (magit-dash-gh--cache-get (magit-dash-repo-path repo) :worktrees))
-                                (when magit-dash-show-discovered-submodules
+                                (when (magit-dash--repo-show-submodules-p repo)
                                   (seq-remove
                                    (lambda (sm)
                                      (gethash (magit-dash-repo-path sm) registered-paths))
@@ -4671,7 +4811,8 @@ Indicates whether batch operations target all repos or marked repos."
      :inapt-if-not magit-dash--at-worktree-p)
     ("ws"  "Sync symlinks"   magit-dash-worktree-sync-symlinks
      :inapt-if-not magit-dash--repo-at-point-p)
-    ("wt"  "Toggle"          magit-dash-toggle-discovered-worktrees)
+    ("wt"  "Toggle worktrees" magit-dash-toggle-worktrees
+     :inapt-if-not magit-dash--repo-at-point-p)
     ("wc"  "Plan PR chain merge" magit-dash-chain-plan
      :inapt-if-not magit-dash--repo-at-point-p)
     ("wm"  "Resume PR chain"  magit-dash-chain-resume)
@@ -4803,7 +4944,6 @@ Indicates whether batch operations target all repos or marked repos."
      magit-dash-toggle-branch-basename
      :transient t)
     ("tc"  "Toggle column"   magit-dash-toggle-column)
-    ("ts"  "Toggle submodules" magit-dash-toggle-discovered-submodules)
     ("gg"  "Refresh"         magit-dash-refresh)
     ("q"   "Quit"            magit-dash-quit-window)]])
 

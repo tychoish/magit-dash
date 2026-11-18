@@ -193,7 +193,7 @@ Below is an example ~use-package~ configuration block setting useful options wit
 :CUSTOM_ID: key-options--customization
 :END:
 - *Columns Visibility*: ~magit-dash-columns~ controls which columns are rendered in the dashboard table (=name=, =branch=, =fetched=, =status=, =upstream=, =remote=, =ops=).
-- *Worktrees & Submodules*: ~magit-dash-show-discovered-worktrees~ and ~magit-dash-show-discovered-submodules~ toggle automatic inline listing of worktrees and submodules.
+- *Worktrees & Submodules*: ~magit-dash-show-discovered-worktrees~ and ~magit-dash-show-discovered-submodules~ define global defaults for inline listing of worktrees and submodules. Repositories can individually set ~:show-worktrees~ / ~:hide-worktrees~ or ~:show-submodules~ / ~:hide-submodules~ in ~magit-dash-register~, and visibility can be toggled per-repo with ~magit-dash-toggle-worktrees~ (=w t=, =t w=) and ~magit-dash-toggle-submodules~ (=t s=).
 - *Tags & Filtering*: Repositories accept ~:tags~ (or ~:tag~, ~:labels~, ~:label~) in ~magit-dash-register~. Use ~magit-dash-filter-by-tag~ (=t t= or =n t= in transient) to filter or progressively narrow repositories by tag using ~annotated-completing-read~, and ~magit-dash-clear-tag-filter~ (=t x=) to clear.
 - *Async Execution*: ~magit-dash-run-command-in-background~ runs external repository commands asynchronously in a background compilation buffer when non-nil.
 - *Status Buffer Integration*: ~magit-dash-status-enable~ inserts GitHub CI headers, PR status, and authored PR sections directly into ~magit-status~ buffers.

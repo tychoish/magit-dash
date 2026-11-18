@@ -29,8 +29,11 @@
 - [[file:api.org::#magit-dash-worktree-auto-symlink][~magit-dash-worktree-auto-symlink~]]: Automatically link shared targets upon worktree creation.
 - [[file:api.org::#magit-dash-bump-submodules-menu][~magit-dash-bump-submodules-menu~]]: Interactive transient menu to inspect and advance submodules.
 - [[file:api.org::#magit-dash-bump-submodules-all][~magit-dash-bump-submodules-all~]]: Fast forward all registered submodules to latest upstream commits.
-- [[file:api.org::#magit-dash-show-discovered-worktrees][~magit-dash-show-discovered-worktrees~]]: Toggle worktree rows in the repository dashboard.
-- [[file:api.org::#magit-dash-show-discovered-submodules][~magit-dash-show-discovered-submodules~]]: Toggle submodule rows in the repository dashboard.
+- [[file:api.org::#magit-dash-show-discovered-worktrees][~magit-dash-show-discovered-worktrees~]]: Global default for worktree rows in the repository dashboard.
+- [[file:api.org::#magit-dash-show-discovered-submodules][~magit-dash-show-discovered-submodules~]]: Global default for submodule rows in the repository dashboard.
+- ~magit-dash-toggle-worktrees~ (bound to =w t=, =t w=, =M-t=): Toggle worktree visibility for the repository at point.
+- ~magit-dash-toggle-submodules~ (bound to =t s=): Toggle submodule visibility for the repository at point.
+- =magit-dash-register= options ~:show-worktrees~, ~:hide-worktrees~, ~:show-submodules~, ~:hide-submodules~: Configure per-repo worktree and submodule visibility defaults.
 
 * Example
 

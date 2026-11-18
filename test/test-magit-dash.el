@@ -4826,3 +4826,55 @@ The bug was that add-text-properties returns t, not the modified string."
                 ((symbol-function 'magit-dash-refresh) #'ignore))
         (magit-dash-filter-by-tag)
         (should-not magit-dash--tag-filter)))))
+
+;;;; Worktree and Submodule Visibility Enhancements
+
+(ert-deftest magit-dash/repo-worktree-and-submodule-defaults ()
+  "Repositories can configure hide/show for worktrees and submodules by default."
+  (let ((magit-dash-repo-list nil))
+    (magit-dash-register :name "r1" :path "/tmp/r1" :show-worktrees nil :show-submodules t)
+    (magit-dash-register :name "r2" :path "/tmp/r2" :hide-worktrees t :hide-submodules t)
+    (magit-dash-register :name "r3" :path "/tmp/r3" :show-worktrees t)
+    (let ((r1 (seq-find (lambda (r) (equal (magit-dash-repo-name r) "r1")) magit-dash-repo-list))
+          (r2 (seq-find (lambda (r) (equal (magit-dash-repo-name r) "r2")) magit-dash-repo-list))
+          (r3 (seq-find (lambda (r) (equal (magit-dash-repo-name r) "r3")) magit-dash-repo-list)))
+      (should (null (magit-dash-repo-show-worktrees r1)))
+      (should (eq t (magit-dash-repo-show-submodules r1)))
+      (should-not (magit-dash--repo-show-worktrees-p r1))
+      (should (magit-dash--repo-show-submodules-p r1))
+
+      (should (null (magit-dash-repo-show-worktrees r2)))
+      (should (null (magit-dash-repo-show-submodules r2)))
+      (should-not (magit-dash--repo-show-worktrees-p r2))
+      (should-not (magit-dash--repo-show-submodules-p r2))
+
+      (should (eq t (magit-dash-repo-show-worktrees r3)))
+      (should (magit-dash--repo-show-worktrees-p r3)))))
+
+(ert-deftest magit-dash/toggle-worktrees-per-repo ()
+  "Toggling worktrees operates specifically on the target repository."
+  (let* ((r1 (magit-dash-repo--make :name "r1" :path "/tmp/r1" :show-worktrees t))
+         (r2 (magit-dash-repo--make :name "r2" :path "/tmp/r2" :show-worktrees t))
+         (magit-dash-repo-list (list r1 r2))
+         (magit-dash--repo-worktrees-visibility (make-hash-table :test #'equal)))
+    (should (magit-dash--repo-show-worktrees-p r1))
+    (should (magit-dash--repo-show-worktrees-p r2))
+    ;; Toggle r1 off
+    (cl-letf (((symbol-function 'magit-dash-refresh) #'ignore))
+      (magit-dash-toggle-worktrees r1))
+    (should-not (magit-dash--repo-show-worktrees-p r1))
+    (should (magit-dash--repo-show-worktrees-p r2)) ; r2 remains visible!
+    ;; Toggle r1 back on
+    (cl-letf (((symbol-function 'magit-dash-refresh) #'ignore))
+      (magit-dash-toggle-worktrees r1))
+    (should (magit-dash--repo-show-worktrees-p r1))))
+
+(ert-deftest magit-dash/toggle-worktrees-from-worktree-row ()
+  "Toggling worktrees while point is on a worktree row toggles its parent repo."
+  (let* ((r1 (magit-dash-repo--make :name "r1" :path "/tmp/r1" :show-worktrees t))
+         (wt (magit-dash-repo--make :name "r1@wt" :path "/tmp/r1-wt" :worktree t :parent "/tmp/r1"))
+         (magit-dash-repo-list (list r1))
+         (magit-dash--repo-worktrees-visibility (make-hash-table :test #'equal)))
+    (cl-letf (((symbol-function 'magit-dash-refresh) #'ignore))
+      (magit-dash-toggle-worktrees wt))
+    (should-not (magit-dash--repo-show-worktrees-p r1))))
