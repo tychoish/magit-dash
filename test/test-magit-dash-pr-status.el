@@ -356,6 +356,25 @@
       (should (cl-some (lambda (a) (string-match-p "is:pr is:open author:@me\\'" a)) seen))
       (should-not (cl-some (lambda (a) (string-match-p "archived:false" a)) seen)))))
 
+(ert-deftest magit-dash-pr-status/collect-all-async ()
+  (let ((seen nil)
+        (result nil)
+        (error-result nil))
+    (cl-letf (((symbol-function 'magit-dash-gh--run-process)
+               (lambda (args _dir on-success _on-error)
+                 (setq seen args)
+                 (funcall on-success
+                          (json-encode
+                           (magit-dash-pr-status-test/search
+                            (magit-dash-pr-status-test/node "o/b" 4)))))))
+      (magit-dash-pr-status-collect-all-async
+       (lambda (prs) (setq result prs))
+       (lambda (err) (setq error-result err))
+       "/tmp")
+      (should (cl-some (lambda (a) (string-match-p "is:pr is:open archived:false author:@me\\'" a)) seen))
+      (should-not error-result)
+      (should (equal '("o/b") (mapcar (lambda (p) (plist-get p :repo)) result))))))
+
 (ert-deftest magit-dash-pr-status/collect-single-repo-sets-repo ()
   (cl-letf (((symbol-function 'magit-dash-pr-status--fetch)
              (lambda (_s _d)
