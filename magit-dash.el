@@ -1122,6 +1122,7 @@ Returns a plist with keys :branch :remote-origin :behind :ahead :dirty
                       :behind behind
                       :ahead ahead
                       :dirty dirty
+                      :commit-ts (if (string-empty-p commit-ts) 0 (string-to-number commit-ts))
                       :uncommitted (plist-get classified :uncommitted)
                       :untracked (plist-get classified :untracked)
                       :submodule-dirty (plist-get classified :submodule-dirty)
@@ -1172,6 +1173,7 @@ accumulating their outputs before assembling the stats plist."
                                     :behind behind
                                     :ahead ahead
                                     :dirty dirty
+                                    :commit-ts (if (string-empty-p commit-ts) 0 (string-to-number commit-ts))
                                     :uncommitted (plist-get classified :uncommitted)
                                     :untracked (plist-get classified :untracked)
                                     :submodule-dirty (plist-get classified :submodule-dirty)
@@ -1351,6 +1353,71 @@ in detached HEAD state."
            (not (string= branch "…"))
            (numberp ahead)
            (> ahead 0)))))
+
+(defun magit-dash--repo-ci-failing-p (repo)
+  "Return non-nil if REPO has cached failing CI status."
+  (let* ((path (magit-dash-repo-path repo))
+         (ci (when (fboundp 'magit-dash-gh--cache-get)
+               (magit-dash-gh--cache-get path :ci-status)))
+         (conclusion (plist-get ci :conclusion)))
+    (and conclusion
+         (or (and (fboundp 'magit-dash-gh-ci--failure-p)
+                  (magit-dash-gh-ci--failure-p conclusion))
+             (member conclusion '("failure" "timed_out" "startup_failure"))))))
+
+(defun magit-dash--repo-pending-status-p (repo)
+  "Return non-nil if REPO has pending status items (dirty, untracked, ahead, or behind)."
+  (let* ((stats (or (magit-dash--get-stats-fast repo)
+                    (and (fboundp 'magit-dash-gh--cache-get)
+                         (magit-dash-gh--cache-get (magit-dash-repo-path repo) :stats))))
+         (ahead (or (plist-get stats :ahead) 0))
+         (behind (or (plist-get stats :behind) 0))
+         (dirty (plist-get stats :dirty))
+         (untracked (plist-get stats :untracked))
+         (uncommitted (plist-get stats :uncommitted))
+         (submodule-dirty (plist-get stats :submodule-dirty)))
+    (or (> ahead 0)
+        (> behind 0)
+        dirty
+        untracked
+        uncommitted
+        submodule-dirty)))
+
+(defun magit-dash--repo-recent-timestamp (repo)
+  "Return numeric timestamp for REPO's most recent change."
+  (let* ((path (magit-dash-repo-path repo))
+         (stats (or (magit-dash--get-stats-fast repo)
+                    (and (fboundp 'magit-dash-gh--cache-get)
+                         (magit-dash-gh--cache-get path :stats))))
+         (ts (plist-get stats :commit-ts)))
+    (cond
+     ((and (numberp ts) (> ts 0)) ts)
+     ((and path (file-directory-p path))
+      (let* ((git-dir (expand-file-name ".git" path))
+             (target (if (file-directory-p git-dir) git-dir path)))
+        (float-time (file-attribute-modification-time (file-attributes target)))))
+     (t 0))))
+
+(defun magit-dash--repo-priority-score (repo)
+  "Return priority tier for REPO: 0 (failing CI), 1 (pending status), 2 (other)."
+  (cond
+   ((magit-dash--repo-ci-failing-p repo) 0)
+   ((magit-dash--repo-pending-status-p repo) 1)
+   (t 2)))
+
+(defun magit-dash--sort-repos-by-priority (repos)
+  "Sort REPOS by priority:
+1. Failing CI
+2. Pending items in status (dirty, ahead, behind, untracked)
+3. Recently changed (newest first)."
+  (sort (copy-sequence repos)
+        (lambda (a b)
+          (let ((score-a (magit-dash--repo-priority-score a))
+                (score-b (magit-dash--repo-priority-score b)))
+            (if (/= score-a score-b)
+                (< score-a score-b)
+              (> (magit-dash--repo-recent-timestamp a)
+                 (magit-dash--repo-recent-timestamp b)))))))
 
 (defun magit-dash--push-async (repo on-complete)
   "Run git push for REPO asynchronously.
@@ -2680,15 +2747,16 @@ Returns a cancellation handle."
          (buf (or (get-buffer magit-dash-buffer-name)
                   (and (derived-mode-p 'magit-dash-mode) (current-buffer))))
          (needs-update
-          (seq-filter
-           (lambda (repo)
-             (and (not (eq (magit-dash-repo-submodule repo) 'missing))
-                  (let* ((path (magit-dash-repo-path repo))
-                         (cached (magit-dash-gh--cache-get path :stats)))
-                    (not (and cached
-                              (equal (magit-dash--head-hash path)
-                                     (plist-get cached :head-hash)))))))
-           repos))
+          (magit-dash--sort-repos-by-priority
+           (seq-filter
+            (lambda (repo)
+              (and (not (eq (magit-dash-repo-submodule repo) 'missing))
+                   (let* ((path (magit-dash-repo-path repo))
+                          (cached (magit-dash-gh--cache-get path :stats)))
+                     (not (and cached
+                               (equal (magit-dash--head-hash path)
+                                      (plist-get cached :head-hash)))))))
+            repos)))
          (total (length repos))
          (stale (length needs-update))
          (done (list 0)))
@@ -2838,14 +2906,15 @@ Returns a cancellation handle."
   (let* ((guards magit-dash--refresh-guards)
          (buf (get-buffer magit-dash-buffer-name))
          (eligible-repos
-          (seq-filter
-           (lambda (repo)
-             (or (and (magit-dash--refresh-sync-eligible-p repo)
-                      (magit-dash--repo-sync-interval-elapsed-p repo))
-                 (and magit-dash-refresh-fetch
-                      (magit-dash--refresh-fetch-eligible-p repo)
-                      (magit-dash--repo-fetch-interval-elapsed-p repo))))
-           repos)))
+          (magit-dash--sort-repos-by-priority
+           (seq-filter
+            (lambda (repo)
+              (or (and (magit-dash--refresh-sync-eligible-p repo)
+                       (magit-dash--repo-sync-interval-elapsed-p repo))
+                  (and magit-dash-refresh-fetch
+                       (magit-dash--refresh-fetch-eligible-p repo)
+                       (magit-dash--repo-fetch-interval-elapsed-p repo))))
+            repos))))
     (if (null eligible-repos)
         (progn
           (when on-done (funcall on-done))
@@ -2973,7 +3042,8 @@ When FORCE is non-nil, resets last fetch and sync attempt timestamps
 for REPOS so automatic fetch/sync is not throttled.
 When QUIET is non-nil, suppresses echo area messages.
 When ON-DONE is non-nil, calls it when all refresh operations finish."
-  (let* ((buf (or (get-buffer magit-dash-buffer-name)
+  (let* ((repos (magit-dash--sort-repos-by-priority repos))
+         (buf (or (get-buffer magit-dash-buffer-name)
                   (and (derived-mode-p 'magit-dash-mode) (current-buffer))))
          (magit-dash--refresh-guards (make-hash-table :test #'equal))
          (stats-done nil)
@@ -4395,9 +4465,10 @@ When disabled, only explicitly marked repos are targeted."
      (lambda (_) (magit-dash--maybe-refresh repos)))))
 
 (defun magit-dash-pull-all ()
-  "Asynchronously pull marked repos, or all visible repos when none are marked."
+  "Asynchronously pull marked repos, or all visible repos when none are marked.
+Prioritizes repositories with failing CI, pending status, then recently changed."
   (interactive)
-  (let ((repos (magit-dash--effective-repos)))
+  (let ((repos (magit-dash--sort-repos-by-priority (magit-dash--effective-repos))))
     (unless repos
       (user-error "No repositories to pull"))
     (magit-dash--batch-run
