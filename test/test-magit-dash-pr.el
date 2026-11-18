@@ -1318,5 +1318,22 @@
         (magit-dash-pr-dashboard-create-worktree)
         (should (equal created '(20)))))))
 
+(ert-deftest magit-dash-pr/clean-worktree-closed-prs ()
+  "Worktree cleanup applies to PRs that are closed as well as merged."
+  (let ((closed-entry (list :number 30 :repo "org/repo" :state "CLOSED" :pr '((state . "CLOSED"))))
+        (deleted nil))
+    (cl-letf (((symbol-function 'magit-dash-pr-dashboard--find-local-path)
+               (lambda (_) "/tmp/repo"))
+              ((symbol-function 'magit-dash-pr--find-existing-worktree)
+               (lambda (&rest _) "/tmp/repo/.wt/pr-30"))
+              ((symbol-function 'file-directory-p) (lambda (_) t))
+              ((symbol-function 'magit-dash-pr--pr-merged-p) (lambda (&rest _) nil))
+              ((symbol-function 'magit-dash-worktree-uncommitted-changes-p) (lambda (_) nil))
+              ((symbol-function 'magit-dash-pr-delete-worktree)
+               (lambda (path _repo) (setq deleted path))))
+      (let ((res (magit-dash-pr--clean-worktree-for-entry closed-entry nil)))
+        (should (eq res :deleted))
+        (should (equal deleted "/tmp/repo/.wt/pr-30"))))))
+
 (provide 'test-magit-dash-pr)
 ;;; test-magit-dash-pr.el ends here
