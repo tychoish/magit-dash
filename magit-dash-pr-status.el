@@ -55,10 +55,14 @@ of `magit-dash-register'."
 Reviewers that GitHub reports as bots are always ignored."
   :type '(repeat string))
 
-(defvar magit-dash-pr-status-max-prs 50
-  "Number of open PRs requested; there is no pagination beyond this.
-GitHub caps the `first' argument of a GraphQL connection at 100.
-A response with more results signals an error.")
+(defvar magit-dash-pr-status-max-prs 100
+  "Maximum number of open PRs collected across all pages.
+A search with more results signals an error.")
+
+(defvar magit-dash-pr-status-page-size 20
+  "Number of PRs requested per GraphQL page.
+Each PR nests up to 100 reviews, checks and threads, so large pages
+exceed GitHub's gateway timeout (502) deterministically; keep this small.")
 
 ;;;; Small helpers
 
@@ -74,9 +78,9 @@ A response with more results signals an error.")
 
 (defun magit-dash-pr-status--query ()
   "Return the GraphQL query that fetches every open PR matching a search."
-  (format "query($q:String! $first:Int!){
-  search(query:$q type:ISSUE first:$first){
-    pageInfo{ hasNextPage }
+  (format "query($q:String! $first:Int! $after:String){
+  search(query:$q type:ISSUE first:$first after:$after){
+    pageInfo{ hasNextPage endCursor }
     nodes{
       ... on PullRequest{
         number title url state isDraft headRefName baseRefName
@@ -139,17 +143,46 @@ something unparseable."
            slug magit-dash-pr-status-author)
    dir))
 
-(defun magit-dash-pr-status--fetch-search (q dir)
-  "Run the PR query for search string Q from DIR; return the parsed response.
-Signal `user-error' when `gh' fails (including process or network
-failure) or returns something unparseable.  Touches no cache."
+;; Transient GitHub gateway failures (502/503/504) are common and clear
+;; within seconds, so retry them a few times before giving up.
+(defvar magit-dash-pr-status-retry-attempts 3
+  "Total attempts for the GraphQL query when GitHub returns a 5xx error.")
+
+(defvar magit-dash-pr-status-retry-delay 2
+  "Seconds to wait before the first retry; doubles on each further retry.")
+
+(defun magit-dash-pr-status--transient-failure-p (result)
+  "Return non-nil when RESULT, a (CODE . OUTPUT) cons, is a transient 5xx failure."
+  (and (not (eql (car result) 0))
+       (string-match-p "HTTP 50[234]" (cdr result))))
+
+(defun magit-dash-pr-status--call-with-retry (args dir)
+  "Run `gh' with ARGS in DIR, retrying transient 5xx failures.
+Return (CODE . OUTPUT) of the last attempt."
+  (let ((attempt 1)
+        (delay magit-dash-pr-status-retry-delay)
+        (result (magit-dash-gh--call-process args dir)))
+    (while (and (< attempt magit-dash-pr-status-retry-attempts)
+                (magit-dash-pr-status--transient-failure-p result))
+      (message "magit-dash: gh api graphql failed transiently, retrying in %ss" delay)
+      (sleep-for delay)
+      (setq delay (* 2 delay))
+      (setq attempt (1+ attempt))
+      (setq result (magit-dash-gh--call-process args dir)))
+    result))
+
+(defun magit-dash-pr-status--fetch-page (q dir first after)
+  "Fetch one page of FIRST PRs matching Q from DIR, starting after cursor AFTER.
+AFTER may be nil.  Return the parsed, validated response.  Signal
+`user-error' when `gh' fails or returns something unparseable or incomplete."
   (pcase-let* ((`(,code . ,out)
                 (condition-case err
-                    (magit-dash-gh--call-process
+                    (magit-dash-pr-status--call-with-retry
                      (list "api" "graphql"
                            "-f" (concat "query=" (magit-dash-pr-status--query))
                            "-f" (concat "q=" q)
-                           "-F" (format "first=%d" magit-dash-pr-status-max-prs))
+                           "-F" (format "first=%d" first)
+                           (if after "-f" "-F") (if after (concat "after=" after) "after=null"))
                      dir)
                   (file-error
                    (user-error "gh api graphql could not run: %s"
@@ -164,8 +197,6 @@ failure) or returns something unparseable.  Touches no cache."
       (unless (and (map-nested-elt response '(data search))
                    (assq 'nodes (map-nested-elt response '(data search))))
         (user-error "GitHub GraphQL response is missing search results"))
-      (when (eq t (map-nested-elt response '(data search pageInfo hasNextPage)))
-        (user-error "GitHub returned more PRs than the query limit"))
       (dolist (node (map-nested-elt response '(data search nodes)))
         (when (or (eq t (map-nested-elt node '(reviews pageInfo hasPreviousPage)))
                   (eq t (map-nested-elt node '(reviewRequests pageInfo hasNextPage)))
@@ -175,6 +206,30 @@ failure) or returns something unparseable.  Touches no cache."
                          '(commit statusCheckRollup contexts pageInfo hasNextPage))))
           (user-error "GitHub returned incomplete data for PR #%s" (map-elt node 'number))))
       response)))
+
+(defun magit-dash-pr-status--fetch-search (q dir)
+  "Run the PR query for search string Q from DIR; return the parsed response.
+Fetch `magit-dash-pr-status-page-size' PRs at a time and merge the nodes
+into one response.  Signal `user-error' when `gh' fails (including process
+or network failure), returns something unparseable, or the search matches
+more than `magit-dash-pr-status-max-prs' PRs.  Touches no cache."
+  (let ((nodes nil)
+        (after nil)
+        (more t)
+        (first-response nil))
+    (while more
+      (let* ((response (magit-dash-pr-status--fetch-page
+                        q dir magit-dash-pr-status-page-size after))
+             (search (map-nested-elt response '(data search))))
+        (setq first-response (or first-response response))
+        (setq nodes (append nodes (map-elt search 'nodes)))
+        (setq after (map-nested-elt search '(pageInfo endCursor)))
+        (setq more (eq t (map-nested-elt search '(pageInfo hasNextPage))))
+        (when (and more (or (not (stringp after))
+                            (>= (length nodes) magit-dash-pr-status-max-prs)))
+          (user-error "GitHub returned more PRs than the query limit"))))
+    (setf (map-elt (map-nested-elt first-response '(data search)) 'nodes) nodes)
+    first-response))
 
 (defun magit-dash-pr-status--bot-p (author)
   "Return non-nil when review AUTHOR (a GraphQL actor alist) is ignorable."
