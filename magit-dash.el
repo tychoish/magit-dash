@@ -1334,6 +1334,24 @@ Calls ON-COMPLETE with `ok' on success or `error' with message on failure."
    (lambda (output code)
      (funcall on-complete 'error (format "submodule pull exit %d: %s" code output)))))
 
+(defun magit-dash--repo-pushable-p (repo)
+  "Return non-nil when REPO can be pushed.
+Skips repos without commits ahead, without branches configured, or
+in detached HEAD state."
+  (let* ((path (magit-dash-repo-path repo))
+         (stats (when (and path (fboundp 'magit-dash-gh--cache-get))
+                  (magit-dash-gh--cache-get path :stats)))
+         (branch (and stats (plist-get stats :branch)))
+         (ahead (and stats (plist-get stats :ahead))))
+    (if (null stats)
+        t
+      (and (stringp branch)
+           (not (string-empty-p branch))
+           (not (string= branch "?"))
+           (not (string= branch "…"))
+           (numberp ahead)
+           (> ahead 0)))))
+
 (defun magit-dash--push-async (repo on-complete)
   "Run git push for REPO asynchronously.
 Calls ON-COMPLETE with symbol `ok' on success or `error' and error text
@@ -4389,16 +4407,22 @@ When disabled, only explicitly marked repos are targeted."
      (lambda (_) (magit-dash--maybe-refresh repos)))))
 
 (defun magit-dash-push-all ()
-  "Asynchronously push marked repos, or all visible repos when none are marked."
+  "Asynchronously push marked repos, or all visible repos when none are marked.
+Skips repos without commits ahead or without tracking branches configured."
   (interactive)
-  (let ((repos (magit-dash--effective-repos)))
+  (let* ((all-repos (magit-dash--effective-repos))
+         (repos (seq-filter #'magit-dash--repo-pushable-p all-repos)))
     (unless repos
-      (user-error "No repositories to push"))
-    (magit-dash--batch-run
-     repos
-     #'magit-dash--push-async
-     "magit-gh push"
-     (lambda (_) (magit-dash--maybe-refresh repos)))))
+      (if all-repos
+          (message "magit-dash: all %d repositories are up to date (nothing to push)"
+                   (length all-repos))
+        (user-error "No repositories to push")))
+    (when repos
+      (magit-dash--batch-run
+       repos
+       #'magit-dash--push-async
+       "magit-gh push"
+       (lambda (_) (magit-dash--maybe-refresh repos))))))
 
 ;;;###autoload
 (defun magit-dash-stage-all-all ()
