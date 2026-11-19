@@ -4405,6 +4405,9 @@ Signals `user-error' when `magit-dash-repo-list' is empty."
        (pop-to-buffer buf))
    (pop-to-buffer-same-window buf)))
 
+;;;###autoload
+(defalias 'magit-dash #'magit-dash-open)
+
 (defun magit-dash-repo-ensure-configuration ()
   "Raise `user-error' when there is not `magit-dash-repo-list' defined."
   (unless magit-dash-repo-list
