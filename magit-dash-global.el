@@ -89,6 +89,36 @@ Applied for `magit-dash-mode'.  Does nothing if
   (remove-hook 'magit-post-refresh-hook #'magit-dash--on-magit-post-refresh)
   (remove-hook 'magit-post-worktree-add-hook #'magit-dash-worktree-post-add-hook-function))
 
+(defcustom magit-dash-global-managed-settings
+  '((vc-follow-symlinks . t)
+    (version-control . t))
+  "Alist of (SYMBOL . VALUE) settings managed globally by `magit-dash-global-mode'."
+  :type '(alist :key-type symbol :value-type sexp)
+  :group 'magit-dash)
+
+(defvar magit-dash-global--saved-settings nil
+  "Alist of (SYMBOL . (BOUNDP . VALUE)) saved before enabling `magit-dash-global-mode'.")
+
+(defun magit-dash-global--apply-settings ()
+  "Save previous values and apply `magit-dash-global-managed-settings'."
+  (unless magit-dash-global--saved-settings
+    (dolist (pair magit-dash-global-managed-settings)
+      (let ((sym (car pair))
+            (val (cdr pair)))
+        (push (cons sym (if (boundp sym) (cons t (symbol-value sym)) (cons nil nil)))
+              magit-dash-global--saved-settings)
+        (set sym val)))))
+
+(defun magit-dash-global--revert-settings ()
+  "Restore variables to their state prior to `magit-dash-global-mode'."
+  (dolist (entry magit-dash-global--saved-settings)
+    (let ((sym (car entry))
+          (status (cdr entry)))
+      (if (car status)
+          (set sym (cdr status))
+        (makunbound sym))))
+  (setq magit-dash-global--saved-settings nil))
+
 ;;;###autoload
 (define-minor-mode magit-dash-global-mode
   "Global minor mode for `magit-dash' integrations.
@@ -98,12 +128,14 @@ Sets up keybindings, savehist variables, and hooks while leaving the main
   :group 'magit-dash
   (if magit-dash-global-mode
       (progn
+        (magit-dash-global--apply-settings)
         (magit-dash-global--setup-magit)
         (add-hook 'magit-mode-hook #'magit-dash-global--setup-magit)
         (add-hook 'which-key-mode-hook #'magit-dash--which-key-register-replacements)
         (when (boundp 'savehist-additional-variables)
           (add-to-list 'savehist-additional-variables 'magit-dash-columns)
           (add-to-list 'savehist-additional-variables 'magit-dash-pr-columns)))
+    (magit-dash-global--revert-settings)
     (remove-hook 'magit-mode-hook #'magit-dash-global--setup-magit)
     (magit-dash-global--teardown-magit)
     (remove-hook 'which-key-mode-hook #'magit-dash--which-key-register-replacements)))

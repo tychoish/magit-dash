@@ -2187,6 +2187,21 @@ they are not consulted even when their own auto-* flags are set."
       (unless was-on
         (magit-dash-global-mode -1)))))
 
+(ert-deftest magit-dash/global-mode-managed-settings ()
+  "Enabling `magit-dash-global-mode' applies managed settings; disabling reverts them."
+  (let ((magit-dash-global-mode nil)
+        (vc-follow-symlinks nil)
+        (version-control nil))
+    (unwind-protect
+        (progn
+          (magit-dash-global-mode 1)
+          (should (eq vc-follow-symlinks t))
+          (should (eq version-control t))
+          (magit-dash-global-mode -1)
+          (should (null vc-follow-symlinks))
+          (should (null version-control)))
+      (magit-dash-global-mode -1))))
+
 (ert-deftest magit-dash/column-disabled ()
   "A disabled column is excluded from active-columns."
   (let ((magit-dash-columns
