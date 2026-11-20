@@ -818,52 +818,79 @@ Keys present in OVERRIDE replace those in BASE; other keys in BASE are retained.
           (setq result (nconc result (list k v))))))
     result))
 
+(defun magit-dash--normalize-registration-spec (spec)
+  "Return a `magit-dash-register' keyword plist for registration SPEC.
+SPEC may be:
+  PATH                    name defaults to the directory's basename
+  (NAME PATH)             name and path
+  (NAME PATH UPSTREAM)    name, path and upstream repository
+  (:name N ...)           a plist, used as-is (:path may be derived)."
+  (pcase spec
+    ((pred stringp)
+     (list :name (file-name-nondirectory (directory-file-name spec))
+           :path spec))
+    (`(,(and (pred keywordp)) . ,_) (copy-sequence spec))
+    (`(,(and name (pred stringp)) ,(and path (pred stringp)))
+     (list :name name :path path))
+    (`(,(and name (pred stringp)) ,(and path (pred stringp)) ,upstream)
+     (list :name name :path path :repo upstream))
+    (_ (user-error "Magit-dash: invalid registration spec: %S" spec))))
+
 ;;;###autoload
 (cl-defun magit-dash-register-batch (&key root-path defaults repos)
   "Register repositories using common DEFAULTS and per-repo specs.
+Return the list of names registered.
 ROOT-PATH is an optional base path used to resolve relative repo paths.
 DEFAULTS is a plist of keyword arguments passed to `magit-dash-register'.
   - `:repo-format' in DEFAULTS is a format string receiving the repo's
     directory basename to derive `:repo'.
-REPOS is a list of plists.  Each plist specifies `:name' and overrides.
+REPOS is a list of specs, each a plist or a shorthand form accepted by
+`magit-dash--normalize-registration-spec' (PATH, (NAME PATH) or
+\(NAME PATH UPSTREAM)).
   - If `:path' is omitted, it is derived from ROOT-PATH and `:name'.
   - If `:repo' is omitted and `:repo-format' is available, it is derived via
     `(format repo-format (file-name-nondirectory (directory-file-name path)))'.
   - Any keyword arguments in the repo plist override those in DEFAULTS.
   - If `:ignore' is non-nil in the merged plist, the repository is skipped.
+All specs are validated before any is registered.
 Additive: repositories whose name or path is already registered in
 `magit-dash-repo-list' are skipped so explicit registrations win."
-  (dolist (repo-spec repos)
-    (unless (listp repo-spec)
-      (user-error "Magit-dash: each repo in :repos must be a plist, got %S" repo-spec))
-    (let* ((merged (magit-dash--merge-plists defaults repo-spec))
-           (name (plist-get merged :name))
-           (raw-path (plist-get merged :path))
-           (effective-root (or root-path (plist-get defaults :root-path)))
-           (repo-format (plist-get merged :repo-format)))
-      (unless name
-        (user-error "Magit-dash: batch repo entry missing :name: %S" repo-spec))
-      (unless (plist-get merged :ignore)
-        (let* ((path (cond
-                      (raw-path (expand-file-name raw-path))
-                      (effective-root (expand-file-name name (expand-file-name effective-root)))
-                      (t (user-error "Magit-dash: must specify :path or :root-path for repo %s" name))))
-               (basename (file-name-nondirectory (directory-file-name path)))
-               (repo (or (plist-get merged :repo)
-                         (when repo-format
-                           (format repo-format basename))))
-               (already-registered
-                (seq-some (lambda (r)
-                            (or (equal name (magit-dash-repo-name r))
-                                (equal path (magit-dash-repo-path r))))
-                          magit-dash-repo-list)))
-          (unless already-registered
-            (let ((clean-plist (magit-dash--filter-plist merged magit-dash--register-known-keys)))
-              (setq clean-plist (plist-put clean-plist :name name))
-              (setq clean-plist (plist-put clean-plist :path path))
-              (when repo
-                (setq clean-plist (plist-put clean-plist :repo repo)))
-              (apply #'magit-dash-register clean-plist))))))))
+  (let* ((effective-root (or root-path (plist-get defaults :root-path)))
+         (resolved
+          (thread-last repos
+            (seq-map (lambda (repo-spec)
+                       (magit-dash--merge-plists
+                        defaults (magit-dash--normalize-registration-spec repo-spec))))
+            (seq-remove (lambda (merged) (plist-get merged :ignore)))
+            (seq-map
+             (lambda (merged)
+               (let* ((name (or (plist-get merged :name)
+                                (user-error "Magit-dash: batch repo entry missing :name: %S" merged)))
+                      (path (cond
+                             ((plist-get merged :path)
+                              (expand-file-name (plist-get merged :path)))
+                             (effective-root
+                              (expand-file-name name (expand-file-name effective-root)))
+                             (t
+                              (user-error "Magit-dash: must specify :path or :root-path for repo %s" name))))
+                      (repo-format (plist-get merged :repo-format))
+                      (repo (or (plist-get merged :repo)
+                                (when repo-format
+                                  (format repo-format (file-name-nondirectory
+                                                       (directory-file-name path)))))))
+                 (thread-first (magit-dash--filter-plist merged magit-dash--register-known-keys)
+                   (plist-put :name name)
+                   (plist-put :path path)
+                   (plist-put :repo repo))))))))
+    (seq-keep
+     (lambda (plist)
+       (unless (seq-some (lambda (r)
+                           (or (equal (plist-get plist :name) (magit-dash-repo-name r))
+                               (equal (plist-get plist :path) (magit-dash-repo-path r))))
+                         magit-dash-repo-list)
+         (apply #'magit-dash-register plist)
+         (plist-get plist :name)))
+     resolved)))
 
 ;;;###autoload
 (cl-defun magit-dash-register-directory (directory &key defaults exceptions)
@@ -892,46 +919,6 @@ Additive: repositories whose name or path is already registered in
      :root-path dir
      :defaults defaults
      :repos (nreverse repos))))
-
-;;;; Batch registration
-
-(defun magit-dash--normalize-registration-spec (spec)
-  "Return a `magit-dash-register' keyword plist for batch registration SPEC.
-SPEC may be:
-  PATH                    name defaults to the directory's basename
-  (NAME PATH)             name and path
-  (NAME PATH UPSTREAM)    name, path and upstream repository
-  (:name N :path P ...)   a full plist, used as-is."
-  (pcase spec
-    ((pred stringp)
-     (list :name (file-name-nondirectory (directory-file-name spec))
-           :path spec))
-    (`(,(and (pred keywordp)) . ,_) (copy-sequence spec))
-    (`(,(and name (pred stringp)) ,(and path (pred stringp)))
-     (list :name name :path path))
-    (`(,(and name (pred stringp)) ,(and path (pred stringp)) ,upstream)
-     (list :name name :path path :repo upstream))
-    (_ (user-error "Magit-dash: invalid registration spec: %S" spec))))
-
-;;;###autoload
-(defun magit-dash-register-many (specs &rest config)
-  "Register every repository in SPECS, applying CONFIG to each.
-SPECS is a list of forms accepted by
-`magit-dash--normalize-registration-spec'.  CONFIG is a keyword plist of
-`magit-dash-register' options shared by all repositories; keys given in an
-individual plist spec override CONFIG.  All specs are validated before any
-is registered.  Returns the list of registered names.  Unlike
-`magit-dash-register-batch' this takes shorthand specs and does not skip
-repositories that are already registered."
-  (let ((plists (seq-map (lambda (spec)
-                           (append (magit-dash--normalize-registration-spec spec) config))
-                         specs)))
-    (seq-do (lambda (pl)
-              (unless (and (plist-get pl :name) (plist-get pl :path))
-                (user-error "Magit-dash: registration needs name and path: %S" pl)))
-            plists)
-    (seq-do (lambda (pl) (apply #'magit-dash-register pl)) plists)
-    (seq-map (lambda (pl) (plist-get pl :name)) plists)))
 
 ;;;; Registry helpers
 

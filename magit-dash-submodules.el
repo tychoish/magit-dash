@@ -26,7 +26,7 @@
 (declare-function magit-dash--maybe-refresh "magit-dash")
 (declare-function magit-dash-repo-path "magit-dash")
 (declare-function magit-dash-repo-name "magit-dash")
-(declare-function magit-dash-register-many "magit-dash")
+(declare-function magit-dash-register-batch "magit-dash")
 
 (defvar magit-dash-repo-list)
 
@@ -419,7 +419,7 @@ registered."
                  (magit-dash-bump--all-submodule-relpaths root))))
     (unless specs
       (user-error "No submodules found in %s" root))
-    (apply #'magit-dash-register-many specs config)))
+    (magit-dash-register-batch :defaults config :repos specs)))
 
 (provide 'magit-dash-submodules)
 ;;; magit-dash-submodules.el ends here

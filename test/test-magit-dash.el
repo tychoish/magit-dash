@@ -5369,14 +5369,14 @@ The bug was that add-text-properties returns t, not the modified string."
 
 ;;;; Batch registration and freshness column
 
-(ert-deftest magit-dash/register-many-forms-and-common-config ()
-  "register-many accepts paths, pairs, triples and plists with shared config."
+(ert-deftest magit-dash/register-batch-shorthand-specs-and-names ()
+  "register-batch accepts paths, pairs, triples and plists, and returns the names."
   (let ((magit-dash-repo-list nil))
     (should (equal '("a" "b" "c" "d")
-                   (magit-dash-register-many
-                    '("/tmp/a" ("b" "/tmp/bb") ("c" "/tmp/cc" "org/c")
-                      (:name "d" :path "/tmp/dd" :auto-push nil))
-                    :auto-fetch t :auto-push t)))
+                   (magit-dash-register-batch
+                    :defaults '(:auto-fetch t :auto-push t)
+                    :repos '("/tmp/a" ("b" "/tmp/bb") ("c" "/tmp/cc" "org/c")
+                             (:name "d" :path "/tmp/dd" :auto-push nil)))))
     (should (= 4 (length magit-dash-repo-list)))
     (let ((c (seq-find (lambda (r) (equal "c" (magit-dash-repo-name r))) magit-dash-repo-list))
           (d (seq-find (lambda (r) (equal "d" (magit-dash-repo-name r))) magit-dash-repo-list)))
@@ -5385,10 +5385,31 @@ The bug was that add-text-properties returns t, not the modified string."
       (should (magit-dash-repo-auto-push c))
       (should-not (magit-dash-repo-auto-push d)))))
 
-(ert-deftest magit-dash/register-many-validates-before-registering ()
+(ert-deftest magit-dash/register-batch-validates-before-registering ()
+  "An invalid spec or a missing path registers nothing."
   (let ((magit-dash-repo-list nil))
-    (should-error (magit-dash-register-many '("/tmp/a" 42)) :type 'user-error)
+    (should-error (magit-dash-register-batch :repos '("/tmp/a" 42)) :type 'user-error)
+    (should-error (magit-dash-register-batch :repos '("/tmp/a" (:name "nopath")))
+                  :type 'user-error)
     (should-not magit-dash-repo-list)))
+
+(ert-deftest magit-dash/register-batch-returns-only-registered-names ()
+  "Skipped (already registered or ignored) entries are not in the returned names."
+  (let ((magit-dash-repo-list nil))
+    (magit-dash-register :name "a" :path "/tmp/a")
+    (should (equal '("b")
+                   (magit-dash-register-batch
+                    :repos '("/tmp/a" ("b" "/tmp/b") (:name "c" :path "/tmp/c" :ignore t)))))))
+
+(ert-deftest magit-dash/normalize-registration-spec-forms ()
+  "Each shorthand form normalizes to a register plist; junk signals."
+  (should (equal '(:name "x" :path "/p/x/") (magit-dash--normalize-registration-spec "/p/x/")))
+  (should (equal '(:name "n" :path "/p") (magit-dash--normalize-registration-spec '("n" "/p"))))
+  (should (equal '(:name "n" :path "/p" :repo "o/n")
+                 (magit-dash--normalize-registration-spec '("n" "/p" "o/n"))))
+  (should (equal '(:name "n" :sort-hint 1)
+                 (magit-dash--normalize-registration-spec '(:name "n" :sort-hint 1))))
+  (should-error (magit-dash--normalize-registration-spec 42) :type 'user-error))
 
 (ert-deftest magit-dash/freshness-column-registered-alongside-why ()
   "The freshness column is defined, off by default, and does not displace `why'."
