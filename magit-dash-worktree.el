@@ -244,6 +244,67 @@ Creates configured symlinks in PATH from the main repository checkout."
 
 ;; Automatically register on `magit-post-worktree-add-hook'
 
+;;; Non-interactive worktree creation (MCP / scripting)
+
+(declare-function magit-dash-pr--compute-worktree-path "magit-dash-pr")
+
+(defun magit-dash-worktree--git-ok (dir &rest args)
+  "Run git ARGS in DIR; return non-nil on exit 0.  Output is discarded."
+  (zerop (apply #'call-process "git" nil nil nil "-C" (expand-file-name dir) args)))
+
+(defun magit-dash-worktree-short-name (branch)
+  "Return BRANCH with any leading `<prefix>/' components stripped."
+  (file-name-nondirectory (directory-file-name branch)))
+
+(defun magit-dash-worktree-default-base (repo-dir)
+  "Return the default base ref for new branches in REPO-DIR.
+Prefers origin/HEAD, then local main or master, then HEAD."
+  (or (with-temp-buffer
+        (when (zerop (call-process "git" nil (list (current-buffer) nil) nil
+                                   "-C" (expand-file-name repo-dir)
+                                   "symbolic-ref" "--short" "refs/remotes/origin/HEAD"))
+          (let ((ref (string-trim (buffer-string))))
+            (and (not (string-empty-p ref)) ref))))
+      (seq-find (lambda (b)
+                  (magit-dash-worktree--git-ok
+                   repo-dir "rev-parse" "--verify" "--quiet" (concat "refs/heads/" b)))
+                '("main" "master"))
+      "HEAD"))
+
+(defun magit-dash-worktree-create (repo-dir wt-path branch &optional base-ref)
+  "Create worktree WT-PATH with new BRANCH in REPO-DIR; return the path.
+When WT-PATH is nil use the configured worktree layout with the short
+name of BRANCH.  When BASE-REF is nil use the repo default branch.
+Non-interactive: never visits buffers or prompts.  Signals `user-error'
+if BRANCH or WT-PATH already exist."
+  (unless (and (stringp branch) (not (string-empty-p (string-trim branch))))
+    (user-error "A branch name is required"))
+  (require 'magit-dash-pr)
+  (let* ((repo-dir (expand-file-name repo-dir))
+         (wt-path (expand-file-name
+                   (or wt-path
+                       (magit-dash-pr--compute-worktree-path
+                        repo-dir (magit-dash-worktree-short-name branch)))))
+         (base (or base-ref (magit-dash-worktree-default-base repo-dir))))
+    (when (magit-dash-worktree--git-ok repo-dir "rev-parse" "--verify" "--quiet"
+                                       (concat "refs/heads/" branch))
+      (user-error "Branch already exists: %s" branch))
+    (when (file-exists-p wt-path)
+      (user-error "Worktree path already exists: %s" wt-path))
+    (unless (magit-dash-worktree--git-ok repo-dir "rev-parse" "--verify" "--quiet"
+                                         (concat base "^{commit}"))
+      (user-error "Base ref not found: %s" base))
+    (make-directory (file-name-directory (directory-file-name wt-path)) t)
+    (let ((out (generate-new-buffer " *magit-dash-worktree-create*")))
+      (unwind-protect
+          (unless (zerop (call-process "git" nil out nil "-C" repo-dir
+                                       "worktree" "add" "--no-track" "-b" branch wt-path base))
+            (user-error "Failed to create worktree %s: %s" wt-path
+                        (with-current-buffer out (string-trim (buffer-string)))))
+        (kill-buffer out)))
+    (magit-dash-worktree-post-add-hook-function wt-path branch)
+    wt-path))
+
 ;;; Interactive worktree commands for dashboard & overview
 
 ;;;###autoload
