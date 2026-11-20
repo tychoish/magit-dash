@@ -73,6 +73,14 @@ A search with more results signals an error."
   :type 'natnum
   :group 'magit-dash-pr-status)
 
+(defcustom magit-dash-pr-status-timeout 90
+  "Seconds to wait for each account's asynchronous PR query; nil disables.
+An account that has not answered by then is reported as having no
+response, and its `gh' process is killed, so one hung account cannot keep
+the other accounts' results from being shown."
+  :type '(choice (const :tag "No timeout" nil) number)
+  :group 'magit-dash-pr-status)
+
 (defvar magit-dash-pr-status-page-size 10
   "Number of PRs requested per GraphQL page.
 Each PR nests reviews, checks and threads, so large pages exceed
@@ -246,11 +254,34 @@ AFTER may be nil.  Return the parsed, validated response.  Signal
       (user-error "gh api graphql failed (%s): %s" code (string-trim out)))
     (magit-dash-pr-status--validate-response out)))
 
-(defun magit-dash-pr-status--fetch-page-async (q dir first after on-success on-error &optional attempt delay)
+(defun magit-dash-pr-status--job-register (job handle)
+  "Record process or timer HANDLE in JOB so `--job-cancel' can stop it.
+JOB is a cons (CANCELLED . HANDLES), or nil when nothing needs cancelling."
+  (when job
+    (push handle (cdr job))))
+
+(defun magit-dash-pr-status--job-cancel (job)
+  "Mark JOB cancelled and stop its processes and timers.
+Callbacks of a cancelled job are never called."
+  (when job
+    (setcar job t)
+    (seq-do (lambda (handle)
+              (cond
+               ((timerp handle)
+                (cancel-timer handle))
+               ((and (processp handle) (process-live-p handle))
+                (delete-process handle))))
+            (cdr job))
+    (setcdr job nil)))
+
+(defun magit-dash-pr-status--fetch-page-async (q dir first after on-success on-error &optional attempt delay job)
   "Asynchronously fetch one page of FIRST PRs matching Q from DIR starting after cursor AFTER.
 Call ON-SUCCESS with validated parsed response.
-Call ON-ERROR with error message string on fatal failure.
-Transient 5xx failures are retried up to `magit-dash-pr-status-retry-attempts' times."
+Call ON-ERROR with error message string on fatal failure, including a
+failure to start `gh'.
+Transient 5xx failures are retried up to `magit-dash-pr-status-retry-attempts' times.
+JOB, when non-nil, collects the process and retry timers (see
+`magit-dash-pr-status--job-cancel'); once it is cancelled no callback runs."
   (let* ((att (or attempt 1))
          (del (or delay magit-dash-pr-status-retry-delay))
          (args (list "api" "graphql"
@@ -258,23 +289,33 @@ Transient 5xx failures are retried up to `magit-dash-pr-status-retry-attempts' t
                      "-f" (concat "q=" q)
                      "-F" (format "first=%d" first)
                      (if after "-f" "-F") (if after (concat "after=" after) "after=null"))))
-    (magit-dash-gh--run-process
-     args dir
-     (lambda (out)
-       (condition-case err
-           (funcall on-success (magit-dash-pr-status--validate-response out))
-         (error (funcall on-error (error-message-string err)))))
-     (lambda (out code)
-       (if (and (< att magit-dash-pr-status-retry-attempts)
-                (magit-dash-pr-status--transient-failure-p (cons code out)))
-           (progn
-             (message "magit-dash: gh api graphql failed transiently (%s), retrying in %ss" code del)
-             (run-at-time del nil
-                          #'magit-dash-pr-status--fetch-page-async
-                          q dir first after on-success on-error
-                          (1+ att) (* 2 del)))
-         (funcall on-error
-                  (format "gh api graphql failed (%s): %s" code (string-trim out))))))))
+    (unless (car job)
+      (condition-case err
+          (magit-dash-pr-status--job-register
+           job
+           (magit-dash-gh--run-process
+            args dir
+            (lambda (out)
+              (unless (car job)
+                (condition-case err
+                    (funcall on-success (magit-dash-pr-status--validate-response out))
+                  (error (funcall on-error (error-message-string err))))))
+            (lambda (out code)
+              (cond
+               ((car job) nil)
+               ((and (< att magit-dash-pr-status-retry-attempts)
+                     (magit-dash-pr-status--transient-failure-p (cons code out)))
+                (message "magit-dash: gh api graphql failed transiently (%s), retrying in %ss" code del)
+                (magit-dash-pr-status--job-register
+                 job
+                 (run-at-time del nil
+                              #'magit-dash-pr-status--fetch-page-async
+                              q dir first after on-success on-error
+                              (1+ att) (* 2 del) job)))
+               (t
+                (funcall on-error
+                         (format "gh api graphql failed (%s): %s" code (string-trim out))))))))
+        (error (funcall on-error (error-message-string err)))))))
 
 (defun magit-dash-pr-status--fetch-search (q dir)
   "Run the PR query for search string Q from DIR; return the parsed response.
@@ -300,9 +341,10 @@ more than `magit-dash-pr-status-max-prs' PRs.  Touches no cache."
     (setf (map-elt (map-nested-elt first-response '(data search)) 'nodes) nodes)
     first-response))
 
-(defun magit-dash-pr-status--fetch-search-async (q dir on-success on-error)
+(defun magit-dash-pr-status--fetch-search-async (q dir on-success on-error &optional job)
   "Run the PR query for search string Q from DIR asynchronously.
-Calls ON-SUCCESS with the combined parsed response or ON-ERROR with an error string."
+Calls ON-SUCCESS with the combined parsed response or ON-ERROR with an error string.
+JOB is passed to `magit-dash-pr-status--fetch-page-async'."
   (let ((nodes nil)
         (first-response nil))
     (cl-labels
@@ -324,7 +366,7 @@ Calls ON-SUCCESS with the combined parsed response or ON-ERROR with an error str
                      (fetch-next next-after)
                    (setf (map-elt (map-nested-elt first-response '(data search)) 'nodes) nodes)
                    (funcall on-success first-response)))))
-           on-error)))
+           on-error nil nil job)))
       (fetch-next nil))))
 
 (defun magit-dash-pr-status--bot-p (author)
@@ -602,7 +644,7 @@ The tracking cache is never touched."
             (plist-get summary :notes))
     (plist-get summary :prs)))
 
-(defun magit-dash-pr-status-collect-all-async (on-success &optional on-error dir on-partial)
+(defun magit-dash-pr-status-collect-all-async (on-success &optional on-error dir on-partial on-progress)
   "Asynchronously collect PR plists for open PRs across all repositories.
 Run from DIR (default `default-directory'), one query per configured
 GitHub account, in parallel.
@@ -611,7 +653,14 @@ accounts fail or some PRs have truncated data, ON-PARTIAL is first
 called with a list of note strings such as \"ACCOUNT: MESSAGE\"
 (default: `message' each).
 ON-ERROR is called with a message string when every account fails;
-if nil, `message' is called."
+if nil, `message' is called.
+ON-PROGRESS, when non-nil, is called as each account but the last
+answers, with the PRs and note strings so far and the number of accounts
+still pending, so a view can render progressively.
+An account that has not answered within `magit-dash-pr-status-timeout'
+is reported as failed (\"ACCOUNT: no response within Ns\") and its
+process is killed.  Return a function that cancels the collection: it
+stops every process and timer and no callback is called afterwards."
   (let* ((errback (or on-error
                       (lambda (err) (message "magit-dash: PR collection failed: %s" err))))
          (partial (or on-partial
@@ -620,35 +669,62 @@ if nil, `message' is called."
                                   (message "magit-dash: PR collection: %s" note))
                                 errs))))
          (query (magit-dash-pr-status--all-query))
-         (targets (magit-dash-pr-status--targets dir))
-         (pending (length targets))
+         (jobs (seq-map (lambda (target) (cons target (list nil)))
+                        (magit-dash-pr-status--targets dir)))
+         (pending (length jobs))
          (results nil)
-         (finish
-          (lambda ()
-            (let ((summary (magit-dash-pr-status--summarize (reverse results))))
-              (cond
-               ((plist-get summary :all-failed)
-                (funcall errback (string-join (plist-get summary :errors) "; ")))
-               (t
-                (when (plist-get summary :notes)
-                  (funcall partial (plist-get summary :notes)))
-                (funcall on-success (plist-get summary :prs))))))))
+         (done nil)
+         (timer nil)
+         (cancel (lambda ()
+                   (setq done t)
+                   (when timer
+                     (cancel-timer timer))
+                   (seq-do (lambda (entry)
+                             (magit-dash-pr-status--job-cancel (cdr entry)))
+                           jobs)))
+         (record
+          (lambda (target result)
+            (unless (or done (assq target results))
+              (push (cons target result) results)
+              (setq pending (1- pending))
+              (let ((summary (magit-dash-pr-status--summarize (reverse results))))
+                (cond
+                 ((zerop pending)
+                  (funcall cancel)
+                  (if (plist-get summary :all-failed)
+                      (funcall errback (string-join (plist-get summary :errors) "; "))
+                    (when (plist-get summary :notes)
+                      (funcall partial (plist-get summary :notes)))
+                    (funcall on-success (plist-get summary :prs))))
+                 (on-progress
+                  (funcall on-progress (plist-get summary :prs)
+                           (plist-get summary :notes) pending))))))))
+    (when (and (numberp magit-dash-pr-status-timeout) (> magit-dash-pr-status-timeout 0))
+      (setq timer
+            (run-at-time
+             magit-dash-pr-status-timeout nil
+             (lambda ()
+               (seq-do (lambda (entry)
+                         (unless (assq (car entry) results)
+                           (magit-dash-pr-status--job-cancel (cdr entry))
+                           (funcall record (car entry)
+                                    (list :error (format "no response within %ss"
+                                                         magit-dash-pr-status-timeout)))))
+                       jobs)))))
     (seq-do
-     (lambda (target)
-       (let ((record (lambda (result)
-                       (push (cons target result) results)
-                       (setq pending (1- pending))
-                       (when (zerop pending)
-                         (funcall finish)))))
+     (lambda (entry)
+       (let ((target (car entry)))
          (magit-dash-pr-status--fetch-search-async
           query (plist-get target :dir)
           (lambda (response)
-            (funcall record
+            (funcall record target
                      (condition-case err
                          (list :prs (magit-dash-pr-status--parse-target response))
                        (error (list :error (error-message-string err))))))
-          (lambda (err) (funcall record (list :error err))))))
-     targets)))
+          (lambda (err) (funcall record target (list :error err)))
+          (cdr entry))))
+     jobs)
+    cancel))
 
 (defun magit-dash-pr-status-run (slug dir)
   "Collect PRs for repository SLUG from DIR; return a data plist.

@@ -96,7 +96,7 @@
     (let ((magit-dash-repo-list nil)
           (callbacks nil))
       (cl-letf (((symbol-function 'magit-dash-pr-status-collect-all-async)
-                 (lambda (on-ok on-error dir on-partial)
+                 (lambda (on-ok on-error dir on-partial &rest _)
                    (setq callbacks (list on-ok on-error dir on-partial)))))
         (magit-dash-actionable-refresh)
         (should (string-match-p "loading" header-line-format))
@@ -114,11 +114,33 @@
     (let ((magit-dash-repo-list nil)
           (callbacks nil))
       (cl-letf (((symbol-function 'magit-dash-pr-status-collect-all-async)
-                 (lambda (on-ok &rest _) (setq callbacks on-ok))))
+                 (lambda (on-ok &rest _) (setq callbacks on-ok) #'ignore)))
         (magit-dash-actionable-refresh)
         (should (string-match-p "loading" header-line-format))
         (funcall callbacks nil)
         (should (null header-line-format))))))
+
+(ert-deftest magit-dash-actionable-refresh-renders-progress-and-cancels-previous ()
+  "Rows render as accounts answer, and a new refresh cancels the previous one."
+  (with-temp-buffer
+    (magit-dash-actionable-mode)
+    (let ((magit-dash-repo-list nil)
+          (on-progress nil)
+          (cancelled 0))
+      (cl-letf (((symbol-function 'magit-dash-pr-status-collect-all-async)
+                 (lambda (_ok _err _dir _partial progress)
+                   (setq on-progress progress)
+                   (lambda () (setq cancelled (1+ cancelled))))))
+        (magit-dash-actionable-refresh)
+        (funcall on-progress
+                 '((:repo "o/r" :number 1 :title "broken" :bucket fix-ci))
+                 '("work: no response within 90s") 1)
+        (should (= (length tabulated-list-entries) 1))
+        (should (string-match-p "loading 1 more account…" header-line-format))
+        (should (string-match-p "work: no response" header-line-format))
+        (should (= cancelled 0))
+        (magit-dash-actionable-refresh)
+        (should (= cancelled 1))))))
 
 (ert-deftest magit-dash-actionable-refresh-drops-stale-async-results ()
   (with-temp-buffer
@@ -126,7 +148,7 @@
     (let ((magit-dash-repo-list nil)
           (callbacks nil))
       (cl-letf (((symbol-function 'magit-dash-pr-status-collect-all-async)
-                 (lambda (on-ok &rest _) (push on-ok callbacks))))
+                 (lambda (on-ok &rest _) (push on-ok callbacks) #'ignore)))
         (magit-dash-actionable-refresh)
         (magit-dash-actionable-refresh)
         ;; The first (stale) refresh completing must not render.

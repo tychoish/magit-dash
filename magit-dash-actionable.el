@@ -99,6 +99,9 @@
 (defvar-local magit-dash-actionable--refresh-id 0
   "Counter identifying the latest refresh; stale async results are dropped.")
 
+(defvar-local magit-dash-actionable--cancel nil
+  "Function that cancels the in-flight PR collection of the latest refresh.")
+
 (defun magit-dash-actionable--render (prs-raw problems)
   "Render the actionable view from PRS-RAW, noting PROBLEMS in the header.
 PROBLEMS is nil or a string describing PR collection failures or progress."
@@ -165,8 +168,9 @@ PROBLEMS is nil or a string describing PR collection failures or progress."
 (defun magit-dash-actionable-refresh ()
   "Refresh the actionable view, filtering to repos and PRs needing attention.
 Local results render immediately; PR status is collected asynchronously,
-one query per GitHub account, and the view re-renders when it arrives.
-Accounts that fail are named in the header line; the others still show.
+one query per GitHub account, and the view re-renders as each account
+answers.  Accounts that fail or time out are named in the header line;
+the others still show.  Starting a refresh cancels the previous one.
 When invoked outside `magit-dash-actionable-mode', safely redirects to
 the `*magit-dash-actions*' buffer if live, preventing accidental corruption
 of other buffers."
@@ -184,17 +188,27 @@ of other buffers."
     (let* ((buffer (current-buffer))
            (id (setq magit-dash-actionable--refresh-id (1+ magit-dash-actionable--refresh-id)))
            (partial nil))
+      (when magit-dash-actionable--cancel
+        (funcall magit-dash-actionable--cancel))
       (magit-dash-actionable--render nil "loading…")
-      (magit-dash-pr-status-collect-all-async
-       (lambda (prs)
-         (magit-dash-actionable--async-render
-          buffer id prs (and partial (string-join partial "; "))))
-       (lambda (err)
-         (magit-dash-actionable--async-render
-          buffer id nil (format "unavailable: %s" err)))
-       nil
-       (lambda (errs)
-         (setq partial errs))))))
+      (setq magit-dash-actionable--cancel
+            (magit-dash-pr-status-collect-all-async
+             (lambda (prs)
+               (magit-dash-actionable--async-render
+                buffer id prs (and partial (string-join partial "; "))))
+             (lambda (err)
+               (magit-dash-actionable--async-render
+                buffer id nil (format "unavailable: %s" err)))
+             nil
+             (lambda (errs)
+               (setq partial errs))
+             (lambda (prs notes pending)
+               (magit-dash-actionable--async-render
+                buffer id prs
+                (string-join (cons (format "loading %d more account%s…"
+                                           pending (if (= pending 1) "" "s"))
+                                   notes)
+                             "; "))))))))
 
 (defun magit-dash-actionable--current-pr ()
   "Return the PR plist for the item at point, or nil."

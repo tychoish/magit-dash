@@ -474,6 +474,91 @@
       (should-not succeeded)
       (should (string-match-p "work@github.com: .*boom" failure)))))
 
+(defun magit-dash-pr-status-test/wait (pred)
+  "Run the event loop until PRED is non-nil, for at most about two seconds."
+  (let ((tries 0))
+    (while (and (not (funcall pred)) (< tries 40))
+      (accept-process-output nil 0.05)
+      (setq tries (1+ tries)))))
+
+(ert-deftest magit-dash-pr-status/collect-all-async-progress-and-timeout ()
+  "Results render as accounts answer; a silent account times out and is killed."
+  (let ((magit-dash-repo-list (seq-take (magit-dash-pr-status-test/account-repos) 3))
+        (magit-dash-pr-status-timeout 0.1)
+        (hung (make-process :name "asw-hung" :command '("sleep" "30") :noquery t))
+        (progress nil)
+        (result 'unset)
+        (partial nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'magit-dash-gh--run-process)
+                   (lambda (_args dir on-success _on-error)
+                     (if (equal dir "/tmp/w1")
+                         hung
+                       (funcall on-success
+                                (json-encode (magit-dash-pr-status-test/search
+                                              (magit-dash-pr-status-test/node "o/d" 2))))
+                       nil))))
+          (magit-dash-pr-status-collect-all-async
+           (lambda (prs) (setq result prs))
+           nil "/tmp/here"
+           (lambda (notes) (setq partial notes))
+           (lambda (prs notes pending) (push (list prs notes pending) progress)))
+          ;; The two answering accounts arrived before the timeout fired.
+          (should (eq result 'unset))
+          (should (equal '(1) (seq-map #'cl-third progress)))
+          (magit-dash-pr-status-test/wait (lambda () (not (eq result 'unset))))
+          (should (equal '(2) (seq-map (lambda (p) (plist-get p :number)) result)))
+          (should (string-match-p "^work@github.com: no response within" (car partial)))
+          (magit-dash-pr-status-test/wait (lambda () (not (process-live-p hung))))
+          (should-not (process-live-p hung)))
+      (when (process-live-p hung)
+        (delete-process hung)))))
+
+(ert-deftest magit-dash-pr-status/collect-all-async-cancel-stops-callbacks ()
+  "The returned canceller kills processes and silences later callbacks."
+  (let ((magit-dash-repo-list (seq-take (magit-dash-pr-status-test/account-repos) 3))
+        (magit-dash-pr-status-timeout nil)
+        (hung (make-process :name "asw-hung2" :command '("sleep" "30") :noquery t))
+        (late nil)
+        (called nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'magit-dash-gh--run-process)
+                   (lambda (_args _dir on-success _on-error)
+                     (setq late on-success)
+                     hung)))
+          (let ((cancel (magit-dash-pr-status-collect-all-async
+                         (lambda (_) (setq called t))
+                         (lambda (_) (setq called t))
+                         "/tmp/here")))
+            (funcall cancel)
+            (magit-dash-pr-status-test/wait (lambda () (not (process-live-p hung))))
+            (should-not (process-live-p hung))
+            (funcall late (json-encode (magit-dash-pr-status-test/search
+                                        (magit-dash-pr-status-test/node "o/d" 2))))
+            (should-not called)))
+      (when (process-live-p hung)
+        (delete-process hung)))))
+
+(ert-deftest magit-dash-pr-status/collect-all-async-start-failure-counts-as-failure ()
+  "A signal while starting `gh' fails that account instead of leaving it pending."
+  (let ((magit-dash-repo-list (seq-take (magit-dash-pr-status-test/account-repos) 3))
+        (magit-dash-pr-status-timeout nil)
+        (result 'unset)
+        (partial nil))
+    (cl-letf (((symbol-function 'magit-dash-gh--run-process)
+               (lambda (_args dir on-success _on-error)
+                 (if (equal dir "/tmp/w1")
+                     (error "cannot start gh")
+                   (funcall on-success
+                            (json-encode (magit-dash-pr-status-test/search
+                                          (magit-dash-pr-status-test/node "o/d" 2))))
+                   nil))))
+      (magit-dash-pr-status-collect-all-async
+       (lambda (prs) (setq result prs))
+       nil "/tmp/here" (lambda (notes) (setq partial notes)))
+      (should (equal '(2) (seq-map (lambda (p) (plist-get p :number)) result)))
+      (should (string-match-p "^work@github.com: cannot start gh" (car partial))))))
+
 (ert-deftest magit-dash-pr-status/include-archived-option ()
   (let ((seen nil)
         (magit-dash-pr-status-include-archived t))
