@@ -460,6 +460,49 @@
       (should (= 1 (length partial)))
       (should (string-match-p "^work@github.com: " (car partial))))))
 
+(ert-deftest magit-dash-pr-status/sync-and-async-report-identically ()
+  "Both collectors give ON-PARTIAL the same notes and record them."
+  (let ((magit-dash-repo-list (magit-dash-pr-status-test/account-repos))
+        (sync-notes nil)
+        (async-notes nil)
+        (sync-recorded nil)
+        (magit-dash-pr-status-timeout nil)
+        (response (lambda (dir on-ok on-err)
+                    (if (equal dir "/tmp/w1")
+                        (funcall on-err)
+                      (funcall on-ok (json-encode
+                                      (magit-dash-pr-status-test/search
+                                       (magit-dash-pr-status-test/node "o/d" 2)))))))
+        (magit-dash-pr-status-last-notes nil))
+    (cl-letf (((symbol-function 'magit-dash-gh--call-process)
+               (lambda (_args dir)
+                 (funcall response dir (lambda (out) (cons 0 out))
+                          (lambda () (cons 1 "gh: HTTP 401")))))
+              ((symbol-function 'magit-dash-gh--run-process)
+               (lambda (_args dir on-success on-error)
+                 (funcall response dir on-success
+                          (lambda () (funcall on-error "gh: HTTP 401" 1))))))
+      (magit-dash-pr-status-collect-all "/tmp/here" (lambda (n) (setq sync-notes n)))
+      (setq sync-recorded magit-dash-pr-status-last-notes)
+      (setq magit-dash-pr-status-last-notes nil)
+      (magit-dash-pr-status-collect-all-async
+       #'ignore nil "/tmp/here" (lambda (n) (setq async-notes n)))
+      (should sync-notes)
+      (should (string-match-p "^work@github.com: " (car sync-notes)))
+      (should (equal sync-notes async-notes))
+      (should (equal sync-notes sync-recorded))
+      (should (equal sync-notes magit-dash-pr-status-last-notes)))))
+
+(ert-deftest magit-dash-pr-status/last-notes-cleared-on-complete-collection ()
+  (let ((magit-dash-repo-list nil)
+        (magit-dash-pr-status-last-notes '("stale")))
+    (cl-letf (((symbol-function 'magit-dash-gh--call-process)
+               (lambda (_args _dir)
+                 (cons 0 (json-encode (magit-dash-pr-status-test/search
+                                       (magit-dash-pr-status-test/node "o/b" 4)))))))
+      (magit-dash-pr-status-collect-all "/tmp")
+      (should (null magit-dash-pr-status-last-notes)))))
+
 (ert-deftest magit-dash-pr-status/collect-all-async-errors-when-all-fail ()
   (let ((magit-dash-repo-list (seq-take (magit-dash-pr-status-test/account-repos) 3))
         (failure nil)

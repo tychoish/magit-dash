@@ -617,32 +617,63 @@ and `:all-failed' (non-nil when every target failed)."
                                          truncated (if (= truncated 1) "" "s")))))
           :all-failed (and errors (= (length errors) (length results))))))
 
-(defun magit-dash-pr-status-collect-all (&optional dir)
+(defvar magit-dash-pr-status-last-notes nil
+  "Notes from the most recent all-repositories collection, sync or async.
+A list of \"ACCOUNT: MESSAGE\" strings for accounts that failed or timed
+out, plus a count of PRs whose review/check data was truncated.  Nil when
+the collection was complete.")
+
+(defun magit-dash-pr-status--conclude (summary on-partial on-success on-error)
+  "Report SUMMARY, a `--summarize' plist, through the shared channel.
+Record the notes in `magit-dash-pr-status-last-notes'.  When every account
+failed, return the result of ON-ERROR called with the joined errors.
+Otherwise call ON-PARTIAL with the notes, if any (default: `message' each)
+and return the result of ON-SUCCESS called with the PRs.  Both the
+synchronous and asynchronous collectors end here, so they report
+failures identically."
+  (setq magit-dash-pr-status-last-notes
+        (and (not (plist-get summary :all-failed)) (plist-get summary :notes)))
+  (cond
+   ((plist-get summary :all-failed)
+    (funcall on-error (string-join (plist-get summary :errors) "; ")))
+   (t
+    (when-let* ((notes (plist-get summary :notes)))
+      (funcall (or on-partial
+                   (lambda (notes)
+                     (seq-do (lambda (note)
+                               (message "magit-dash: PR collection: %s" note))
+                             notes)))
+               notes))
+    (funcall on-success (plist-get summary :prs)))))
+
+(defun magit-dash-pr-status-collect-all (&optional dir on-partial)
   "Return PR plists for the author's open PRs across all repositories.
 Run from DIR (default `default-directory').  One search query without a
 repo qualifier is run per configured GitHub account (see
 `magit-dash-pr-status--targets'); each PR's `:repo' is its owner/name
 slug and its `:bucket' uses the approvals required for that repository,
 falling back to `magit-dash-pr-status-required-approvals'.  The result is
-pure data.  A failing account is reported with `message' and the others
-still contribute; signal `user-error' only when every account fails.
+pure data.  A failing account does not stop the others; signal
+`user-error' only when every account fails.  Failures and truncation
+notes are reported exactly as `magit-dash-pr-status-collect-all-async'
+does: ON-PARTIAL is called with the note strings (default: `message'
+each), which are also left in `magit-dash-pr-status-last-notes'.
 The tracking cache is never touched."
-  (let ((summary (magit-dash-pr-status--summarize
-                  (seq-map
-                   (lambda (target)
-                     (cons target
-                           (condition-case err
-                               (list :prs (magit-dash-pr-status--parse-target
-                                           (magit-dash-pr-status--fetch-search
-                                            (magit-dash-pr-status--all-query)
-                                            (plist-get target :dir))))
-                             (error (list :error (error-message-string err))))))
-                   (magit-dash-pr-status--targets dir)))))
-    (when (plist-get summary :all-failed)
-      (user-error "%s" (string-join (plist-get summary :errors) "; ")))
-    (seq-do (lambda (note) (message "magit-dash: PR collection: %s" note))
-            (plist-get summary :notes))
-    (plist-get summary :prs)))
+  (magit-dash-pr-status--conclude
+   (magit-dash-pr-status--summarize
+    (seq-map
+     (lambda (target)
+       (cons target
+             (condition-case err
+                 (list :prs (magit-dash-pr-status--parse-target
+                             (magit-dash-pr-status--fetch-search
+                              (magit-dash-pr-status--all-query)
+                              (plist-get target :dir))))
+               (error (list :error (error-message-string err))))))
+     (magit-dash-pr-status--targets dir)))
+   on-partial
+   #'identity
+   (lambda (errors) (user-error "%s" errors))))
 
 (defun magit-dash-pr-status-collect-all-async (on-success &optional on-error dir on-partial on-progress)
   "Asynchronously collect PR plists for open PRs across all repositories.
@@ -651,7 +682,7 @@ GitHub account, in parallel.
 ON-SUCCESS is called with the merged list of PR plists.  When some
 accounts fail or some PRs have truncated data, ON-PARTIAL is first
 called with a list of note strings such as \"ACCOUNT: MESSAGE\"
-(default: `message' each).
+(default: `message' each; see `magit-dash-pr-status--conclude').
 ON-ERROR is called with a message string when every account fails;
 if nil, `message' is called.
 ON-PROGRESS, when non-nil, is called as each account but the last
@@ -663,11 +694,6 @@ process is killed.  Return a function that cancels the collection: it
 stops every process and timer and no callback is called afterwards."
   (let* ((errback (or on-error
                       (lambda (err) (message "magit-dash: PR collection failed: %s" err))))
-         (partial (or on-partial
-                      (lambda (errs)
-                        (seq-do (lambda (note)
-                                  (message "magit-dash: PR collection: %s" note))
-                                errs))))
          (query (magit-dash-pr-status--all-query))
          (jobs (seq-map (lambda (target) (cons target (list nil)))
                         (magit-dash-pr-status--targets dir)))
@@ -691,11 +717,7 @@ stops every process and timer and no callback is called afterwards."
                 (cond
                  ((zerop pending)
                   (funcall cancel)
-                  (if (plist-get summary :all-failed)
-                      (funcall errback (string-join (plist-get summary :errors) "; "))
-                    (when (plist-get summary :notes)
-                      (funcall partial (plist-get summary :notes)))
-                    (funcall on-success (plist-get summary :prs))))
+                  (magit-dash-pr-status--conclude summary on-partial on-success errback))
                  (on-progress
                   (funcall on-progress (plist-get summary :prs)
                            (plist-get summary :notes) pending))))))))
