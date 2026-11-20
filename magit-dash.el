@@ -37,6 +37,7 @@
 (require 'savehist)
 (require 'magit)
 (require 'gen)
+(require 'format-spec)
 
 (require 'annotated-completing-read)
 (require 'sprite)
@@ -381,6 +382,30 @@ When nil, no replacements are registered."
                  (const :tag "Disabled" nil))
   :group 'magit-dash)
 
+(defcustom magit-dash-auto-commit-message-template
+  "chore: auto-commit changes in %r [%h:%i, %s]"
+  "Default commit message template for auto-commit operations.
+Supports format specifiers expanded via `format-spec':
+  %r, %n — repository name
+  %p     — repository path
+  %b     — current branch
+  %h     — host name
+  %i     — Emacs instance ID
+  %s, %t — sync trigger (`interactive', `timer', etc.)
+  %d     — current ISO timestamp
+  %u     — user login name
+If the template uses `%s' positional format specifiers, `format' is used."
+  :type 'string
+  :group 'magit-dash)
+
+(defcustom magit-dash-auto-commit-novel-message-template
+  "chore: initial auto-commit in novel repo %r [%h:%i, %s]"
+  "Commit message template for auto-commit on novel repositories.
+Used when a repository has no prior commits (unborn HEAD).
+Supports the same format specifiers as `magit-dash-auto-commit-message-template'."
+  :type 'string
+  :group 'magit-dash)
+
 
 (defun magit-dash--repo-pull-submodules-on-fetch-p (repo)
   "Return non-nil if REPO should automatically update submodules when fetched."
@@ -464,8 +489,10 @@ When nil, no replacements are registered."
   (when (functionp magit-dash--refresh-cancel-handle)
     (ignore-errors (funcall magit-dash--refresh-cancel-handle :cancel)))
   (setq magit-dash--refresh-cancel-handle nil)
-  (when-let* ((buf (get-buffer (or (bound-and-true-p magit-dash-buffer-name) "*magit-dash*"))))
-    (when (buffer-live-p buf)
+  (let ((buf (if (derived-mode-p 'magit-dash-mode)
+                 (current-buffer)
+               (get-buffer (or (bound-and-true-p magit-dash-buffer-name) "*magit-dash*")))))
+    (when (and buf (buffer-live-p buf))
       (magit-dash--revert-stale-buffer buf))))
 
 ;;;; Hooks and operations
@@ -575,7 +602,7 @@ first)."
                    raw))))
    (t nil)))
 
-(cl-defun magit-dash-register (&key name path repo include-prs include-ci auto-fetch auto-pull auto-commit auto-push auto-sync-command hooks tags tag label labels commands sort-hint worktree sync-branches timer clone-url remote-url worktree-symlinks symlinks remote-sync sync-on-refresh auto-sync-on-refresh refresh-sync fetch-on-refresh gh-account gh-host pr upstream-repo upstream upstream-branch (show-worktrees 'default) hide-worktrees (show-submodules 'default) hide-submodules)
+(cl-defun magit-dash-register (&key name path repo include-prs include-ci auto-fetch auto-pull auto-commit auto-push auto-sync-command hooks tags tag label labels commands sort-hint worktree sync-branches timer clone-url remote-url worktree-symlinks symlinks remote-sync sync-on-refresh auto-sync-on-refresh refresh-sync fetch-on-refresh gh-account gh-host pr upstream-repo upstream upstream-branch (show-worktrees 'default) hide-worktrees (show-submodules 'default) hide-submodules auto-commit-template)
   "Register or replace a repository with NAME at absolute PATH.
 REPO is the upstream repository path or URL for bootstrapping.
 INCLUDE-PRS, INCLUDE-CI, AUTO-FETCH, AUTO-PULL, AUTO-COMMIT, AUTO-PUSH,
@@ -595,9 +622,12 @@ Keyword arguments:
   :auto-fetch     non-nil — run git fetch --all during auto-sync.
   :auto-pull      non-nil — run git pull during auto-sync (implies fetch).
                   Respects :sync-branches.
-  :auto-commit    nil | t | FUNCTION — stage and commit dirty working tree.
+  :auto-commit    nil | t | STRING | FUNCTION — stage and commit dirty working tree.
+                  When STRING, specifies a commit message template (see
+                  `magit-dash-auto-commit-message-template').
                   FUNCTION receives the repo struct and returns a commit
                   message string.
+  :auto-commit-template alias / explicit template keyword for :auto-commit.
   :auto-push      non-nil — run git push during auto-sync.
                   Respects :sync-branches.
   :hooks          plist keyed by operation (`:fetch'/`:pull'/`:commit'/
@@ -711,6 +741,7 @@ Keyword arguments:
                    (magit-dash--normalize-tags tag)
                    (magit-dash--normalize-tags label)
                    (magit-dash--normalize-tags labels))))
+         (effective-auto-commit (or auto-commit-template auto-commit))
          (effective-show-worktrees
           (cond
            (hide-worktrees nil)
@@ -734,7 +765,7 @@ Keyword arguments:
                            :include-ci include-ci
                            :auto-fetch auto-fetch
                            :auto-pull auto-pull
-                           :auto-commit auto-commit
+                           :auto-commit effective-auto-commit
                            :auto-push auto-push
                            :hooks hooks
                            :tags effective-tags
@@ -759,7 +790,7 @@ Keyword arguments:
 
 (defconst magit-dash--register-known-keys
   '(:name :path :repo :include-prs :include-ci :auto-fetch :auto-pull
-    :auto-commit :auto-push :auto-sync-command :hooks :tags :tag :label :labels
+    :auto-commit :auto-commit-template :auto-push :auto-sync-command :hooks :tags :tag :label :labels
     :commands :sort-hint :worktree :sync-branches :timer :clone-url :remote-url
     :worktree-symlinks :symlinks :remote-sync :sync-on-refresh
     :auto-sync-on-refresh :refresh-sync :fetch-on-refresh :gh-account
@@ -868,14 +899,73 @@ Additive: repositories whose name or path is already registered in
   "How the current auto-sync was triggered.
 Bind to `timer' when invoking auto-sync from timer; defaults to `interactive'.")
 
+(defun magit-dash--repo-novel-p (repo)
+  "Return non-nil if REPO has no prior commits (a novel repository)."
+  (let* ((path (magit-dash-repo-path repo))
+         (head-hash (ignore-errors (magit-dash--head-hash path))))
+    (or (null head-hash) (string-empty-p head-hash))))
+
+(defun magit-dash--format-commit-message (template repo)
+  "Expand TEMPLATE for REPO using `format-spec'.
+Supports format characters:
+  %r, %n — repository name
+  %p     — repository path
+  %b     — current branch
+  %h     — host name
+  %i     — Emacs instance ID
+  %s, %t — sync trigger
+  %d     — current ISO timestamp
+  %u     — user login name
+Falls back to `format' if TEMPLATE uses positional %s specifiers."
+  (let* ((name (magit-dash-repo-name repo))
+         (path (magit-dash-repo-path repo))
+         (branch (let ((cb (ignore-errors (magit-dash--current-branch path))))
+                   (if (and (stringp cb) (not (string-empty-p cb)))
+                       cb
+                     (or (magit-dash-repo-branch repo) ""))))
+         (host (sprite-system-name))
+         (inst (or (and (boundp 'sprite-instance-id) sprite-instance-id) "unknown"))
+         (trigger (symbol-name magit-dash-sync-trigger))
+         (date (format-time-string "%Y-%m-%d %H:%M:%S"))
+         (user (user-login-name))
+         (spec `((?r . ,name)
+                 (?n . ,name)
+                 (?p . ,path)
+                 (?b . ,branch)
+                 (?h . ,host)
+                 (?i . ,inst)
+                 (?s . ,trigger)
+                 (?t . ,trigger)
+                 (?d . ,date)
+                 (?u . ,user))))
+    (if (and (not (string-match-p "%[rnhibpdu]" template))
+             (string-match-p "%s" template))
+        (format template name host inst trigger)
+      (condition-case nil
+          (format-spec template spec)
+        (error
+         (format template name host inst trigger))))))
+
+(defun magit-dash--commit-message-for-repo (repo)
+  "Return the auto-commit message for REPO.
+Chooses between a custom function, a custom template string,
+the novel repository template, or the default auto-commit template."
+  (let ((auto-commit (magit-dash-repo-auto-commit repo)))
+    (cond
+     ((functionp auto-commit)
+      (funcall auto-commit repo))
+     ((stringp auto-commit)
+      (magit-dash--format-commit-message auto-commit repo))
+     ((magit-dash--repo-novel-p repo)
+      (magit-dash--format-commit-message magit-dash-auto-commit-novel-message-template repo))
+     (t
+      (magit-dash--format-commit-message magit-dash-auto-commit-message-template repo)))))
+
 (defun magit-dash--default-commit-message (repo)
   "Return a default auto-commit message for REPO.
-Includes hostname, Emacs instance ID, and the current sync trigger."
-  (format "chore: auto-commit changes in %s [%s:%s, %s]"
-          (magit-dash-repo-name repo)
-          (sprite-system-name)
-          (or (and (boundp 'sprite-instance-id) sprite-instance-id) "unknown")
-          (symbol-name magit-dash-sync-trigger)))
+Expands `magit-dash-auto-commit-novel-message-template' when REPO is novel
+\(has no prior commits), or `magit-dash-auto-commit-message-template' otherwise."
+  (magit-dash--commit-message-for-repo repo))
 
 (defun magit-dash--stage-all (repo-or-path)
   "Stage all untracked, unstaged, and deleted files in REPO-OR-PATH.
@@ -933,10 +1023,7 @@ Calls ON-COMPLETE with `ok' on success or `error' on failure."
 (defun magit-dash--auto-commit (repo)
   "Stage all modified files in REPO and commit using its :auto-commit message.
 Return t when the commit succeeds, nil otherwise."
-  (let* ((auto-commit (magit-dash-repo-auto-commit repo))
-         (message (if (functionp auto-commit)
-                      (funcall auto-commit repo)
-                    (magit-dash--default-commit-message repo))))
+  (let ((message (magit-dash--commit-message-for-repo repo)))
     (and (magit-dash--stage-all repo)
          (magit-dash-gh--with-repo-dir (magit-dash-repo-path repo)
            (= 0 (magit-call-git "commit" "-m" message))))))
@@ -949,6 +1036,55 @@ Return t when the commit succeeds, nil otherwise."
    ((and (listp op) (cdr op) (keywordp (cadr op)))
     (cons (car op) (and (plist-get (cdr op) :background) t)))
    (t (cons op nil))))
+
+(defun magit-dash--execute-command-on-repo (repo op &optional background cmd-name)
+  "Execute command OP for REPO.
+When BACKGROUND is non-nil or `magit-dash-run-command-in-background' is non-nil,
+run the command in the background without popping up or stealing focus.
+CMD-NAME is an optional display label for the command."
+  (let* ((normalized (magit-dash--normalize-command-op op))
+         (target (car normalized))
+         (in-bg (or background (cdr normalized) magit-dash-run-command-in-background))
+         (repo-name (magit-dash-repo-name repo))
+         (repo-path (magit-dash-repo-path repo))
+         (name (or cmd-name (format "%s" target)))
+         (cmd-slug (replace-regexp-in-string "[[:space:]]+" "-" (string-trim (format "%s" name)))))
+    (magit-dash-gh--with-repo-dir repo-path
+      (cond
+       ((stringp target)
+        (let ((buf-name (format "*%s-dash-cmd-%s*" repo-name cmd-slug)))
+          (if in-bg
+              (let ((display-buffer-alist
+                     (cons (cons (regexp-quote buf-name)
+                                 (cons #'display-buffer-no-window '((allow-no-window . t))))
+                           display-buffer-alist)))
+                (message "magit-dash: [%s] running '%s' in background..." repo-name name)
+                (let ((comp-buf (compilation-start target nil (lambda (_) buf-name))))
+                  (with-current-buffer comp-buf
+                    (add-hook 'compilation-finish-functions
+                              (lambda (_buf status)
+                                (message "magit-dash: [%s] command '%s' %s"
+                                         repo-name name (string-trim status)))
+                              nil t))
+                  comp-buf))
+            (compilation-start target nil (lambda (_) buf-name)))))
+       ((commandp target)
+        (if in-bg
+            (progn
+              (message "magit-dash: [%s] running command '%s' in background..." repo-name name)
+              (save-window-excursion (call-interactively target))
+              (message "magit-dash: [%s] command '%s' finished" repo-name name))
+          (call-interactively target)))
+       ((functionp target)
+        (if in-bg
+            (progn
+              (message "magit-dash: [%s] running function '%s' in background..." repo-name name)
+              (save-window-excursion (funcall target))
+              (message "magit-dash: [%s] function '%s' finished" repo-name name))
+          (funcall target)))
+       ((symbolp target)
+        (user-error "Command '%s' resolves to undefined function '%s'" name target))
+       (t (user-error "Command has unsupported type %s" (type-of target)))))))
 
 (defun magit-dash--run-command-for (repo &optional background)
   "Run a registered command for REPO.
@@ -996,49 +1132,8 @@ run the command in the background without popping up or stealing focus."
                          (car picked)
                        (or (car (seq-find (lambda (c) (equal (cdr c) picked)) commands))
                            "cmd")))
-           (op (if (consp picked) (cdr picked) picked))
-           (normalized (magit-dash--normalize-command-op op))
-           (target (car normalized))
-           (in-bg (or background (cdr normalized) magit-dash-run-command-in-background))
-           (repo-name (magit-dash-repo-name repo))
-           (repo-path (magit-dash-repo-path repo))
-           (cmd-slug (replace-regexp-in-string "[[:space:]]+" "-" (string-trim (format "%s" cmd-name)))))
-      (magit-dash-gh--with-repo-dir repo-path
-        (cond
-         ((stringp target)
-          (let ((buf-name (format "*%s-dash-cmd-%s*" repo-name cmd-slug)))
-            (if in-bg
-                (let ((display-buffer-alist
-                       (cons (cons (regexp-quote buf-name)
-                                   (cons #'display-buffer-no-window '((allow-no-window . t))))
-                             display-buffer-alist)))
-                  (message "magit-dash: [%s] running '%s' in background..." repo-name cmd-name)
-                  (let ((comp-buf (compilation-start target nil (lambda (_) buf-name))))
-                    (with-current-buffer comp-buf
-                      (add-hook 'compilation-finish-functions
-                                (lambda (_buf status)
-                                  (message "magit-dash: [%s] command '%s' %s"
-                                           repo-name cmd-name (string-trim status)))
-                                nil t))
-                    comp-buf))
-              (compilation-start target nil (lambda (_) buf-name)))))
-         ((commandp target)
-          (if in-bg
-              (progn
-                (message "magit-dash: [%s] running command '%s' in background..." repo-name cmd-name)
-                (save-window-excursion (call-interactively target))
-                (message "magit-dash: [%s] command '%s' finished" repo-name cmd-name))
-            (call-interactively target)))
-         ((functionp target)
-          (if in-bg
-              (progn
-                (message "magit-dash: [%s] running function '%s' in background..." repo-name cmd-name)
-                (save-window-excursion (funcall target))
-                (message "magit-dash: [%s] function '%s' finished" repo-name cmd-name))
-            (funcall target)))
-         ((symbolp target)
-          (user-error "Command '%s' resolves to undefined function '%s'" cmd-name target))
-         (t (user-error "Command has unsupported type %s" (type-of target))))))))
+           (op (if (consp picked) (cdr picked) picked)))
+      (magit-dash--execute-command-on-repo repo op background cmd-name))))
 
 (defun magit-dash--resolve-git-dir (path)
   "Return the git directory for the repository, worktree, or submodule at PATH.
@@ -1487,10 +1582,7 @@ on failure."
 Calls ON-COMPLETE with `ok' when committed, `skipped' when workdir is clean,
 or `error' when git add or commit fails."
   (let* ((path (magit-dash-repo-path repo))
-         (auto-commit (magit-dash-repo-auto-commit repo))
-         (msg (if (functionp auto-commit)
-                  (funcall auto-commit repo)
-                (magit-dash--default-commit-message repo))))
+         (msg (magit-dash--commit-message-for-repo repo)))
     (magit-dash--run-git
      path '("status" "--porcelain")
      (lambda (porcelain)
@@ -1878,6 +1970,18 @@ When ERROR-TEXT is non-nil it is appended to the message."
          (detail (if error-text (format " — %s" error-text) "")))
     (message "magit-dash: %s %s → %s%s" name operation (symbol-name status) detail)))
 
+(defun magit-dash--live-dash-buffers ()
+  "Return all live buffers that are in `magit-dash-mode' or named `magit-dash-buffer-name'."
+  (let ((default-buf (get-buffer magit-dash-buffer-name)))
+    (delete-dups
+     (delq nil
+           (cons (and default-buf (buffer-live-p default-buf) default-buf)
+                 (seq-filter (lambda (b)
+                               (and (buffer-live-p b)
+                                    (with-current-buffer b
+                                      (derived-mode-p 'magit-dash-mode))))
+                             (buffer-list)))))))
+
 (defun magit-dash--batch-run (repos op-fn label &optional on-all-done)
   "Run OP-FN asynchronously on each repo in REPOS.
 OP-FN is called as (op-fn REPO CALLBACK) where CALLBACK receives a status
@@ -1897,10 +2001,12 @@ ON-ALL-DONE with an alist of (NAME . STATUS)."
                 (magit-dash--log-operation
                  (magit-dash-repo-name repo) label status error-text)
                 (push (cons (magit-dash-repo-name repo) status) results)
-                (when-let* ((buf (get-buffer magit-dash-buffer-name))
-                            ((buffer-live-p buf)))
-                  (with-current-buffer buf
-                    (magit-dash-refresh-repo repo nil t)))
+                (seq-do
+                 (lambda (b)
+                   (when (buffer-live-p b)
+                     (with-current-buffer b
+                       (magit-dash-refresh-repo repo nil t))))
+                 (magit-dash--live-dash-buffers))
                 (setcar remaining (1- (car remaining)))
                 (when (= 0 (car remaining))
                   (let* ((ok (seq-count (lambda (r) (eq 'ok (cdr r))) results))
@@ -2643,6 +2749,7 @@ fixed widths and are right-aligned."
     (keymap-set m "m m" #'magit-dash-menu)
     (keymap-set m "m ?" #'magit-dash-menu)
     (keymap-set m "m t" #'magit-dash-mark-by-tag)
+    (keymap-set m "m u" #'magit-dash-mark-unpushed)
     (keymap-set m "m c" #'magit-dash-unmark-all)
 
     ;; Fetch prefix: f
@@ -2726,11 +2833,15 @@ fixed widths and are right-aligned."
     ;; Tag & Toggle prefix: t
     (keymap-set m "t"   (cons "tag/toggle" (make-sparse-keymap)))
     (keymap-set m "t t" #'magit-dash-filter-by-tag)
+    (keymap-set m "t u" #'magit-dash-filter-unpushed)
+    (keymap-set m "t m" #'magit-dash-filter-marked)
+    (keymap-set m "t v" #'magit-dash-open-view)
+    (keymap-set m "t g" #'magit-dash-group-menu)
     (keymap-set m "t a" #'magit-dash-add-tag)
     (keymap-set m "t c" #'magit-dash-toggle-column)
     (keymap-set m "t s" #'magit-dash-toggle-submodules)
     (keymap-set m "t w" #'magit-dash-toggle-worktrees)
-    (keymap-set m "t x" #'magit-dash-clear-tag-filter)
+    (keymap-set m "t x" #'magit-dash-clear-filter)
 
     ;; Hide prefix: h (preserved as-is)
     (keymap-set m "h"   (cons "hide" (make-sparse-keymap)))
@@ -2755,6 +2866,51 @@ fixed widths and are right-aligned."
 
 (defvar-local magit-dash--tag-filter nil
   "When non-nil, a symbol or list of symbols: only repos tagged with these are shown.")
+
+(defvar-local magit-dash--predicate-filter nil
+  "When non-nil, a filter predicate for repositories shown in the dashboard.
+May be `unpushed', `dirty', a cons (:paths . PATH-LIST), or a function.")
+
+(defvar-local magit-dash--view-name nil
+  "When non-nil, the name of the current dashboard view buffer.")
+
+(declare-function magit-dash--get-stats "magit-dash")
+(declare-function magit-dash--get-stats-fast "magit-dash")
+
+(defun magit-dash--repo-ahead-p (repo)
+  "Return non-nil when REPO has unpushed commits ahead of its upstream."
+  (let* ((path (magit-dash-repo-path repo))
+         (stats (or (when (and path (fboundp 'magit-dash-gh--cache-get))
+                      (magit-dash-gh--cache-get path :stats))
+                    (ignore-errors (magit-dash--get-stats repo)))))
+    (and stats
+         (> (or (plist-get stats :ahead) 0) 0)
+         (let ((branch (plist-get stats :branch)))
+           (and (stringp branch)
+                (not (string-empty-p branch))
+                (not (string= branch "?"))
+                (not (string= branch "…")))))))
+
+(defun magit-dash--repo-dirty-p (repo)
+  "Return non-nil when REPO has uncommitted changes."
+  (let ((stats (magit-dash--get-stats-fast repo)))
+    (and stats (plist-get stats :dirty) t)))
+
+(defun magit-dash--repo-matches-predicate-filter-p (repo filter)
+  "Return non-nil if REPO matches predicate FILTER.
+FILTER may be nil (matches all), `unpushed', `dirty',
+a cons (:paths . PATH-LIST), or a function taking REPO."
+  (cond
+   ((null filter) t)
+   ((eq filter 'unpushed)
+    (magit-dash--repo-ahead-p repo))
+   ((eq filter 'dirty)
+    (magit-dash--repo-dirty-p repo))
+   ((and (consp filter) (eq (car filter) :paths))
+    (member (magit-dash-repo-path repo) (cdr filter)))
+   ((functionp filter)
+    (funcall filter repo))
+   (t t)))
 
 (defun magit-dash--repo-matches-tag-filter-p (repo filter)
   "Return non-nil if REPO matches tag FILTER.
@@ -2944,6 +3100,15 @@ until `magit-dash--populate-stats-async' updates them."
                    tabulated-list-entries))
     (magit-dash--print)))
 
+(defun magit-dash--update-entry-all-buffers (repo)
+  "Update the dashboard row for REPO across all live dashboard buffers."
+  (seq-do
+   (lambda (b)
+     (when (buffer-live-p b)
+       (with-current-buffer b
+         (magit-dash--update-entry repo))))
+   (magit-dash--live-dash-buffers)))
+
 (defun magit-dash--populate-stats-async (repos &optional on-done quiet)
   "Asynchronously collect stats for stale or uncached repos in REPOS.
 Uses `gen-run-async' with bounded concurrency and cooperative timer yields.
@@ -2952,8 +3117,6 @@ When ON-DONE is non-nil, call it when all stats collections finish.
 When QUIET is non-nil, suppresses echo area messages.
 Returns a cancellation handle."
   (let* ((guards magit-dash--refresh-guards)
-         (buf (or (get-buffer magit-dash-buffer-name)
-                  (and (derived-mode-p 'magit-dash-mode) (current-buffer))))
          (needs-update
           (magit-dash--sort-repos-by-priority
            (seq-filter
@@ -2984,9 +3147,7 @@ Returns a cancellation handle."
             repo
             (lambda (_stats)
               (setcar done (1+ (car done)))
-              (when (and buf (buffer-live-p buf))
-		(with-current-buffer buf
-                  (magit-dash--update-entry repo)))
+              (magit-dash--update-entry-all-buffers repo)
               (when (and (= (car done) stale) (not quiet))
 		(message "magit-dash: %d repos, %d updated" total stale))
               (funcall done-cb)))))
@@ -3197,12 +3358,15 @@ of other buffers."
               (seq-filter
                (lambda (r)
                  (and (not (member (magit-dash-repo-path r) magit-dash--hidden-paths))
-                      (magit-dash--repo-matches-tag-filter-p r magit-dash--tag-filter)))
+                      (magit-dash--repo-matches-tag-filter-p r magit-dash--tag-filter)
+                      (magit-dash--repo-matches-predicate-filter-p r magit-dash--predicate-filter)))
                magit-dash-repo-list))
              (repos (seq-filter
                      (lambda (r)
                        (not (member (magit-dash-repo-path r) magit-dash--hidden-paths)))
                      (magit-dash--sorted-repos visible-base))))
+        (when magit-dash--view-name
+          (setq-local mode-name (format "Repos[%s]" magit-dash--view-name)))
         (setq tabulated-list-format (magit-dash--build-format repos))
         (tabulated-list-init-header)
         (setq tabulated-list-entries (seq-map #'magit-dash--build-entry repos))
@@ -4184,6 +4348,260 @@ Adds to any existing marks rather than replacing them."
                (if (= (length paths) 1) "" "s")
                (symbol-name tag)))))
 
+;;;###autoload
+(defun magit-dash-clear-filter ()
+  "Clear any active tag or predicate filter in the dashboard."
+  (interactive)
+  (setq magit-dash--tag-filter nil)
+  (setq magit-dash--predicate-filter nil)
+  (setq magit-dash--view-name nil)
+  (setq-local mode-name "Repos")
+  (magit-dash-refresh)
+  (message "magit-dash: all filters cleared"))
+
+;;;###autoload
+(defun magit-dash-mark-unpushed ()
+  "Mark all visible repositories that have unpushed commits."
+  (interactive)
+  (let* ((visible (magit-dash--visible-repos))
+         (unpushed (seq-filter #'magit-dash--repo-ahead-p visible))
+         (paths (seq-map #'magit-dash-repo-path unpushed)))
+    (unless unpushed
+      (user-error "No visible repositories have unpushed commits"))
+    (setq magit-dash--marked-paths (delete-dups (append paths magit-dash--marked-paths)))
+    (magit-dash-refresh)
+    (message "Marked %d repo%s with unpushed commits"
+             (length paths)
+             (if (= (length paths) 1) "" "s"))))
+
+(defun magit-dash-view-buffer-name (name)
+  "Return the buffer name for a dashboard view named NAME."
+  (format "*magit-dash-repos: %s*" name))
+
+;;;###autoload
+(defun magit-dash-open-view (name &optional predicate tag)
+  "Open a new dashboard buffer displaying a filtered view named NAME.
+PREDICATE is an optional filter symbol or function (e.g. `unpushed').
+TAG is an optional tag symbol or list of tags to filter by.
+Switches to the newly created or existing view buffer and refreshes."
+  (interactive "sView name: ")
+  (let* ((bname (magit-dash-view-buffer-name name))
+         (buf (get-buffer-create bname)))
+    (with-current-buffer buf
+      (unless (derived-mode-p 'magit-dash-mode)
+        (magit-dash-mode))
+      (setq-local magit-dash--view-name name)
+      (setq-local magit-dash--predicate-filter predicate)
+      (when tag
+        (setq-local magit-dash--tag-filter tag))
+      (magit-dash-refresh))
+    (pop-to-buffer-same-window buf)
+    buf))
+
+;;;###autoload
+(defun magit-dash-filter-unpushed (&optional new-buffer)
+  "Filter dashboard to only show repositories with unpushed commits.
+With prefix argument NEW-BUFFER (or non-nil), opens the view in a new buffer
+named `*magit-dash-repos: unpushed*'.
+When invoked in an already filtered buffer, toggles the filter back off."
+  (interactive "P")
+  (if new-buffer
+      (magit-dash-open-view "unpushed" 'unpushed)
+    (unless (derived-mode-p 'magit-dash-mode)
+      (user-error "Not in a magit-dash buffer"))
+    (if (eq magit-dash--predicate-filter 'unpushed)
+        (progn
+          (setq magit-dash--predicate-filter nil)
+          (magit-dash-refresh)
+          (message "magit-dash: unpushed filter cleared"))
+      (setq magit-dash--predicate-filter 'unpushed)
+      (magit-dash-refresh)
+      (let ((count (length (magit-dash--visible-repos))))
+        (message "magit-dash: filtered to %d repositor%s with unpushed commits"
+                 count (if (= count 1) "y" "ies"))))))
+
+;;;###autoload
+(defun magit-dash-filter-marked (&optional new-buffer)
+  "Filter dashboard down to only currently marked repositories.
+With prefix argument NEW-BUFFER (or non-nil), opens the view in a new buffer
+named `*magit-dash-repos: marked*'.
+Signals `user-error' if no repositories are currently marked."
+  (interactive "P")
+  (unless (magit-dash--has-marks-p)
+    (user-error "No repositories are currently marked"))
+  (let ((paths (copy-sequence magit-dash--marked-paths)))
+    (if new-buffer
+        (let ((buf (magit-dash-open-view "marked" (cons :paths paths))))
+          (with-current-buffer buf
+            (setq magit-dash--marked-paths paths))
+          buf)
+      (unless (derived-mode-p 'magit-dash-mode)
+        (user-error "Not in a magit-dash buffer"))
+      (setq magit-dash--predicate-filter (cons :paths paths))
+      (magit-dash-refresh)
+      (message "magit-dash: narrowed to %d marked repositor%s"
+               (length paths) (if (= (length paths) 1) "y" "ies")))))
+
+(defun magit-dash--repos-for-tag (tag &optional all-registered)
+  "Return repositories matching TAG.
+TAG may be a symbol or string.
+If ALL-REGISTERED is non-nil or not in `magit-dash-mode', search all
+`magit-dash-repo-list'; otherwise search visible repositories."
+  (let* ((tag-sym (if (stringp tag) (intern tag) tag))
+         (repos (if (or all-registered (not (derived-mode-p 'magit-dash-mode)))
+                    magit-dash-repo-list
+                  (magit-dash--all-repos))))
+    (seq-filter (lambda (r)
+                  (memq tag-sym (magit-dash--all-tags-for r)))
+                repos)))
+
+;;;###autoload
+(defun magit-dash-group-open-view (&optional tag)
+  "Open a dedicated dashboard view buffer for tagged repository group TAG."
+  (interactive)
+  (let ((tag (or tag (magit-dash--read-tag "Open view for tag group: " :require-match t))))
+    (magit-dash-open-view (symbol-name tag) nil tag)))
+
+;;;###autoload
+(defun magit-dash-group-auto-sync (&optional tag)
+  "Run autosync asynchronously across all repositories in tag group TAG."
+  (interactive)
+  (let* ((tag (or tag (magit-dash--read-tag "Autosync tag group: " :require-match t)))
+         (all-repos (magit-dash--repos-for-tag tag t))
+         (repos (seq-filter #'magit-dash--has-sync-configured-p all-repos)))
+    (unless all-repos
+      (user-error "No repositories found with tag '%s" (symbol-name tag)))
+    (unless repos
+      (user-error "No repositories with tag '%s' have auto operations configured" (symbol-name tag)))
+    (magit-dash--batch-run
+     repos
+     #'magit-dash--auto-sync-async
+     (format "magit-dash autosync [%s]" tag)
+     (lambda (_) (magit-dash--maybe-refresh repos)))))
+
+;;;###autoload
+(defun magit-dash-group-fetch (&optional tag)
+  "Fetch all repositories in tag group TAG."
+  (interactive)
+  (let* ((tag (or tag (magit-dash--read-tag "Fetch tag group: " :require-match t)))
+         (repos (magit-dash--repos-for-tag tag t)))
+    (unless repos
+      (user-error "No repositories found with tag '%s" (symbol-name tag)))
+    (magit-dash--batch-run
+     repos
+     (lambda (r cb) (magit-dash--run-operation r :fetch cb))
+     (format "magit-dash fetch [%s]" tag)
+     (lambda (_) (magit-dash--maybe-refresh repos)))))
+
+;;;###autoload
+(defun magit-dash-group-pull (&optional tag)
+  "Pull all repositories in tag group TAG."
+  (interactive)
+  (let* ((tag (or tag (magit-dash--read-tag "Pull tag group: " :require-match t)))
+         (repos (magit-dash--repos-for-tag tag t)))
+    (unless repos
+      (user-error "No repositories found with tag '%s" (symbol-name tag)))
+    (magit-dash--batch-run
+     repos
+     (lambda (r cb) (magit-dash--run-operation r :pull cb))
+     (format "magit-dash pull [%s]" tag)
+     (lambda (_) (magit-dash--maybe-refresh repos)))))
+
+;;;###autoload
+(defun magit-dash-group-push (&optional tag)
+  "Push all repositories in tag group TAG that have commits ahead."
+  (interactive)
+  (let* ((tag (or tag (magit-dash--read-tag "Push tag group: " :require-match t)))
+         (all-repos (magit-dash--repos-for-tag tag t))
+         (repos (seq-filter #'magit-dash--repo-pushable-p all-repos)))
+    (unless all-repos
+      (user-error "No repositories found with tag '%s" (symbol-name tag)))
+    (if (null repos)
+        (message "magit-dash: all %d repositories with tag '%s are up to date (nothing to push)"
+                 (length all-repos) (symbol-name tag))
+      (magit-dash--batch-run
+       repos
+       #'magit-dash--push-async
+       (format "magit-dash push [%s]" tag)
+       (lambda (_) (magit-dash--maybe-refresh repos))))))
+
+;;;###autoload
+(defun magit-dash-group-stage-all (&optional tag)
+  "Stage all changes in all repositories in tag group TAG."
+  (interactive)
+  (let* ((tag (or tag (magit-dash--read-tag "Stage all for tag group: " :require-match t)))
+         (repos (magit-dash--repos-for-tag tag t)))
+    (unless repos
+      (user-error "No repositories found with tag '%s" (symbol-name tag)))
+    (magit-dash--batch-run
+     repos
+     (lambda (r cb) (magit-dash--run-operation r :stage-all cb))
+     (format "magit-dash stage-all [%s]" tag)
+     (lambda (_) (magit-dash--maybe-refresh repos)))))
+
+;;;###autoload
+(defun magit-dash-group-run-command (&optional tag command background)
+  "Dispatch a command across all repositories in tag group TAG.
+Prompts for TAG using annotated completion if not specified.
+Prompts for COMMAND from configured commands or custom input.
+When BACKGROUND is non-nil, runs each command in background."
+  (interactive)
+  (let* ((tag (or tag (magit-dash--read-tag "Run command on tag group: " :require-match t)))
+         (repos (magit-dash--repos-for-tag tag t)))
+    (unless repos
+      (user-error "No repositories found with tag '%s" (symbol-name tag)))
+    (let* ((all-cmds
+            (delete-dups
+             (seq-mapcat
+              (lambda (r)
+                (seq-map (lambda (pair)
+                           (if (consp pair) (format "%s" (car pair)) (format "%s" pair)))
+                         (magit-dash-repo-commands r)))
+              repos)))
+           (chosen (or command
+                       (if all-cmds
+                           (completing-read (format "Run command on [%s] (%d repos): "
+                                                    (symbol-name tag) (length repos))
+                                            all-cmds nil nil)
+                         (read-string (format "Run shell command on [%s] (%d repos): "
+                                              (symbol-name tag) (length repos)))))))
+      (when (and chosen (not (string-empty-p chosen)))
+        (seq-do
+         (lambda (repo)
+           (let ((cmd-entry
+                  (or (seq-find (lambda (c) (equal (format "%s" (car-safe c)) chosen))
+                                (magit-dash-repo-commands repo))
+                      chosen)))
+             (magit-dash--execute-command-on-repo repo cmd-entry background)))
+         repos)))))
+
+(defun magit-dash--group-menu-title ()
+  "Title for `magit-dash-group-menu'."
+  (if-let* ((tag (if (listp magit-dash--tag-filter)
+                     (car magit-dash--tag-filter)
+                   magit-dash--tag-filter)))
+      (format "Tagged Group: %s (%d repos)"
+              (symbol-name tag)
+              (length (magit-dash--repos-for-tag tag t)))
+    "Tagged Repository Groups"))
+
+(transient-define-prefix magit-dash-group-menu ()
+  "Operations on a tagged repository group."
+  [:description magit-dash--group-menu-title
+   ["View & Filter"
+    ("v"  "Open group view buffer" magit-dash-group-open-view)
+    ("f"  "Filter dashboard by tag" magit-dash-filter-by-tag)
+    ("m"  "Mark all in group"      magit-dash-mark-by-tag)]
+   ["Dispatch Tasks"
+    ("x"  "Run command across group" magit-dash-group-run-command)
+    ("a"  "Autosync group"          magit-dash-group-auto-sync)
+    ("rf" "Refresh group"           magit-dash-refresh-by-tag)]
+   ["Batch Operations"
+    ("fa" "Fetch group"             magit-dash-group-fetch)
+    ("pa" "Pull group"              magit-dash-group-pull)
+    ("pu" "Push group"              magit-dash-group-push)
+    ("ta" "Stage all"               magit-dash-group-stage-all)]])
+
 (defun magit-dash-visit-buffer ()
   "Switch to a buffer visiting a file in the repository at point."
   (interactive)
@@ -4450,9 +4868,8 @@ Signals `user-error' when `magit-dash-repo-list' is empty."
 
 (defun magit-dash--repo-at-point-ahead-p ()
   "Return non-nil when the repo at point has commits ahead of its upstream."
-  (when-let* ((repo (ignore-errors (magit-dash--repo-at-point)))
-              (stats (magit-dash--get-stats repo)))
-    (and (> (or (plist-get stats :ahead) 0) 0) t)))
+  (when-let* ((repo (ignore-errors (magit-dash--repo-at-point))))
+    (magit-dash--repo-ahead-p repo)))
 
 (defun magit-dash--can-add-worktree-p ()
   "Return non-nil when at a registered non-worktree repo (can add a worktree)."
@@ -4893,6 +5310,8 @@ Indicates whether batch operations target all repos or marked repos."
     ("mc"  "Clear marks"     magit-dash-unmark-all
      :inapt-if-not magit-dash--has-marks-p
      :transient t)
+    ("mu"  "Mark unpushed"   magit-dash-mark-unpushed
+     :transient t)
     ("fa"  "Fetch all"       magit-dash-fetch-all
      :inapt-if-not magit-dash--batch-enabled-p)
     ("pa"  "Pull all"        magit-dash-pull-all
@@ -4947,6 +5366,16 @@ Indicates whether batch operations target all repos or marked repos."
                                    magit-dash--tag-filter))
                        "Filter by tag"))
      magit-dash-filter-by-tag)
+    ("nu"  (lambda () (if (eq magit-dash--predicate-filter 'unpushed)
+                         "Filter unpushed [on]"
+                       "Filter unpushed"))
+     magit-dash-filter-unpushed)
+    ("nm"  "Filter marked"   magit-dash-filter-marked
+     :inapt-if-not magit-dash--has-marks-p)
+    ("nv"  "Open view buffer" magit-dash-open-view)
+    ("nx"  "Clear filters"   magit-dash-clear-filter
+     :inapt-if-not (lambda () (or magit-dash--tag-filter magit-dash--predicate-filter)))
+    ("tg"  "Group menu…"     magit-dash-group-menu)
     ("rt"  "Refresh by tag"  magit-dash-refresh-by-tag)
     ("hr"  (lambda () (if (magit-dash--has-marks-p) "Hide marked" "Hide repo"))
      magit-dash-hide-repo

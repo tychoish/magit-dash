@@ -4934,3 +4934,266 @@ The bug was that add-text-properties returns t, not the modified string."
     (cl-letf (((symbol-function 'magit-dash-refresh) #'ignore))
       (magit-dash-toggle-worktrees wt))
     (should-not (magit-dash--repo-show-worktrees-p r1))))
+
+;;;; Unpushed / Marked Filtering and Dedicated Views
+
+(ert-deftest magit-dash/repo-ahead-p-checks-stats-and-porcelain ()
+  "magit-dash--repo-ahead-p returns non-nil when repo has unpushed commits."
+  (let ((r1 (magit-dash-repo--make :name "r1" :path "/tmp/r1"))
+        (r2 (magit-dash-repo--make :name "r2" :path "/tmp/r2"))
+        (magit-dash-gh--cache (make-hash-table :test #'equal)))
+    (magit-dash-gh--cache-set "/tmp/r1" :stats (list :ahead 2 :branch "main"))
+    (magit-dash-gh--cache-set "/tmp/r2" :stats (list :ahead 0 :branch "main"))
+    (should (magit-dash--repo-ahead-p r1))
+    (should-not (magit-dash--repo-ahead-p r2))))
+
+(ert-deftest magit-dash/repo-dirty-p-checks-stats-and-porcelain ()
+  "magit-dash--repo-dirty-p returns non-nil when repo has uncommitted changes."
+  (let ((r1 (magit-dash-repo--make :name "r1" :path "/tmp/r1"))
+        (r2 (magit-dash-repo--make :name "r2" :path "/tmp/r2"))
+        (magit-dash-gh--cache (make-hash-table :test #'equal)))
+    (magit-dash-gh--cache-set "/tmp/r1" :stats (list :dirty t))
+    (magit-dash-gh--cache-set "/tmp/r2" :stats (list :dirty nil))
+    (should (magit-dash--repo-dirty-p r1))
+    (should-not (magit-dash--repo-dirty-p r2))))
+
+(ert-deftest magit-dash/repo-matches-predicate-filter-p ()
+  "magit-dash--repo-matches-predicate-filter-p supports unpushed, dirty, :paths, and functions."
+  (let ((r1 (magit-dash-repo--make :name "r1" :path "/tmp/r1"))
+        (r2 (magit-dash-repo--make :name "r2" :path "/tmp/r2"))
+        (magit-dash-gh--cache (make-hash-table :test #'equal)))
+    (magit-dash-gh--cache-set "/tmp/r1" :stats (list :ahead 1 :dirty nil :branch "main"))
+    (magit-dash-gh--cache-set "/tmp/r2" :stats (list :ahead 0 :dirty t :branch "main"))
+    ;; nil filter matches everything
+    (should (magit-dash--repo-matches-predicate-filter-p r1 nil))
+    (should (magit-dash--repo-matches-predicate-filter-p r2 nil))
+    ;; 'unpushed filter
+    (should (magit-dash--repo-matches-predicate-filter-p r1 'unpushed))
+    (should-not (magit-dash--repo-matches-predicate-filter-p r2 'unpushed))
+    ;; 'dirty filter
+    (should-not (magit-dash--repo-matches-predicate-filter-p r1 'dirty))
+    (should (magit-dash--repo-matches-predicate-filter-p r2 'dirty))
+    ;; (:paths . ...) filter
+    (should (magit-dash--repo-matches-predicate-filter-p r1 '(:paths "/tmp/r1")))
+    (should-not (magit-dash--repo-matches-predicate-filter-p r2 '(:paths "/tmp/r1")))
+    ;; custom predicate function
+    (should (magit-dash--repo-matches-predicate-filter-p r1 (lambda (r) (equal (magit-dash-repo-name r) "r1"))))
+    (should-not (magit-dash--repo-matches-predicate-filter-p r2 (lambda (r) (equal (magit-dash-repo-name r) "r1"))))))
+
+(ert-deftest magit-dash/filter-unpushed-toggles-in-buffer ()
+  "magit-dash-filter-unpushed toggles predicate filter in current buffer."
+  (let ((buf (generate-new-buffer " *magit-dash-filter-test*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (magit-dash-mode)
+          (cl-letf (((symbol-function 'magit-dash-refresh) #'ignore))
+            ;; Turn filter on
+            (magit-dash-filter-unpushed nil)
+            (should (eq magit-dash--predicate-filter 'unpushed))
+            ;; Turn filter off (toggle)
+            (magit-dash-filter-unpushed nil)
+            (should-not magit-dash--predicate-filter)))
+      (kill-buffer buf))))
+
+(ert-deftest magit-dash/filter-unpushed-opens-view-buffer ()
+  "magit-dash-filter-unpushed with non-nil new-buffer creates dedicated view buffer."
+  (let ((view-buf nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'magit-dash-refresh) #'ignore)
+                  ((symbol-function 'pop-to-buffer-same-window) #'ignore))
+          (setq view-buf (magit-dash-filter-unpushed t))
+          (should (buffer-live-p view-buf))
+          (should (equal (buffer-name view-buf) "*magit-dash-repos: unpushed*"))
+          (with-current-buffer view-buf
+            (should (derived-mode-p 'magit-dash-mode))
+            (should (eq magit-dash--predicate-filter 'unpushed))
+            (should (equal magit-dash--view-name "unpushed"))))
+      (when (and view-buf (buffer-live-p view-buf))
+        (kill-buffer view-buf)))))
+
+(ert-deftest magit-dash/filter-marked-filters-or-opens-view ()
+  "magit-dash-filter-marked filters marked repos or creates view buffer."
+  (let* ((r1 (magit-dash-repo--make :name "r1" :path "/tmp/r1"))
+         (r2 (magit-dash-repo--make :name "r2" :path "/tmp/r2"))
+         (magit-dash-repo-list (list r1 r2))
+         (magit-dash--marked-paths (list "/tmp/r1"))
+         (buf (generate-new-buffer " *magit-dash-marked-test*"))
+         (view-buf nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer buf
+            (magit-dash-mode)
+            (setq magit-dash--marked-paths (list "/tmp/r1"))
+            (cl-letf (((symbol-function 'magit-dash-refresh) #'ignore))
+              (magit-dash-filter-marked nil)
+              (should (equal magit-dash--predicate-filter '(:paths "/tmp/r1")))))
+          (cl-letf (((symbol-function 'magit-dash-refresh) #'ignore)
+                    ((symbol-function 'pop-to-buffer-same-window) #'ignore))
+            (setq view-buf (magit-dash-filter-marked t))
+            (should (buffer-live-p view-buf))
+            (should (equal (buffer-name view-buf) "*magit-dash-repos: marked*"))
+            (with-current-buffer view-buf
+              (should (derived-mode-p 'magit-dash-mode))
+              (should (equal magit-dash--predicate-filter '(:paths "/tmp/r1"))))))
+      (when (buffer-live-p buf) (kill-buffer buf))
+      (when (and view-buf (buffer-live-p view-buf)) (kill-buffer view-buf)))))
+
+(ert-deftest magit-dash/filter-marked-errors-when-none-marked ()
+  "magit-dash-filter-marked signals user-error when no repos marked."
+  (let ((magit-dash--marked-paths nil))
+    (should-error (magit-dash-filter-marked) :type 'user-error)))
+
+(ert-deftest magit-dash/mark-unpushed-marks-ahead-repos ()
+  "magit-dash-mark-unpushed adds ahead repos to magit-dash--marked-paths."
+  (let* ((r1 (magit-dash-repo--make :name "r1" :path "/tmp/r1"))
+         (r2 (magit-dash-repo--make :name "r2" :path "/tmp/r2"))
+         (magit-dash-repo-list (list r1 r2))
+         (magit-dash--marked-paths nil)
+         (magit-dash-gh--cache (make-hash-table :test #'equal)))
+    (magit-dash-gh--cache-set "/tmp/r1" :stats (list :ahead 1 :branch "main"))
+    (magit-dash-gh--cache-set "/tmp/r2" :stats (list :ahead 0 :branch "main"))
+    (cl-letf (((symbol-function 'magit-dash-refresh) #'ignore))
+      (magit-dash-mark-unpushed))
+    (should (equal magit-dash--marked-paths (list "/tmp/r1")))))
+
+(ert-deftest magit-dash/clear-filter-resets-all-filters ()
+  "magit-dash-clear-filter resets predicate and tag filters in current buffer."
+  (let ((buf (generate-new-buffer " *magit-dash-clear-test*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (magit-dash-mode)
+          (setq magit-dash--predicate-filter 'unpushed)
+          (setq magit-dash--tag-filter 'work)
+          (setq magit-dash--view-name "unpushed")
+          (cl-letf (((symbol-function 'magit-dash-refresh) #'ignore))
+            (magit-dash-clear-filter)
+            (should-not magit-dash--predicate-filter)
+            (should-not magit-dash--tag-filter)
+            (should-not magit-dash--view-name)))
+      (kill-buffer buf))))
+
+;;;; Tagged Repository Groups
+
+(ert-deftest magit-dash/repos-for-tag-retrieves-matching-repos ()
+  "magit-dash--repos-for-tag returns repos matching tag symbol or string."
+  (let* ((r1 (magit-dash-repo--make :name "r1" :path "/tmp/r1" :tags '(work core)))
+         (r2 (magit-dash-repo--make :name "r2" :path "/tmp/r2" :tags '(personal)))
+         (magit-dash-repo-list (list r1 r2)))
+    (should (equal (magit-dash--repos-for-tag 'work t) (list r1)))
+    (should (equal (magit-dash--repos-for-tag "work" t) (list r1)))
+    (should (equal (magit-dash--repos-for-tag 'personal t) (list r2)))
+    (should-not (magit-dash--repos-for-tag 'other t))))
+
+(ert-deftest magit-dash/group-open-view-creates-tagged-view-buffer ()
+  "magit-dash-group-open-view opens view buffer filtered to tag."
+  (let ((view-buf nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'magit-dash-refresh) #'ignore)
+                  ((symbol-function 'pop-to-buffer-same-window) #'ignore))
+          (setq view-buf (magit-dash-group-open-view 'work))
+          (should (buffer-live-p view-buf))
+          (should (equal (buffer-name view-buf) "*magit-dash-repos: work*"))
+          (with-current-buffer view-buf
+            (should (derived-mode-p 'magit-dash-mode))
+            (should (eq magit-dash--tag-filter 'work))
+            (should (equal magit-dash--view-name "work"))))
+      (when (and view-buf (buffer-live-p view-buf))
+        (kill-buffer view-buf)))))
+
+(ert-deftest magit-dash/group-run-command-dispatches-across-tag ()
+  "magit-dash-group-run-command runs command on every repo in tag group."
+  (let* ((r1 (magit-dash-repo--make :name "r1" :path "/tmp/r1" :tags '(infra)))
+         (r2 (magit-dash-repo--make :name "r2" :path "/tmp/r2" :tags '(infra)))
+         (r3 (magit-dash-repo--make :name "r3" :path "/tmp/r3" :tags '(other)))
+         (magit-dash-repo-list (list r1 r2 r3))
+         (executed-repos nil))
+    (cl-letf (((symbol-function 'magit-dash--execute-command-on-repo)
+               (lambda (repo cmd bg)
+                 (push (cons (magit-dash-repo-name repo) cmd) executed-repos))))
+      (magit-dash-group-run-command 'infra "make test" nil)
+      (should (= 2 (length executed-repos)))
+      (should (member '("r1" . "make test") executed-repos))
+      (should (member '("r2" . "make test") executed-repos)))))
+
+(ert-deftest magit-dash/group-operations-dispatch-batch ()
+  "magit-dash-group-* batch operations dispatch on tag group repos."
+  (let* ((r1 (magit-dash-repo--make :name "r1" :path "/tmp/r1" :tags '(sync-grp) :auto-fetch t))
+         (magit-dash-repo-list (list r1))
+         (batch-dispatches nil))
+    (cl-letf (((symbol-function 'magit-dash--batch-run)
+               (lambda (repos op-fn label &optional on-all-done)
+                 (push (list repos label) batch-dispatches))))
+      (magit-dash-group-auto-sync 'sync-grp)
+      (magit-dash-group-fetch 'sync-grp)
+      (magit-dash-group-pull 'sync-grp)
+      (magit-dash-group-stage-all 'sync-grp)
+      (should (= 4 (length batch-dispatches)))
+      (should-error (magit-dash-group-fetch 'nonexistent) :type 'user-error))))
+
+(ert-deftest magit-dash/group-menu-is-defined ()
+  "magit-dash-group-menu is a defined command/transient prefix."
+  (should (commandp 'magit-dash-group-menu)))
+
+;;;; Template Commit Message for Autosync & Novel Repos
+
+(ert-deftest magit-dash/repo-novel-p-detects-unborn-branch ()
+  "magit-dash--repo-novel-p returns non-nil only when repo has no HEAD hash."
+  (let ((r1 (magit-dash-repo--make :name "r1" :path "/tmp/r1")))
+    (cl-letf (((symbol-function 'magit-dash--head-hash) (lambda (_) nil)))
+      (should (magit-dash--repo-novel-p r1)))
+    (cl-letf (((symbol-function 'magit-dash--head-hash) (lambda (_) "1234abc")))
+      (should-not (magit-dash--repo-novel-p r1)))))
+
+(ert-deftest magit-dash/format-commit-message-format-spec ()
+  "magit-dash--format-commit-message expands %r, %h, %b, %s."
+  (let ((repo (magit-dash-repo--make :name "myrepo" :path "/tmp/myrepo" :branch "main"))
+        (magit-dash-sync-trigger 'timer))
+    (cl-letf (((symbol-function 'sprite-system-name) (lambda () "testhost.local")))
+      (let ((msg (magit-dash--format-commit-message
+                  "[%h] %r branch=%b: %s" repo)))
+        (should (equal msg "[testhost.local] myrepo branch=main: timer"))))))
+
+(ert-deftest magit-dash/format-commit-message-legacy-fallback ()
+  "magit-dash--format-commit-message safely handles legacy positional %s."
+  (let ((repo (magit-dash-repo--make :name "myrepo" :path "/tmp/myrepo")))
+    (let ((msg (magit-dash--format-commit-message "autosync: %s" repo)))
+      (should (equal msg "autosync: myrepo")))))
+
+(ert-deftest magit-dash/commit-message-for-repo-novel-and-standard ()
+  "magit-dash--commit-message-for-repo selects appropriate default templates."
+  (let ((repo (magit-dash-repo--make :name "test-repo" :path "/tmp/test-repo" :auto-commit t))
+        (magit-dash-auto-commit-novel-message-template "init novel %r: %s")
+        (magit-dash-auto-commit-message-template "sync standard %r: %s")
+        (magit-dash-sync-trigger 'timer))
+    ;; Novel repo
+    (cl-letf (((symbol-function 'magit-dash--repo-novel-p) (lambda (_) t)))
+      (should (equal (magit-dash--commit-message-for-repo repo)
+                     "init novel test-repo: timer")))
+    ;; Existing repo
+    (cl-letf (((symbol-function 'magit-dash--repo-novel-p) (lambda (_) nil)))
+      (should (equal (magit-dash--commit-message-for-repo repo)
+                     "sync standard test-repo: timer")))))
+
+(ert-deftest magit-dash/commit-message-for-repo-custom-templates ()
+  "magit-dash--commit-message-for-repo respects repo custom template strings and functions."
+  (let ((r-str (magit-dash-repo--make :name "r1" :path "/tmp/r1"
+                                     :auto-commit "custom chore(%r): %s"))
+        (r-fn (magit-dash-repo--make :name "r2" :path "/tmp/r2"
+                                    :auto-commit (lambda (r) (format "dynamic %s" (magit-dash-repo-name r)))))
+        (magit-dash-sync-trigger 'manual))
+    (should (equal (magit-dash--commit-message-for-repo r-str)
+                   "custom chore(r1): manual"))
+    (should (equal (magit-dash--commit-message-for-repo r-fn)
+                   "dynamic r2"))))
+
+(ert-deftest magit-dash/register-accepts-auto-commit-template ()
+  "magit-dash-register accepts and stores :auto-commit-template."
+  (let ((magit-dash-repo-alist nil)
+        (magit-dash-repo-list nil))
+    (magit-dash-register :name "templated-repo"
+                         :path "/tmp/templated-repo"
+                         :auto-commit-template "ci(%r): autosync %s")
+    (let ((repo (seq-find (lambda (r) (equal (magit-dash-repo-name r) "templated-repo"))
+                          magit-dash-repo-list)))
+      (should repo)
+      (should (equal (magit-dash-repo-auto-commit repo) "ci(%r): autosync %s")))))

@@ -273,8 +273,6 @@ Calls ON-REPO-DONE with (REPO CI-STATUS) for each successfully parsed repo.
 Calls ON-DONE with the list of remaining unhandled repos (e.g. repos that
 could not be queried via GraphQL or whose queries failed)."
   (let* ((guards (bound-and-true-p magit-dash--refresh-guards))
-         (buf (or (get-buffer (or (bound-and-true-p magit-dash-buffer-name) "*magit-dash*"))
-                  (current-buffer)))
          (entries nil)
          (unhandled nil)
          (idx 0))
@@ -322,10 +320,14 @@ could not be queried via GraphQL or whose queries failed)."
                    (if (and ci-status (magit-dash-gh--refresh-current-p guards path))
                        (progn
                          (magit-dash-gh--cache-set path :ci-status ci-status)
-                         (when (and buf (buffer-live-p buf))
-                           (with-current-buffer buf
-                             (when (fboundp 'magit-dash--update-entry)
-                               (magit-dash--update-entry repo))))
+                         (seq-do
+                          (lambda (b)
+                            (when (buffer-live-p b)
+                              (with-current-buffer b
+                                (when (and (derived-mode-p 'magit-dash-mode)
+                                           (fboundp 'magit-dash--update-entry))
+                                  (magit-dash--update-entry repo)))))
+                          (buffer-list))
                          (when on-repo-done
                            (funcall on-repo-done repo ci-status)))
                      (push repo remaining))))
@@ -408,9 +410,7 @@ Returns a cancellation handle."
          (use-graphql (if (plist-member args :use-graphql)
                           (plist-get args :use-graphql)
                         magit-dash-gh-ci-use-graphql))
-         (ci-repos (seq-filter #'magit-dash-repo-include-ci repos))
-         (buf (or (get-buffer (or (bound-and-true-p magit-dash-buffer-name) "*magit-dash*"))
-                  (current-buffer))))
+         (ci-repos (seq-filter #'magit-dash-repo-include-ci repos)))
     (if (null ci-repos)
         (progn
           (when on-done (funcall on-done))
@@ -428,10 +428,14 @@ Returns a cancellation handle."
                          (magit-dash-gh-ci-fetch
                           repo
                           (lambda (ci-status)
-                            (when (and buf (buffer-live-p buf))
-                              (with-current-buffer buf
-                                (when (fboundp 'magit-dash--update-entry)
-                                  (magit-dash--update-entry repo))))
+                            (seq-do
+                             (lambda (b)
+                               (when (buffer-live-p b)
+                                 (with-current-buffer b
+                                   (when (and (derived-mode-p 'magit-dash-mode)
+                                              (fboundp 'magit-dash--update-entry))
+                                     (magit-dash--update-entry repo)))))
+                             (buffer-list))
                             (when on-repo-done
                               (funcall on-repo-done repo ci-status))
                             (funcall done)))))
