@@ -21,6 +21,32 @@
     (should (= (length rows) 2))
     (should (equal (aref (cadar rows) 0) "o/r#1"))))
 
+(ert-deftest magit-dash-actionable-partial-marker ()
+  "Only PRs with truncated data get the marker."
+  (should (equal " [partial data]"
+                 (magit-dash-actionable--partial-marker '(:truncated t))))
+  (should (equal "" (magit-dash-actionable--partial-marker '(:truncated nil))))
+  (should (equal "" (magit-dash-actionable--partial-marker '(:number 1)))))
+
+(ert-deftest magit-dash-actionable-pr-entries-mark-truncated-keep-bucket ()
+  (let* ((rows (magit-dash-actionable--pr-entries
+                '((:repo "o/r" :number 1 :title "a" :bucket fix-ci :truncated t)
+                  (:repo "o/r" :number 2 :title "b" :bucket threads))))
+         (why (lambda (row) (aref (cadr row) 1))))
+    (should (equal "fix-ci: a [partial data]" (funcall why (car rows))))
+    (should (equal "threads: b" (funcall why (cadr rows))))))
+
+(ert-deftest magit-dash-actionable-render-marks-truncated-synthetic-row ()
+  "A PR with no local repo carries the marker in its why summary."
+  (with-temp-buffer
+    (magit-dash-actionable-mode)
+    (let ((magit-dash-repo-list nil))
+      (magit-dash-actionable--render
+       '((:repo "o/r" :number 1 :title "broken" :bucket fix-ci :truncated t))
+       nil)
+      (should (equal "fix-ci: broken [partial data]"
+                     (map-elt magit-dash-actionable--why-cache "o/r"))))))
+
 (ert-deftest magit-dash-actionable-keys ()
   (should (eq (lookup-key magit-dash-mode-map (kbd "a p")) 'magit-dash-actionable-open))
   (should (eq (lookup-key magit-dash-actionable-mode-map (kbd "C-c C-c")) 'magit-dash-actionable-menu)))

@@ -47,12 +47,21 @@
                          (when ci-failing
                            (cons 'ci (format "CI failing (%s)" ci-conclusion))))))))
 
+(defun magit-dash-actionable--partial-marker (pr)
+  "Return \" [partial data]\" when PR's nested review/check lists were truncated.
+The PR keeps the bucket computed from the data that was fetched; the
+marker tells the reader that bucket may be incomplete."
+  (if (plist-get pr :truncated)
+      " [partial data]"
+    ""))
+
 (defun magit-dash-actionable--pr-entries (prs)
   "Return action rows for PRS that need author attention."
   (seq-map (lambda (pr)
              (list (list :pr pr)
                    (vector (format "%s#%s" (plist-get pr :repo) (plist-get pr :number))
-                           (format "%s: %s" (plist-get pr :bucket) (plist-get pr :title)))))
+                           (format "%s: %s%s" (plist-get pr :bucket) (plist-get pr :title)
+                                   (magit-dash-actionable--partial-marker pr)))))
            (seq-filter (lambda (pr) (memq (plist-get pr :bucket) '(fix-ci threads blocked))) prs)))
 
 (defun magit-dash-actionable--format-why (repo)
@@ -69,10 +78,11 @@
           (push (format "%d unpulled" (plist-get stats :behind)) parts))
         (when (bound-and-true-p magit-dash-actionable--pr-cache)
           (when-let* ((pr (gethash (magit-dash-repo-path repo) magit-dash-actionable--pr-cache)))
-            (push (format "PR #%s: %s (%s)"
+            (push (format "PR #%s: %s (%s)%s"
                           (plist-get pr :number)
                           (plist-get pr :title)
-                          (or (plist-get pr :bucket) "attention"))
+                          (or (plist-get pr :bucket) "attention")
+                          (magit-dash-actionable--partial-marker pr))
                   parts)))
         (string-join (nreverse parts) ", "))))
 
@@ -125,10 +135,11 @@ PROBLEMS is nil or a string describing PR collection failures or progress."
                           (seq-map (lambda (item) (aref (cadr item) 1))
                                    (magit-dash-actionable--repo-entries repo))
                           (when matched-pr
-                            (list (format "PR #%s: %s (%s)"
+                            (list (format "PR #%s: %s (%s)%s"
                                           (plist-get matched-pr :number)
                                           (plist-get matched-pr :title)
-                                          (plist-get matched-pr :bucket)))))))
+                                          (plist-get matched-pr :bucket)
+                                          (magit-dash-actionable--partial-marker matched-pr)))))))
          (when matched-pr
            (setf (map-elt magit-dash-actionable--pr-cache path) matched-pr))
          (when why-parts
@@ -143,7 +154,8 @@ PROBLEMS is nil or a string describing PR collection failures or progress."
          (let ((path (plist-get pr :repo)))
            (setf (map-elt magit-dash-actionable--pr-cache path) pr)
            (setf (map-elt magit-dash-actionable--why-cache path)
-                 (format "%s: %s" (plist-get pr :bucket) (plist-get pr :title)))
+                 (format "%s: %s%s" (plist-get pr :bucket) (plist-get pr :title)
+                         (magit-dash-actionable--partial-marker pr)))
            (push (magit-dash-repo--make
                   :name (format "%s#%s" path (plist-get pr :number))
                   :path path)
