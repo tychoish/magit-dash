@@ -13,6 +13,7 @@
 (require 'map)
 (require 'magit-dash)
 (require 'magit-dash-pr)
+(require 'magit-dash-global)
 
 ;;;; magit-dash-register
 
@@ -2833,6 +2834,174 @@ A conflict (e.g. \"b\" and \"bp\" coexisting) causes transient to raise
         (should (= 2 (length vec)))
         (should (equal "myorg" (aref vec 0)))
         (should (equal "myrepo" (substring-no-properties (aref vec 1))))))))
+
+;;;; runtime tags and dispatch
+
+(ert-deftest magit-dash/clear-tags-all ()
+  "clear-tags with ALL empties the runtime tag table."
+  (let ((magit-dash--ephemeral-tags (make-hash-table :test #'equal)))
+    (setf (map-elt magit-dash--ephemeral-tags "/tmp/a") '(x))
+    (cl-letf (((symbol-function 'magit-dash-refresh) #'ignore))
+      (magit-dash-clear-tags t))
+    (should (zerop (hash-table-count magit-dash--ephemeral-tags)))))
+
+(ert-deftest magit-dash/clear-tags-marked-only ()
+  "clear-tags clears only marked repos when marks exist."
+  (let* ((magit-dash--ephemeral-tags (make-hash-table :test #'equal))
+         (a (magit-dash-repo--make :name "a" :path "/tmp/a"))
+         (b (magit-dash-repo--make :name "b" :path "/tmp/b"))
+         (magit-dash-repo-list (list a b)))
+    (setf (map-elt magit-dash--ephemeral-tags "/tmp/a") '(x))
+    (setf (map-elt magit-dash--ephemeral-tags "/tmp/b") '(y))
+    (with-temp-buffer
+      (magit-dash-mode)
+      (setq-local magit-dash--marked-paths '("/tmp/a"))
+      (cl-letf (((symbol-function 'magit-dash-refresh) #'ignore))
+        (magit-dash-clear-tags)))
+    (should (null (map-elt magit-dash--ephemeral-tags "/tmp/a")))
+    (should (equal '(y) (map-elt magit-dash--ephemeral-tags "/tmp/b")))))
+
+(ert-deftest magit-dash/marked-repos-global ()
+  "marked-repos finds marks from dashboard buffers when called elsewhere."
+  (let* ((a (magit-dash-repo--make :name "a" :path "/tmp/a"))
+         (magit-dash-repo-list (list a))
+         (buf (generate-new-buffer " *md-test*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buf
+            (magit-dash-mode)
+            (setq-local magit-dash--marked-paths '("/tmp/a")))
+          (with-temp-buffer
+            (should (equal (list a) (magit-dash-marked-repos)))))
+      (kill-buffer buf))))
+
+(defmacro magit-dash-test--with-tag-repos (&rest body)
+  "Run BODY with repos a and b, an empty runtime tag table and refresh stubbed."
+  (declare (indent 0))
+  `(let* ((magit-dash--ephemeral-tags (make-hash-table :test #'equal))
+          (a (magit-dash-repo--make :name "a" :path "/tmp/a"))
+          (b (magit-dash-repo--make :name "b" :path "/tmp/b"))
+          (magit-dash-repo-list (list a b)))
+     (cl-letf (((symbol-function 'magit-dash-refresh) #'ignore))
+       ,@body)))
+
+(ert-deftest magit-dash/dispatch-workflow-missing-package ()
+  "dispatch-workflow signals a user-error without agent-shell-workflow."
+  (cl-letf (((symbol-function 'agent-shell-workflow-dispatch-group) nil)
+            ((symbol-function 'agent-shell-workflow-read) nil))
+    (should-error (magit-dash-dispatch-workflow) :type 'user-error)))
+
+(ert-deftest magit-dash/dispatch-workflow-marked-repos ()
+  "dispatch-workflow sends the marked repos' paths to dispatch-group."
+  (magit-dash-test--with-tag-repos
+    (let (dispatched)
+      (cl-letf (((symbol-function 'magit-dash-marked-repos) (lambda () (list a b)))
+                ((symbol-function 'agent-shell-workflow-read) (lambda (&rest _) 'spec))
+                ((symbol-function 'agent-shell-workflow-spec-id) (lambda (_) 'fix-ci))
+                ((symbol-function 'agent-shell-workflow-dispatch-group)
+                 (lambda (id paths) (setq dispatched (list id paths)))))
+        (magit-dash-dispatch-workflow)
+        (should (equal '(fix-ci ("/tmp/a" "/tmp/b")) dispatched))))))
+
+(ert-deftest magit-dash/dispatch-workflow-by-tag ()
+  "With a prefix argument dispatch-workflow targets every repo carrying the tag."
+  (magit-dash-test--with-tag-repos
+    (setf (map-elt magit-dash--ephemeral-tags "/tmp/b") '(deploy))
+    (let (dispatched)
+      (cl-letf (((symbol-function 'magit-dash--read-tag) (lambda (&rest _) 'deploy))
+                ((symbol-function 'agent-shell-workflow-read) (lambda (&rest _) 'spec))
+                ((symbol-function 'agent-shell-workflow-spec-id) (lambda (_) 'fix-ci))
+                ((symbol-function 'agent-shell-workflow-dispatch-group)
+                 (lambda (id paths) (setq dispatched (list id paths)))))
+        (magit-dash-dispatch-workflow t)
+        (should (equal '(fix-ci ("/tmp/b")) dispatched))))))
+
+(ert-deftest magit-dash/tag-targets-falls-back-to-repo-at-point ()
+  "tag-targets uses the repo at point when nothing is marked."
+  (magit-dash-test--with-tag-repos
+    (cl-letf (((symbol-function 'magit-dash-marked-repos) #'ignore)
+              ((symbol-function 'magit-dash--repo-at-point) (lambda () a)))
+      (should (equal (list a) (magit-dash--tag-targets))))))
+
+(ert-deftest magit-dash/marked-repos-in-dash-buffer-uses-its-own-marks ()
+  "Inside a dashboard buffer only that buffer's marks count; unregistered rows drop out."
+  (magit-dash-test--with-tag-repos
+    (let ((other (generate-new-buffer " *md-other*")))
+      (unwind-protect
+          (progn
+            (with-current-buffer other
+              (magit-dash-mode)
+              (setq-local magit-dash--marked-paths '("/tmp/b")))
+            (with-temp-buffer
+              (magit-dash-mode)
+              (should (null (magit-dash-marked-repos)))
+              (setq-local magit-dash--marked-paths '("/tmp/a" "/tmp/synthetic"))
+              (should (equal (list a) (magit-dash-marked-repos)))))
+        (kill-buffer other)))))
+
+(ert-deftest magit-dash/add-tag-applies-to-all-marked-repos ()
+  (magit-dash-test--with-tag-repos
+    (cl-letf (((symbol-function 'magit-dash--tag-targets) (lambda () (list a b)))
+              ((symbol-function 'magit-dash--read-tag) (lambda (&rest _) 'ship)))
+      (magit-dash-add-tag)
+      (magit-dash-add-tag)
+      (should (equal '(ship) (map-elt magit-dash--ephemeral-tags "/tmp/a")))
+      (should (equal '(ship) (map-elt magit-dash--ephemeral-tags "/tmp/b"))))))
+
+(ert-deftest magit-dash/remove-tag-drops-empty-entries ()
+  (magit-dash-test--with-tag-repos
+    (setf (map-elt magit-dash--ephemeral-tags "/tmp/a") '(x))
+    (setf (map-elt magit-dash--ephemeral-tags "/tmp/b") '(x y))
+    (cl-letf (((symbol-function 'magit-dash--tag-targets) (lambda () (list a b)))
+              ((symbol-function 'completing-read) (lambda (&rest _) "x")))
+      (magit-dash-remove-tag)
+      (should-not (map-contains-key magit-dash--ephemeral-tags "/tmp/a"))
+      (should (equal '(y) (map-elt magit-dash--ephemeral-tags "/tmp/b"))))))
+
+(ert-deftest magit-dash/remove-tag-without-runtime-tags-signals ()
+  (magit-dash-test--with-tag-repos
+    (cl-letf (((symbol-function 'magit-dash--tag-targets) (lambda () (list a))))
+      (should-error (magit-dash-remove-tag) :type 'user-error))))
+
+(ert-deftest magit-dash/clear-tags-deletes-keys ()
+  (magit-dash-test--with-tag-repos
+    (setf (map-elt magit-dash--ephemeral-tags "/tmp/a") '(x))
+    (cl-letf (((symbol-function 'magit-dash--tag-targets) (lambda () (list a))))
+      (magit-dash-clear-tags)
+      (should-not (map-contains-key magit-dash--ephemeral-tags "/tmp/a")))))
+
+(ert-deftest magit-dash/global-mode-registers-runtime-tags-with-savehist ()
+  "Enabling the global mode persists the runtime tag table through savehist."
+  (let ((savehist-additional-variables nil))
+    (cl-letf (((symbol-function 'magit-dash-global--apply-settings) #'ignore)
+              ((symbol-function 'magit-dash-global--setup-magit) #'ignore)
+              ((symbol-function 'magit-dash-global--revert-settings) #'ignore)
+              ((symbol-function 'magit-dash-global--teardown-magit) #'ignore))
+      (unwind-protect
+          (progn
+            (magit-dash-global-mode 1)
+            (should (memq 'magit-dash--ephemeral-tags savehist-additional-variables)))
+        (magit-dash-global-mode -1)))))
+
+(ert-deftest magit-dash/tag-keys-agree-between-map-and-transient ()
+  "Tag and dispatch commands are reachable from the same keys in the map and the menu."
+  (let ((suffixes (test-magit-dash--all-transient-suffixes 'magit-dash-menu)))
+    (seq-do
+     (lambda (spec)
+       (let* ((command (car spec))
+              (menu-key (plist-get (seq-find (lambda (s) (eq (plist-get s :command) command))
+                                             suffixes)
+                                   :key)))
+         (should menu-key)
+         (should (eq command (lookup-key magit-dash-mode-map (kbd (string-join (split-string menu-key "" t) " ")))))))
+     '((magit-dash-add-tag) (magit-dash-remove-tag) (magit-dash-clear-tags)
+       (magit-dash-dispatch-workflow)))))
+
+(ert-deftest magit-dash/transient-menu-keys-unique ()
+  "No key appears twice in `magit-dash-menu'."
+  (let ((keys (seq-map (lambda (s) (plist-get s :key))
+                       (test-magit-dash--all-transient-suffixes 'magit-dash-menu))))
+    (should (equal (seq-uniq keys) keys))))
 
 (provide 'test-magit-dash)
 

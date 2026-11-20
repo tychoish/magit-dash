@@ -2829,6 +2829,7 @@ fixed widths and are right-aligned."
     (keymap-set m "a n" #'magit-dash-agent-shell-new)
     (keymap-set m "a q" #'magit-dash-agent-shell-queue)
     (keymap-set m "a w" #'magit-dash-agent-shell-workflow)
+    (keymap-set m "a d" #'magit-dash-dispatch-workflow)
 
     ;; Tag & Toggle prefix: t
     (keymap-set m "t"   (cons "tag/toggle" (make-sparse-keymap)))
@@ -2838,6 +2839,9 @@ fixed widths and are right-aligned."
     (keymap-set m "t v" #'magit-dash-open-view)
     (keymap-set m "t g" #'magit-dash-group-menu)
     (keymap-set m "t a" #'magit-dash-add-tag)
+    (keymap-set m "t n" #'magit-dash-add-tag)
+    (keymap-set m "t r" #'magit-dash-remove-tag)
+    (keymap-set m "t d" #'magit-dash-clear-tags)
     (keymap-set m "t c" #'magit-dash-toggle-column)
     (keymap-set m "t s" #'magit-dash-toggle-submodules)
     (keymap-set m "t w" #'magit-dash-toggle-worktrees)
@@ -2926,13 +2930,15 @@ or a list of symbols (matches if REPO has all tags in FILTER)."
    (t t)))
 
 (defvar magit-dash--ephemeral-tags (make-hash-table :test #'equal)
-  "Hash table mapping repo path strings to lists of ephemeral tag symbols.
-These tags are session-local and are not saved to the repo registry.")
+  "Hash table mapping repo path strings to lists of runtime tag symbols.
+These tags are not saved to the repo registry.  The table is persisted
+across sessions via `savehist-additional-variables' (see
+`magit-dash-global-mode') and layered over registered tags.")
 
 (defun magit-dash--all-tags-for (repo)
-  "Return the combined permanent and ephemeral tags for REPO."
+  "Return the combined registered and persistent runtime tags for REPO."
   (append (magit-dash-repo-tags repo)
-          (gethash (magit-dash-repo-path repo) magit-dash--ephemeral-tags)))
+          (map-elt magit-dash--ephemeral-tags (magit-dash-repo-path repo))))
 
 (defun magit-dash--permanent-tag-set ()
   "Return deduplicated list of permanent tag symbols across registered repos."
@@ -4196,7 +4202,7 @@ displaying its buffer."
 Build an `annotated-completing-read' alist mapping tag-name strings to
 annotation strings, targeting each entry's own tag symbol.
 Each annotation lists the count of repos using the tag and up to four names.
-Permanent tags (from repo :tags fields) are sorted before ephemeral-only tags."
+Permanent tags (from repo :tags fields) are sorted before runtime-only tags."
   (let* ((permanent-set (magit-dash--permanent-tag-set))
          (tag-repo-map (let ((ht (make-hash-table :test #'eq)))
                          (seq-do
@@ -4235,12 +4241,12 @@ Permanent tags (from repo :tags fields) are sorted before ephemeral-only tags."
 
 (cl-defun magit-dash--read-tag (prompt &key include-clear require-match)
   "Read a tag using `annotated-completing-read' with PROMPT.
-Shows permanent tags (from repo :tags fields) before ephemeral-only tags.
+Shows permanent tags (from repo :tags fields) before runtime-only tags.
 Each candidate is annotated with a repo count and up to four repo names.
 
 When INCLUDE-CLEAR is non-nil a \"(clear)\" option is prepended; selecting it
 returns the symbol `clear'.  When REQUIRE-MATCH is non-nil only existing tags
-are accepted; otherwise arbitrary input is allowed for new ephemeral tags.
+are accepted; otherwise arbitrary input is allowed for new runtime tags.
 Returns an interned symbol, `clear', or nil on quit."
   (let* ((permanent-set (magit-dash--permanent-tag-set))
          (full-table (if include-clear
@@ -4251,7 +4257,7 @@ Returns an interned symbol, `clear', or nil on quit."
                      (cond
                       ((equal candidate "(clear)") " ")
                       ((memq (intern candidate) permanent-set) "permanent")
-                      (t "ephemeral"))))
+                      (t "runtime"))))
          (sort-fn (lambda (candidates)
                     (let ((perm permanent-set))
                       (seq-sort
@@ -4316,19 +4322,115 @@ unchanged."
   (magit-dash-refresh)
   (message "magit-dash: tag filter cleared"))
 
+(defun magit-dash-marked-repos ()
+  "Return the marked registered repos.
+In a `magit-dash-mode' buffer (including derived views) this is that
+buffer's marks only; elsewhere it is the union of marks across all
+dashboard buffers.  Marked rows that are not in `magit-dash-repo-list'
+\(such as synthetic PR rows) are omitted."
+  (let ((paths (if (derived-mode-p 'magit-dash-mode)
+                   magit-dash--marked-paths
+                 (thread-last (buffer-list)
+                              (seq-filter (lambda (b)
+                                            (provided-mode-derived-p
+                                             (buffer-local-value 'major-mode b)
+                                             'magit-dash-mode)))
+                              (seq-mapcat (lambda (b)
+                                            (buffer-local-value 'magit-dash--marked-paths b)))
+                              delete-dups))))
+    (seq-filter (lambda (r) (member (magit-dash-repo-path r) paths))
+                magit-dash-repo-list)))
+
+(defun magit-dash--tag-targets ()
+  "Return marked repos, or the repo at point when nothing is marked."
+  (or (magit-dash-marked-repos)
+      (list (magit-dash--repo-at-point))))
+
 (defun magit-dash-add-tag ()
-  "Add an ephemeral session-local tag to the repository at point.
-The tag is stored in memory for this session and is not saved to the registry.
+  "Add a runtime tag to the marked repositories, or the repository at point.
+The tag is not saved to the registry but persists via savehist.
 Pick from existing tags or type a new symbol name."
   (interactive)
-  (when-let* ((repo (magit-dash--repo-at-point))
-              (tag (magit-dash--read-tag
-                    (format "Add tag to %s: " (magit-dash-repo-name repo)))))
-    (let* ((path (magit-dash-repo-path repo))
-           (existing (map-elt magit-dash--ephemeral-tags path)))
-      (unless (memq tag existing)
-        (setf (map-elt magit-dash--ephemeral-tags path) (cons tag existing)))
+  (let ((targets (magit-dash--tag-targets)))
+    (when-let* ((tag (magit-dash--read-tag
+                      (if (cdr targets)
+                          (format "Add tag to %d repos: " (length targets))
+                        (format "Add tag to %s: " (magit-dash-repo-name (car targets)))))))
+      (seq-do (lambda (repo)
+                (let* ((path (magit-dash-repo-path repo))
+                       (existing (map-elt magit-dash--ephemeral-tags path)))
+                  (unless (memq tag existing)
+                    (setf (map-elt magit-dash--ephemeral-tags path) (cons tag existing)))))
+              targets)
       (magit-dash-refresh))))
+
+(defun magit-dash-remove-tag ()
+  "Remove a runtime tag from the marked repositories, or the repo at point."
+  (interactive)
+  (let* ((targets (magit-dash--tag-targets))
+         (candidates (thread-last targets
+                                  (seq-mapcat (lambda (r)
+                                                (map-elt magit-dash--ephemeral-tags
+                                                         (magit-dash-repo-path r))))
+                                  delete-dups
+                                  (seq-map #'symbol-name))))
+    (unless candidates
+      (user-error "No runtime tags on the selected repositories"))
+    (let ((tag (intern (completing-read "Remove tag: " candidates nil t))))
+      (seq-do (lambda (repo)
+                (let* ((path (magit-dash-repo-path repo))
+                       (remaining (delq tag (copy-sequence
+                                             (map-elt magit-dash--ephemeral-tags path)))))
+                  (if remaining
+                      (setf (map-elt magit-dash--ephemeral-tags path) remaining)
+                    (map-delete magit-dash--ephemeral-tags path))))
+              targets)
+      (magit-dash-refresh))))
+
+(defun magit-dash-clear-tags (&optional all)
+  "Clear runtime tags from the marked repositories, or the repo at point.
+With prefix argument ALL, clear runtime tags from every repository."
+  (interactive "P")
+  (cond
+   (all
+    (clrhash magit-dash--ephemeral-tags)
+    (message "magit-dash: cleared all runtime tags"))
+   (t
+    (let ((targets (magit-dash--tag-targets)))
+      (seq-do (lambda (repo)
+                (map-delete magit-dash--ephemeral-tags (magit-dash-repo-path repo)))
+              targets)
+      (message "magit-dash: cleared runtime tags on %d repo%s"
+               (length targets) (if (cdr targets) "s" "")))))
+  (magit-dash-refresh))
+
+(declare-function agent-shell-workflow-dispatch-group "agent-shell-workflow")
+(declare-function agent-shell-workflow-read "agent-shell-workflow-menu")
+(declare-function agent-shell-workflow-spec-id "agent-shell-workflow")
+
+(defun magit-dash-dispatch-workflow (&optional by-tag)
+  "Dispatch an agent-shell workflow to the marked repositories.
+Falls back to the repository at point when nothing is marked.  With
+prefix argument BY-TAG, choose a tag and dispatch to every repo carrying it.
+Signal `user-error' when agent-shell-workflow is unavailable or there is
+nothing to dispatch to."
+  (interactive "P")
+  (unless (and (fboundp 'agent-shell-workflow-dispatch-group)
+               (fboundp 'agent-shell-workflow-read))
+    (user-error "agent-shell-workflow is not available; nothing dispatched"))
+  (let* ((repos (if by-tag
+                    (magit-dash--repos-for-tag
+                     (magit-dash--read-tag "Dispatch to tag: " :require-match t)
+                     t)
+                  (magit-dash--tag-targets)))
+         (paths (seq-map #'magit-dash-repo-path repos)))
+    (unless paths
+      (user-error "No repositories to dispatch to"))
+    (agent-shell-workflow-dispatch-group
+     (agent-shell-workflow-spec-id
+      (agent-shell-workflow-read
+       nil (format "Workflow for %d repo%s: " (length paths) (if (cdr paths) "s" ""))))
+     paths)))
 
 (defun magit-dash-mark-by-tag ()
   "Mark all repos sharing a tag chosen via annotated completion.
@@ -5312,6 +5414,10 @@ Indicates whether batch operations target all repos or marked repos."
      :transient t)
     ("mu"  "Mark unpushed"   magit-dash-mark-unpushed
      :transient t)
+    ("tn"  "New tag"         magit-dash-add-tag)
+    ("tr"  "Remove tag"      magit-dash-remove-tag)
+    ("td"  "Clear tags"      magit-dash-clear-tags)
+    ("ad"  "Dispatch workflow" magit-dash-dispatch-workflow)
     ("fa"  "Fetch all"       magit-dash-fetch-all
      :inapt-if-not magit-dash--batch-enabled-p)
     ("pa"  "Pull all"        magit-dash-pull-all
