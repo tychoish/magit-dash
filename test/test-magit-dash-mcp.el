@@ -423,3 +423,101 @@ When ALL is non-nil omit `repo' so the author-wide collection is used."
 (provide 'test-magit-dash-mcp)
 
 ;;; test-magit-dash-mcp.el ends here
+
+;;; Real-git worktree tests (temporary repos)
+
+(defun magit-dash-mcp-test--git (dir &rest args)
+  "Run git ARGS in DIR with a fixed identity; signal on failure."
+  (let ((process-environment
+         (append '("GIT_AUTHOR_NAME=t" "GIT_AUTHOR_EMAIL=t@t"
+                   "GIT_COMMITTER_NAME=t" "GIT_COMMITTER_EMAIL=t@t")
+                 process-environment)))
+    (unless (zerop (apply #'call-process "git" nil nil nil "-C" dir args))
+      (error "git %S failed in %s" args dir))))
+
+(defun magit-dash-mcp-test--make-repo ()
+  "Create a temporary git repo on branch main with one commit."
+  (let ((dir (file-name-as-directory (make-temp-file "md-mcp-real-" t))))
+    (magit-dash-mcp-test--git dir "init" "-q" "-b" "main")
+    (with-temp-file (expand-file-name ".git/info/exclude" dir)
+      (insert ".wt/\n"))
+    (with-temp-file (expand-file-name "f.txt" dir) (insert "x\n"))
+    (magit-dash-mcp-test--git dir "add" "f.txt")
+    (magit-dash-mcp-test--git dir "commit" "-q" "-m" "init")
+    dir))
+
+(defmacro magit-dash-mcp-test--with-repo (var &rest body)
+  "Bind VAR to a temporary repo, run BODY, delete the repo."
+  (declare (indent 1))
+  `(let ((,var (magit-dash-mcp-test--make-repo)))
+     (unwind-protect
+         (cl-letf (((symbol-function 'magit-dash-pr--fetch-repo-prs)
+                    (lambda (&rest _) nil))
+                   ((symbol-function 'magit-dash-mcp--resolve-repo-slug)
+                    (lambda (&rest _) nil)))
+           ,@body)
+       (delete-directory ,var t))))
+
+(defun magit-dash-mcp-test--call (repo &rest args)
+  (magit-dash-mcp-call-tool "manage_worktrees" (append (list :repo repo) args)))
+
+(ert-deftest magit-dash-mcp/real-create-default-path-and-list ()
+  (magit-dash-mcp-test--with-repo repo
+    (let* ((res (magit-dash-mcp-test--call repo :action "create" :branch "tycho/foo"))
+           (path (plist-get res :worktree_path))
+           (win (current-window-configuration))
+           (buf (current-buffer)))
+      (should (equal path (expand-file-name ".wt/foo" repo)))
+      (should (file-exists-p (expand-file-name "f.txt" path)))
+      (should (eq buf (current-buffer)))
+      (should (window-configuration-p win))
+      (let* ((wts (plist-get (magit-dash-mcp-test--call repo :action "list") :worktrees))
+             (paths (mapcar (lambda (w) (directory-file-name (plist-get w :path)))
+                            (append wts nil))))
+        (should (member (directory-file-name path) paths))
+        (should (member "tycho/foo" (mapcar (lambda (w) (plist-get w :branch))
+                                            (append wts nil))))))))
+
+(ert-deftest magit-dash-mcp/real-create-explicit-path ()
+  (magit-dash-mcp-test--with-repo repo
+    (let* ((target (expand-file-name ".wt/custom" repo))
+           (res (magit-dash-mcp-test--call repo :action "create" :branch "b1"
+                                           :worktree_path target :base_ref "main")))
+      (should (equal (plist-get res :worktree_path) target))
+      (should (file-directory-p target)))))
+
+(ert-deftest magit-dash-mcp/real-create-errors ()
+  (magit-dash-mcp-test--with-repo repo
+    (magit-dash-mcp-test--call repo :action "create" :branch "dup")
+    (let ((err (should-error (magit-dash-mcp-test--call repo :action "create" :branch "dup"))))
+      (should-not (eq (car err) 'void-function))
+      (should (string-match-p "already exists" (error-message-string err))))
+    (make-directory (expand-file-name ".wt/taken" repo) t)
+    (let ((err (should-error (magit-dash-mcp-test--call repo :action "create" :branch "taken"))))
+      (should (string-match-p "already exists" (error-message-string err))))))
+
+(ert-deftest magit-dash-mcp/real-move-new-name-and-pr-number ()
+  (magit-dash-mcp-test--with-repo repo
+    (magit-dash-mcp-test--call repo :action "create" :branch "mv1")
+    (let ((res (magit-dash-mcp-test--call repo :action "move" :worktree_path "mv1"
+                                          :new_name "renamed")))
+      (should (equal (plist-get res :worktree_path) (expand-file-name ".wt/renamed" repo)))
+      (should (file-directory-p (expand-file-name ".wt/renamed" repo)))
+      (should-not (file-exists-p (expand-file-name ".wt/mv1" repo))))
+    (let ((res (magit-dash-mcp-test--call repo :action "move" :worktree_path "renamed"
+                                          :pr_number 42)))
+      (should (equal (plist-get res :worktree_path) (expand-file-name ".wt/pr-42" repo))))
+    ;; target exists
+    (magit-dash-mcp-test--call repo :action "create" :branch "other")
+    (should-error (magit-dash-mcp-test--call repo :action "move" :worktree_path "other"
+                                             :new_name "pr-42"))
+    ;; main worktree refused
+    (should-error (magit-dash-mcp-test--call repo :action "move" :worktree_path repo
+                                             :new_name "nope"))))
+
+(ert-deftest magit-dash-mcp/real-delete-by-short-name ()
+  (magit-dash-mcp-test--with-repo repo
+    (magit-dash-mcp-test--call repo :action "create" :branch "gone")
+    (let ((res (magit-dash-mcp-test--call repo :action "delete" :worktree_path "gone")))
+      (should (eq (plist-get res :deleted) t))
+      (should-not (file-exists-p (expand-file-name ".wt/gone" repo))))))

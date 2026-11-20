@@ -21,6 +21,10 @@
 ;;   - `chain_plan' and `chain_resume' (PR chain merge plans, see `magit-dash-chain')
 ;;   - `stack_show' and `stack_sync' (local branch stacks, see `magit-dash-stack')
 
+;; `manage_worktrees' actions: list, create, delete, move, review.
+;; Worktrees follow the `.wt' convention: `<repo>/.wt/<name>' (see
+;; `magit-dash-pr-worktree-path-format'); PR worktrees are `.wt/pr-<n>'.
+
 ;;; Code:
 
 (require 'cl-lib)
@@ -123,19 +127,46 @@
 
 ;;;; Tool 1: manage_worktrees
 
+(defun magit-dash-mcp--resolve-worktree-path (repo-dir path)
+  "Resolve PATH to a worktree directory under REPO-DIR.
+Absolute (or ~) paths are expanded as is; short names such as \"foo\"
+or \"pr-42\" map to the configured layout (`<root>/.wt/<name>')."
+  (if (or (file-name-absolute-p path) (string-prefix-p "~" path))
+      (expand-file-name path)
+    (magit-dash-pr--compute-worktree-path repo-dir path)))
+
+(defun magit-dash-mcp--worktree-main-p (repo-dir path)
+  "Return non-nil if PATH is the main checkout of REPO-DIR."
+  (let ((norm (lambda (p) (directory-file-name (expand-file-name p))))
+        (main (alist-get 'path (car (magit-dash-gh--git-worktrees repo-dir)))))
+    (or (equal (funcall norm path) (funcall norm repo-dir))
+        (and main (equal (funcall norm path) (funcall norm main))))))
+
 (mcpkit-register-tool "manage_worktrees" 'magit-dash
-  :description "List, create, delete, or review git worktrees for a repository."
+  :description "List, create, delete, move, or review git worktrees for a repository.
+Worktrees live under `<repo>/.wt/<name>' by convention (PR worktrees are
+`.wt/pr-<n>').  create: new branch (required `branch'; `worktree_path'
+defaults to .wt/<branch without prefix/>, `base_ref' to the default
+branch).  delete: `worktree_path' may be a short name like \"pr-42\".
+move: `worktree_path' (existing) to `new_path', `new_name' (.wt/<name>)
+or `pr_number' (.wt/pr-<n>)."
   :input-schema
   '(:type "object"
     :properties (:repo (:type "string"
                         :description "Local repository path, owner/repo slug, or registered repo name.")
                  :action (:type "string"
-                          :enum ["list" "create" "delete" "review"]
-                          :description "Worktree action: list (default), create, delete, or review.")
+                          :enum ["list" "create" "delete" "move" "review"]
+                          :description "Worktree action: list (default), create, delete, move, or review.")
                  :branch (:type "string"
                           :description "Branch name (required for action=create).")
                  :worktree_path (:type "string"
-                                 :description "Target worktree path (optional for create, required for delete).")
+                                 :description "Worktree path or short name under .wt (optional for create; required for delete and move).")
+                 :new_path (:type "string"
+                            :description "Destination path for action=move.")
+                 :new_name (:type "string"
+                            :description "Destination short name for action=move (becomes <root>/.wt/<name>).")
+                 :pr_number (:type "integer"
+                             :description "For action=move, move to <root>/.wt/pr-<n>.")
                  :base_ref (:type "string"
                             :description "Base ref when creating a new branch worktree (optional)."))
     :required ["repo"])
@@ -186,7 +217,8 @@
               (_ (unless (and (stringp branch) (not (string-empty-p (string-trim branch))))
                    (error "Argument `branch' is required when action is \"create\"")))
               (wt-path (or (plist-get args :worktree_path)
-                           (magit-dash-pr--compute-worktree-path repo-dir branch)))
+                           (magit-dash-pr--compute-worktree-path
+                            repo-dir (magit-dash-worktree-short-name branch))))
               (base-ref (plist-get args :base_ref))
               (created (magit-dash-worktree-create repo-dir wt-path branch base-ref)))
          (list :repo_dir repo-dir
@@ -197,11 +229,42 @@
        (let* ((wt-path (plist-get args :worktree_path))
               (_ (unless (and (stringp wt-path) (not (string-empty-p (string-trim wt-path))))
                    (error "Argument `worktree_path' is required when action is \"delete\""))))
+         (setq wt-path (magit-dash-mcp--resolve-worktree-path repo-dir wt-path))
          (magit-dash-pr-delete-worktree wt-path repo-dir)
          (list :repo_dir repo-dir
                :action "delete"
-               :worktree_path (expand-file-name wt-path)
+               :worktree_path wt-path
                :deleted t)))
+      ("move"
+       (let* ((old (plist-get args :worktree_path))
+              (_ (unless (and (stringp old) (not (string-empty-p (string-trim old))))
+                   (error "Argument `worktree_path' is required when action is \"move\"")))
+              (old (magit-dash-mcp--resolve-worktree-path repo-dir old))
+              (new-path (plist-get args :new_path))
+              (new-name (plist-get args :new_name))
+              (pr-num (plist-get args :pr_number))
+              (new (cond
+                    ((and (stringp new-path) (not (string-empty-p new-path)))
+                     (magit-dash-mcp--resolve-worktree-path repo-dir new-path))
+                    ((and (stringp new-name) (not (string-empty-p new-name)))
+                     (magit-dash-pr--compute-worktree-path repo-dir new-name))
+                    (pr-num
+                     (magit-dash-pr--compute-worktree-path
+                      repo-dir (format "pr-%d" pr-num)))
+                    (t (error "One of `new_path', `new_name' or `pr_number' is required when action is \"move\"")))))
+         (when (magit-dash-mcp--worktree-main-p repo-dir old)
+           (user-error "Refusing to move the main worktree: %s" old))
+         (unless (file-directory-p old)
+           (user-error "Worktree does not exist: %s" old))
+         (when (file-exists-p new)
+           (user-error "Destination worktree path already exists: %s" new))
+         (let ((moved (magit-dash-pr--move-worktree repo-dir old new)))
+           (unless moved
+             (user-error "Failed to move worktree %s to %s" old new))
+           (list :repo_dir repo-dir
+                 :action "move"
+                 :old_path old
+                 :worktree_path moved))))
       ("review"
        (let ((res (magit-dash-pr-review-worktrees repo-dir nil)))
          (list :repo_dir repo-dir
