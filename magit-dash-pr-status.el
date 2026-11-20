@@ -32,6 +32,11 @@
 (require 'magit-dash-gh)
 (require 'magit-dash-pr)
 
+(declare-function magit-dash-repo-path "magit-dash")
+(declare-function magit-dash-repo-gh-host "magit-dash")
+(declare-function magit-dash-repo-gh-account "magit-dash")
+(defvar magit-dash-repo-list)
+
 
 ;;;; Customization
 
@@ -68,10 +73,16 @@ A search with more results signals an error."
   :type 'natnum
   :group 'magit-dash-pr-status)
 
-(defvar magit-dash-pr-status-page-size 20
+(defvar magit-dash-pr-status-page-size 10
   "Number of PRs requested per GraphQL page.
-Each PR nests up to 100 reviews, checks and threads, so large pages
-exceed GitHub's gateway timeout (502) deterministically; keep this small.")
+Each PR nests reviews, checks and threads, so large pages exceed
+GitHub's gateway timeout (502) deterministically; keep this small.")
+
+(defvar magit-dash-pr-status-review-limit 30
+  "Number of most recent reviews requested per PR.")
+
+(defvar magit-dash-pr-status-context-limit 50
+  "Number of status-check contexts requested per PR.")
 
 ;;;; Small helpers
 
@@ -95,14 +106,14 @@ exceed GitHub's gateway timeout (502) deterministically; keep this small.")
         number title url state isDraft headRefName baseRefName
         repository{ nameWithOwner }
         reviewDecision mergeStateStatus
-        reviews(last:100){ pageInfo{ hasPreviousPage } nodes{ state author{ login __typename } } }
+        reviews(last:%d){ pageInfo{ hasPreviousPage } nodes{ state author{ login __typename } } }
         reviewRequests(first:50){
           pageInfo{ hasNextPage }
           nodes{ requestedReviewer{ ... on User{ login } ... on Team{ name } } }
         }
         commits(last:1){
           nodes{ commit{ statusCheckRollup{
-            contexts(first:100){
+            contexts(first:%d){
               pageInfo{ hasNextPage }
               nodes{
                 __typename
@@ -119,7 +130,9 @@ exceed GitHub's gateway timeout (502) deterministically; keep this small.")
       }
     }
   }
-}" magit-dash-pr-thread-limit))
+}" magit-dash-pr-status-review-limit
+   magit-dash-pr-status-context-limit
+   (min magit-dash-pr-thread-limit 50)))
 
 (defconst magit-dash-pr-status--slug-re
   "\\`[A-Za-z0-9][A-Za-z0-9-]*/\\(?:[A-Za-z0-9_-]\\|\\.[A-Za-z0-9_-]\\|[A-Za-z0-9_-]\\.\\)[A-Za-z0-9_.-]*\\'"
@@ -182,9 +195,20 @@ Return (CODE . OUTPUT) of the last attempt."
       (setq result (magit-dash-gh--call-process args dir)))
     result))
 
+(defun magit-dash-pr-status--truncated-p (node)
+  "Return non-nil when a nested list of PR NODE was truncated by its limit."
+  (or (eq t (map-nested-elt node '(reviews pageInfo hasPreviousPage)))
+      (eq t (map-nested-elt node '(reviewRequests pageInfo hasNextPage)))
+      (eq t (map-nested-elt node '(reviewThreads pageInfo hasNextPage)))
+      (eq t (map-nested-elt
+             (car (map-nested-elt node '(commits nodes)))
+             '(commit statusCheckRollup contexts pageInfo hasNextPage)))))
+
 (defun magit-dash-pr-status--validate-response (out)
   "Parse and validate GraphQL response OUT.
-Signal `user-error' on GraphQL error or incomplete data; return parsed response."
+Signal `user-error' on GraphQL error or a malformed response.  Nested
+lists truncated by their limits degrade to partial data with a message.
+Return the parsed response."
   (let ((response (magit-dash-pr-status--parse-json out)))
     (when-let* ((errors (map-elt response 'errors)))
       (user-error "GitHub GraphQL error: %s"
@@ -193,14 +217,13 @@ Signal `user-error' on GraphQL error or incomplete data; return parsed response.
     (unless (and (map-nested-elt response '(data search))
                  (assq 'nodes (map-nested-elt response '(data search))))
       (user-error "GitHub GraphQL response is missing search results"))
-    (dolist (node (map-nested-elt response '(data search nodes)))
-      (when (or (eq t (map-nested-elt node '(reviews pageInfo hasPreviousPage)))
-                (eq t (map-nested-elt node '(reviewRequests pageInfo hasNextPage)))
-                (eq t (map-nested-elt node '(reviewThreads pageInfo hasNextPage)))
-                (eq t (map-nested-elt
-                       (car (map-nested-elt node '(commits nodes)))
-                       '(commit statusCheckRollup contexts pageInfo hasNextPage))))
-        (user-error "GitHub returned incomplete data for PR #%s" (map-elt node 'number))))
+    (when-let* ((truncated
+                 (thread-last (map-nested-elt response '(data search nodes))
+                              (seq-filter #'magit-dash-pr-status--truncated-p)
+                              (seq-map (lambda (node) (map-elt node 'number))))))
+      (message "magit-dash: partial data (nested lists truncated) for PR%s %s"
+               (if (cdr truncated) "s" "")
+               (mapconcat (lambda (n) (format "#%s" n)) truncated ", ")))
     response))
 
 (defun magit-dash-pr-status--fetch-page (q dir first after)
@@ -392,7 +415,8 @@ an approval."
                                    unresolved)
           :threads-outdated (seq-count (lambda (th) (eq (map-elt th 'isOutdated) t))
                                        unresolved)
-          :ticket (magit-dash-pr-status--ticket (map-elt node 'headRefName)))))
+          :ticket (magit-dash-pr-status--ticket (map-elt node 'headRefName))
+          :truncated (and (magit-dash-pr-status--truncated-p node) t))))
 
 (defun magit-dash-pr-status--stack-parent (pr prs)
   "Return the number of the PR in PRS whose head branch is PR's base, or nil.
@@ -482,44 +506,149 @@ cache is never touched."
               (if (plist-get pr :repo) pr (plist-put (copy-sequence pr) :repo slug)))
             prs)))
 
-(defun magit-dash-pr-status-collect-all (&optional dir)
-  "Return PR plists for the author's open PRs across all repositories.
-Run from DIR (default `default-directory').  One search query without a
-repo qualifier is used; each PR's `:repo' is its owner/name slug and its
-`:bucket' uses the approvals required for that repository, falling back
-to `magit-dash-pr-status-required-approvals'.  The result is pure
-data.  Signal `user-error' when the query fails; the tracking cache is
-never touched."
+(defun magit-dash-pr-status--targets (dir)
+  "Return the search targets for an all-repositories query run from DIR.
+Each target is a plist with `:label' (account name, nil for the default
+`gh' account) and `:dir', a representative checkout whose registered
+`:gh-account' selects the credentials.  One target exists per distinct
+account among `magit-dash-repo-list'; the default account is included
+when any repository, or none, lacks a configured account."
+  (let* ((repos (and (boundp 'magit-dash-repo-list) magit-dash-repo-list))
+         (accounted (seq-filter #'magit-dash-repo-gh-account repos))
+         (groups (make-hash-table :test #'equal)))
+    (seq-do (lambda (repo)
+              (let ((key (format "%s@%s"
+                                 (magit-dash-repo-gh-account repo)
+                                 (or (magit-dash-repo-gh-host repo) "github.com"))))
+                (setf (map-elt groups key)
+                      (append (map-elt groups key) (list (magit-dash-repo-path repo))))))
+            accounted)
+    (let ((targets (seq-map (lambda (pair)
+                              (list :label (car pair)
+                                    :dir (or (seq-find #'file-directory-p (cdr pair))
+                                             (cadr pair))))
+                            (map-pairs groups))))
+      (if (or (null accounted)
+              (seq-find (lambda (repo) (not (magit-dash-repo-gh-account repo))) repos))
+          (cons (list :label nil :dir (or dir default-directory)) targets)
+        targets))))
+
+(defun magit-dash-pr-status--all-query ()
+  "Return the search string for the author's open PRs across repositories."
+  (format "is:pr is:open%s author:%s"
+          (if magit-dash-pr-status-include-archived "" " archived:false")
+          magit-dash-pr-status-author))
+
+(defun magit-dash-pr-status--parse-target (response)
+  "Return PR plists parsed from RESPONSE with per-repository approval counts."
   (magit-dash-pr-status--parse
-   (magit-dash-pr-status--fetch-search
-    (format "is:pr is:open%s author:%s"
-            (if magit-dash-pr-status-include-archived "" " archived:false")
-            magit-dash-pr-status-author)
-    (or dir default-directory))
+   response
    (lambda (pr)
      (magit-dash-pr-status--required-approvals (plist-get pr :repo)))))
 
-(defun magit-dash-pr-status-collect-all-async (on-success &optional on-error dir)
+(defun magit-dash-pr-status--summarize (results)
+  "Merge RESULTS, a list of (TARGET . (:prs PRS)|(:error MSG)).
+Return a plist: `:prs' (deduplicated by repository and number, sorted by
+repository then number), `:errors' (\"ACCOUNT: MESSAGE\" strings),
+`:notes' (`:errors' plus a count of PRs whose nested lists were truncated)
+and `:all-failed' (non-nil when every target failed)."
+  (let* ((prs (thread-last
+                (seq-uniq (seq-mapcat (lambda (result) (plist-get (cdr result) :prs)) results)
+                          (lambda (a b)
+                            (and (equal (plist-get a :repo) (plist-get b :repo))
+                                 (eql (plist-get a :number) (plist-get b :number)))))
+                (seq-sort-by (lambda (pr) (plist-get pr :number)) #'<)
+                (seq-sort-by (lambda (pr) (or (plist-get pr :repo) "")) #'string<)))
+         (errors (thread-last results
+                              (seq-filter (lambda (result) (plist-get (cdr result) :error)))
+                              (seq-map (lambda (result)
+                                         (format "%s: %s"
+                                                 (or (plist-get (car result) :label)
+                                                     "default gh account")
+                                                 (plist-get (cdr result) :error))))))
+         (truncated (seq-count (lambda (pr) (plist-get pr :truncated)) prs)))
+    (list :prs prs
+          :errors errors
+          :notes (append errors
+                         (when (> truncated 0)
+                           (list (format "%d PR%s with truncated review/check data"
+                                         truncated (if (= truncated 1) "" "s")))))
+          :all-failed (and errors (= (length errors) (length results))))))
+
+(defun magit-dash-pr-status-collect-all (&optional dir)
+  "Return PR plists for the author's open PRs across all repositories.
+Run from DIR (default `default-directory').  One search query without a
+repo qualifier is run per configured GitHub account (see
+`magit-dash-pr-status--targets'); each PR's `:repo' is its owner/name
+slug and its `:bucket' uses the approvals required for that repository,
+falling back to `magit-dash-pr-status-required-approvals'.  The result is
+pure data.  A failing account is reported with `message' and the others
+still contribute; signal `user-error' only when every account fails.
+The tracking cache is never touched."
+  (let ((summary (magit-dash-pr-status--summarize
+                  (seq-map
+                   (lambda (target)
+                     (cons target
+                           (condition-case err
+                               (list :prs (magit-dash-pr-status--parse-target
+                                           (magit-dash-pr-status--fetch-search
+                                            (magit-dash-pr-status--all-query)
+                                            (plist-get target :dir))))
+                             (error (list :error (error-message-string err))))))
+                   (magit-dash-pr-status--targets dir)))))
+    (when (plist-get summary :all-failed)
+      (user-error "%s" (string-join (plist-get summary :errors) "; ")))
+    (seq-do (lambda (note) (message "magit-dash: PR collection: %s" note))
+            (plist-get summary :notes))
+    (plist-get summary :prs)))
+
+(defun magit-dash-pr-status-collect-all-async (on-success &optional on-error dir on-partial)
   "Asynchronously collect PR plists for open PRs across all repositories.
-Run from DIR (default `default-directory').
-ON-SUCCESS is called with the list of PR plists on success.
-ON-ERROR is called with an error message string on failure;
+Run from DIR (default `default-directory'), one query per configured
+GitHub account, in parallel.
+ON-SUCCESS is called with the merged list of PR plists.  When some
+accounts fail or some PRs have truncated data, ON-PARTIAL is first
+called with a list of note strings such as \"ACCOUNT: MESSAGE\"
+(default: `message' each).
+ON-ERROR is called with a message string when every account fails;
 if nil, `message' is called."
-  (let ((errback (or on-error (lambda (err) (message "magit-dash: PR collection failed: %s" err)))))
-    (magit-dash-pr-status--fetch-search-async
-     (format "is:pr is:open%s author:%s"
-             (if magit-dash-pr-status-include-archived "" " archived:false")
-             magit-dash-pr-status-author)
-     (or dir default-directory)
-     (lambda (response)
-       (condition-case err
-           (let ((prs (magit-dash-pr-status--parse
-                       response
-                       (lambda (pr)
-                         (magit-dash-pr-status--required-approvals (plist-get pr :repo))))))
-             (funcall on-success prs))
-         (error (funcall errback (error-message-string err)))))
-     errback)))
+  (let* ((errback (or on-error
+                      (lambda (err) (message "magit-dash: PR collection failed: %s" err))))
+         (partial (or on-partial
+                      (lambda (errs)
+                        (seq-do (lambda (note)
+                                  (message "magit-dash: PR collection: %s" note))
+                                errs))))
+         (query (magit-dash-pr-status--all-query))
+         (targets (magit-dash-pr-status--targets dir))
+         (pending (length targets))
+         (results nil)
+         (finish
+          (lambda ()
+            (let ((summary (magit-dash-pr-status--summarize (reverse results))))
+              (cond
+               ((plist-get summary :all-failed)
+                (funcall errback (string-join (plist-get summary :errors) "; ")))
+               (t
+                (when (plist-get summary :notes)
+                  (funcall partial (plist-get summary :notes)))
+                (funcall on-success (plist-get summary :prs))))))))
+    (seq-do
+     (lambda (target)
+       (let ((record (lambda (result)
+                       (push (cons target result) results)
+                       (setq pending (1- pending))
+                       (when (zerop pending)
+                         (funcall finish)))))
+         (magit-dash-pr-status--fetch-search-async
+          query (plist-get target :dir)
+          (lambda (response)
+            (funcall record
+                     (condition-case err
+                         (list :prs (magit-dash-pr-status--parse-target response))
+                       (error (list :error (error-message-string err))))))
+          (lambda (err) (funcall record (list :error err))))))
+     targets)))
 
 (defun magit-dash-pr-status-run (slug dir)
   "Collect PRs for repository SLUG from DIR; return a data plist.

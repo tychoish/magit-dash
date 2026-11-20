@@ -286,9 +286,53 @@
                             (plist-put (copy-sequence pr) (car property) (cdr property)) 1))))))
 
 (ert-deftest magit-dash-pr-status/fetch-rejects-incomplete-results ()
-  (dolist (json '("{\"data\":{\"search\":{\"nodes\":[],\"pageInfo\":{\"hasNextPage\":true}}}}"
-                  "{\"data\":{\"search\":{\"nodes\":[{\"number\":1,\"reviewThreads\":{\"pageInfo\":{\"hasNextPage\":true}}}]}}}"))
-    (should-error (magit-dash-pr-status-test/fetch-with 0 json) :type 'user-error)))
+  (should-error (magit-dash-pr-status-test/fetch-with
+                 0 "{\"data\":{\"search\":{\"nodes\":[],\"pageInfo\":{\"hasNextPage\":true}}}}")
+                :type 'user-error))
+
+(ert-deftest magit-dash-pr-status/truncated-nested-lists-degrade-to-partial ()
+  (let ((messages nil))
+    (cl-letf (((symbol-function 'message)
+               (lambda (fmt &rest args) (push (apply #'format fmt args) messages))))
+      (let ((response (magit-dash-pr-status--validate-response
+                       "{\"data\":{\"search\":{\"nodes\":[{\"number\":1,\"reviewThreads\":{\"pageInfo\":{\"hasNextPage\":true}}}]}}}")))
+        (should (= 1 (length (map-nested-elt response '(data search nodes)))))
+        (should (cl-some (lambda (m) (string-match-p "#1" m)) messages))))))
+
+(ert-deftest magit-dash-pr-status/summarize-counts-truncated-and-sorts ()
+  "Summarize sorts by repo then number and notes truncated PRs."
+  (let* ((summary (magit-dash-pr-status--summarize
+                   (list (cons '(:label nil)
+                               (list :prs (list '(:repo "o/b" :number 1)
+                                                '(:repo "o/a" :number 9 :truncated t)
+                                                '(:repo "o/a" :number 2))))
+                         (cons '(:label "work") (list :prs (list '(:repo "o/a" :number 2))))))))
+    (should (equal '(("o/a" . 2) ("o/a" . 9) ("o/b" . 1))
+                   (seq-map (lambda (pr) (cons (plist-get pr :repo) (plist-get pr :number)))
+                            (plist-get summary :prs))))
+    (should (equal '("1 PR with truncated review/check data") (plist-get summary :notes)))
+    (should-not (plist-get summary :errors))
+    (should-not (plist-get summary :all-failed))))
+
+(ert-deftest magit-dash-pr-status/summarize-all-failed ()
+  (let ((summary (magit-dash-pr-status--summarize
+                  (list (cons '(:label nil) '(:error "x"))
+                        (cons '(:label "work") '(:error "y"))))))
+    (should (plist-get summary :all-failed))
+    (should (equal '("default gh account: x" "work: y") (plist-get summary :errors)))))
+
+(ert-deftest magit-dash-pr-status/node-marks-truncated ()
+  (should (plist-get (magit-dash-pr-status--node-to-pr
+                      '((number . 1) (reviewThreads (pageInfo (hasNextPage . t)))))
+                     :truncated))
+  (should-not (plist-get (magit-dash-pr-status--node-to-pr '((number . 1))) :truncated)))
+
+(ert-deftest magit-dash-pr-status/query-uses-lightweight-limits ()
+  (let ((query (magit-dash-pr-status--query)))
+    (should (string-match-p "reviews(last:30)" query))
+    (should (string-match-p "contexts(first:50)" query))
+    (should (string-match-p "reviewThreads(first:50)" query)))
+  (should (= 10 magit-dash-pr-status-page-size)))
 
 ;;; Multi-repo collection and tracking
 
@@ -338,10 +382,97 @@
       (let ((prs (magit-dash-pr-status-collect-all "/tmp")))
         (should (cl-some (lambda (a) (string-match-p "is:pr is:open archived:false author:@me\\'" a)) seen))
         (should-not (cl-some (lambda (a) (string-match-p "repo:" a)) seen))
-        (should (equal '("o/b" "o/a") (mapcar (lambda (p) (plist-get p :repo)) prs)))
+        (should (equal '("o/a" "o/b") (mapcar (lambda (p) (plist-get p :repo)) prs)))
         ;; o/a requires 2 approvals, o/b falls back to 1.
-        (should (eq 'ready (plist-get (nth 0 prs) :bucket)))
-        (should (eq 'reviews (plist-get (nth 1 prs) :bucket)))))))
+        (should (eq 'reviews (plist-get (nth 0 prs) :bucket)))
+        (should (eq 'ready (plist-get (nth 1 prs) :bucket)))))))
+
+(defun magit-dash-pr-status-test/account-repos ()
+  "Return registered repos spanning two accounts and the default."
+  (list (magit-dash-repo--make :name "w1" :path "/tmp/w1" :gh-account "work")
+        (magit-dash-repo--make :name "w2" :path "/tmp/w2" :gh-account "work")
+        (magit-dash-repo--make :name "p1" :path "/tmp/p1" :gh-account "me" :gh-host "ghe.example")
+        (magit-dash-repo--make :name "d1" :path "/tmp/d1")))
+
+(ert-deftest magit-dash-pr-status/targets-one-per-account ()
+  (let* ((magit-dash-repo-list (magit-dash-pr-status-test/account-repos))
+         (targets (magit-dash-pr-status--targets "/tmp/here")))
+    (should (equal '(nil "work@github.com" "me@ghe.example")
+                   (seq-map (lambda (tg) (plist-get tg :label)) targets)))
+    (should (equal "/tmp/here" (plist-get (car targets) :dir)))))
+
+(ert-deftest magit-dash-pr-status/targets-omit-default-when-all-accounted ()
+  (let* ((magit-dash-repo-list (seq-take (magit-dash-pr-status-test/account-repos) 3)))
+    (should (equal '("work@github.com" "me@ghe.example")
+                   (seq-map (lambda (tg) (plist-get tg :label))
+                            (magit-dash-pr-status--targets "/tmp"))))))
+
+(ert-deftest magit-dash-pr-status/collect-all-fans-out-and-survives-one-failure ()
+  (let ((magit-dash-repo-list (magit-dash-pr-status-test/account-repos))
+        (dirs nil)
+        (messages nil))
+    (cl-letf (((symbol-function 'message)
+               (lambda (fmt &rest args) (push (apply #'format fmt args) messages)))
+              ((symbol-function 'magit-dash-gh--call-process)
+               (lambda (_args dir)
+                 (push dir dirs)
+                 (cond
+                  ((equal dir "/tmp/w1") (cons 1 "gh: HTTP 401"))
+                  ((equal dir "/tmp/p1")
+                   (cons 0 (json-encode (magit-dash-pr-status-test/search
+                                         (magit-dash-pr-status-test/node "o/p" 7)))))
+                  (t (cons 0 (json-encode (magit-dash-pr-status-test/search
+                                           (magit-dash-pr-status-test/node "o/p" 7)
+                                           (magit-dash-pr-status-test/node "o/d" 2)))))))))
+      (let ((prs (magit-dash-pr-status-collect-all "/tmp/here")))
+        (should (equal '("/tmp/here" "/tmp/w1" "/tmp/p1") (reverse dirs)))
+        ;; o/p#7 appears under two accounts but is deduplicated.
+        (should (equal '(2 7) (seq-map (lambda (p) (plist-get p :number)) prs)))
+        (should (cl-some (lambda (m) (string-match-p "work@github.com" m)) messages))))))
+
+(ert-deftest magit-dash-pr-status/collect-all-errors-naming-accounts-when-all-fail ()
+  (let ((magit-dash-repo-list (seq-take (magit-dash-pr-status-test/account-repos) 3)))
+    (cl-letf (((symbol-function 'magit-dash-gh--call-process)
+               (lambda (_a _d) (cons 1 "gh: HTTP 401"))))
+      (let ((err (should-error (magit-dash-pr-status-collect-all "/tmp") :type 'user-error)))
+        (should (string-match-p "work@github.com" (cadr err)))
+        (should (string-match-p "me@ghe.example" (cadr err)))))))
+
+(ert-deftest magit-dash-pr-status/collect-all-async-reports-partial-failures ()
+  (let ((magit-dash-repo-list (magit-dash-pr-status-test/account-repos))
+        (result 'unset)
+        (partial nil)
+        (failure nil))
+    (cl-letf (((symbol-function 'magit-dash-gh--run-process)
+               (lambda (_args dir on-success on-error)
+                 (if (equal dir "/tmp/w1")
+                     (funcall on-error "gh: HTTP 401" 1)
+                   (funcall on-success
+                            (json-encode (magit-dash-pr-status-test/search
+                                          (magit-dash-pr-status-test/node "o/d" 2))))))))
+      (magit-dash-pr-status-collect-all-async
+       (lambda (prs) (setq result prs))
+       (lambda (err) (setq failure err))
+       "/tmp/here"
+       (lambda (errs) (setq partial errs)))
+      (should-not failure)
+      (should (equal '(2) (seq-map (lambda (p) (plist-get p :number)) result)))
+      (should (= 1 (length partial)))
+      (should (string-match-p "^work@github.com: " (car partial))))))
+
+(ert-deftest magit-dash-pr-status/collect-all-async-errors-when-all-fail ()
+  (let ((magit-dash-repo-list (seq-take (magit-dash-pr-status-test/account-repos) 3))
+        (failure nil)
+        (succeeded nil))
+    (cl-letf (((symbol-function 'magit-dash-gh--run-process)
+               (lambda (_args _dir _on-success on-error)
+                 (funcall on-error "boom" 1))))
+      (magit-dash-pr-status-collect-all-async
+       (lambda (_) (setq succeeded t))
+       (lambda (err) (setq failure err))
+       "/tmp")
+      (should-not succeeded)
+      (should (string-match-p "work@github.com: .*boom" failure)))))
 
 (ert-deftest magit-dash-pr-status/include-archived-option ()
   (let ((seen nil)

@@ -96,8 +96,77 @@
              (and slug (string-equal slug (file-name-nondirectory (directory-file-name path)))))))
      repos)))
 
+(defvar-local magit-dash-actionable--refresh-id 0
+  "Counter identifying the latest refresh; stale async results are dropped.")
+
+(defun magit-dash-actionable--render (prs-raw problems)
+  "Render the actionable view from PRS-RAW, noting PROBLEMS in the header.
+PROBLEMS is nil or a string describing PR collection failures or progress."
+  (clrhash magit-dash-actionable--why-cache)
+  (clrhash magit-dash-actionable--pr-cache)
+  (let* ((all-repos (or (and (fboundp 'magit-dash--all-repos)
+                             (magit-dash--all-repos))
+                        magit-dash-repo-list))
+         (attention-prs (seq-filter (lambda (pr)
+                                      (memq (plist-get pr :bucket) '(fix-ci threads blocked)))
+                                    prs-raw))
+         (actionable-repos nil))
+    ;; 1. Evaluate registered repos for local changes and matched PRs
+    (seq-do
+     (lambda (repo)
+       (let* ((path (magit-dash-repo-path repo))
+              (matched-pr (seq-find (lambda (pr)
+                                      (magit-dash-actionable--match-pr-to-repo pr (list repo)))
+                                    attention-prs))
+              (why-parts (append
+                          (seq-map (lambda (item) (aref (cadr item) 1))
+                                   (magit-dash-actionable--repo-entries repo))
+                          (when matched-pr
+                            (list (format "PR #%s: %s (%s)"
+                                          (plist-get matched-pr :number)
+                                          (plist-get matched-pr :title)
+                                          (plist-get matched-pr :bucket)))))))
+         (when matched-pr
+           (setf (map-elt magit-dash-actionable--pr-cache path) matched-pr))
+         (when why-parts
+           (setf (map-elt magit-dash-actionable--why-cache path) (string-join why-parts ", "))
+           (push repo actionable-repos))))
+     all-repos)
+    ;; 2. Include any unmatched actionable PRs as synthetic repo entries
+    (seq-do
+     (lambda (pr)
+       (unless (seq-some (lambda (r) (equal (magit-dash-repo-name r) (plist-get pr :repo)))
+                         actionable-repos)
+         (let ((path (plist-get pr :repo)))
+           (setf (map-elt magit-dash-actionable--pr-cache path) pr)
+           (setf (map-elt magit-dash-actionable--why-cache path)
+                 (format "%s: %s" (plist-get pr :bucket) (plist-get pr :title)))
+           (push (magit-dash-repo--make
+                  :name (format "%s#%s" path (plist-get pr :number))
+                  :path path)
+                 actionable-repos))))
+     attention-prs)
+    (setq actionable-repos (nreverse actionable-repos))
+    (setq tabulated-list-format (magit-dash--build-format actionable-repos))
+    (tabulated-list-init-header)
+    (setq header-line-format (and problems (format "PR status: %s" problems)))
+    (setq tabulated-list-entries (seq-map #'magit-dash--build-entry actionable-repos))
+    (tabulated-list-print t)))
+
+(defun magit-dash-actionable--async-render (buffer id prs-raw problems)
+  "Render PRS-RAW and PROBLEMS in BUFFER if refresh ID is still the latest."
+  (when (and (buffer-live-p buffer)
+             (with-current-buffer buffer
+               (and (derived-mode-p 'magit-dash-actionable-mode)
+                    (= id magit-dash-actionable--refresh-id))))
+    (with-current-buffer buffer
+      (magit-dash-actionable--render prs-raw problems))))
+
 (defun magit-dash-actionable-refresh ()
   "Refresh the actionable view, filtering to repos and PRs needing attention.
+Local results render immediately; PR status is collected asynchronously,
+one query per GitHub account, and the view re-renders when it arrives.
+Accounts that fail are named in the header line; the others still show.
 When invoked outside `magit-dash-actionable-mode', safely redirects to
 the `*magit-dash-actions*' buffer if live, preventing accidental corruption
 of other buffers."
@@ -112,64 +181,20 @@ of other buffers."
               (user-error "Buffer *magit-dash-actions* is not in magit-dash-actionable-mode")))
         (when (called-interactively-p 'interactive)
           (user-error "No *magit-dash-actions* buffer exists")))
-    (setq header-line-format nil)
-    (clrhash magit-dash-actionable--why-cache)
-    (clrhash magit-dash-actionable--pr-cache)
-    (let* ((all-repos (or (and (fboundp 'magit-dash--all-repos)
-                               (magit-dash--all-repos))
-                          magit-dash-repo-list))
-           (prs-raw nil)
-           (prs-err nil))
-      (condition-case err
-          (setq prs-raw (magit-dash-pr-status-collect-all))
-        (error
-         (setq prs-err err)))
-      (let* ((attention-prs (when prs-raw
-                              (seq-filter (lambda (pr)
-                                            (memq (plist-get pr :bucket) '(fix-ci threads blocked)))
-                                          prs-raw)))
-             (actionable-repos nil))
-        ;; 1. Evaluate registered repos for local changes and matched PRs
-        (dolist (repo all-repos)
-          (let* ((path (magit-dash-repo-path repo))
-                 (local-items (magit-dash-actionable--repo-entries repo))
-                 (matched-pr (when attention-prs
-                               (seq-find (lambda (pr)
-                                           (magit-dash-actionable--match-pr-to-repo pr (list repo)))
-                                         attention-prs)))
-                 (why-parts nil))
-            (when local-items
-              (dolist (item local-items)
-                (push (aref (cadr item) 1) why-parts)))
-            (when matched-pr
-              (puthash path matched-pr magit-dash-actionable--pr-cache)
-              (push (format "PR #%s: %s (%s)"
-                            (plist-get matched-pr :number)
-                            (plist-get matched-pr :title)
-                            (plist-get matched-pr :bucket))
-                    why-parts))
-            (when why-parts
-              (puthash path (string-join (nreverse why-parts) ", ") magit-dash-actionable--why-cache)
-              (push repo actionable-repos))))
-        ;; 2. Include any unmatched actionable PRs as synthetic repo entries
-        (dolist (pr attention-prs)
-          (unless (seq-some (lambda (r) (equal (magit-dash-repo-name r) (plist-get pr :repo)))
-                            actionable-repos)
-            (let* ((name (format "%s#%s" (plist-get pr :repo) (plist-get pr :number)))
-                   (path (plist-get pr :repo))
-                   (synth-repo (magit-dash-repo--make :name name :path path))
-                   (why (format "%s: %s" (plist-get pr :bucket) (plist-get pr :title))))
-              (puthash path pr magit-dash-actionable--pr-cache)
-              (puthash path why magit-dash-actionable--why-cache)
-              (push synth-repo actionable-repos))))
-        (setq actionable-repos (nreverse actionable-repos))
-        (setq tabulated-list-format (magit-dash--build-format actionable-repos))
-        (tabulated-list-init-header)
-        (when prs-err
-          (setq header-line-format
-                (format "PR status unavailable: %s" (error-message-string prs-err))))
-        (setq tabulated-list-entries (seq-map #'magit-dash--build-entry actionable-repos))
-        (tabulated-list-print t)))))
+    (let* ((buffer (current-buffer))
+           (id (setq magit-dash-actionable--refresh-id (1+ magit-dash-actionable--refresh-id)))
+           (partial nil))
+      (magit-dash-actionable--render nil "loading…")
+      (magit-dash-pr-status-collect-all-async
+       (lambda (prs)
+         (magit-dash-actionable--async-render
+          buffer id prs (and partial (string-join partial "; "))))
+       (lambda (err)
+         (magit-dash-actionable--async-render
+          buffer id nil (format "unavailable: %s" err)))
+       nil
+       (lambda (errs)
+         (setq partial errs))))))
 
 (defun magit-dash-actionable--current-pr ()
   "Return the PR plist for the item at point, or nil."
