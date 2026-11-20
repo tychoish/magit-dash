@@ -1370,5 +1370,27 @@
       (let ((flat (format "%S" (get 'magit-dash-pr-views-menu 'transient--layout))))
         (should (string-match-p ":key \"c\" :description \"Merge conflicts\" :command magit-dash-pr-dash-conflicts" flat))))))
 
+;;;; Worktree prune prompts name the branch
+
+(ert-deftest magit-dash-pr/clean-prompt-names-branch ()
+  "The delete prompt shows the worktree's branch, or \"detached\" when unknown."
+  (let ((prompts nil))
+    (cl-letf (((symbol-function 'magit-dash-pr-dashboard--find-local-path) (lambda (_) "/tmp/repo"))
+              ((symbol-function 'magit-dash-pr--find-existing-worktree)
+               (lambda (&rest _) "/tmp/repo/.wt/pr-7"))
+              ((symbol-function 'file-directory-p) (lambda (_) t))
+              ((symbol-function 'magit-dash-pr--pr-merged-p) (lambda (&rest _) t))
+              ((symbol-function 'magit-dash-worktree-uncommitted-changes-p) (lambda (_) nil))
+              ((symbol-function 'magit-dash-pr-delete-worktree) #'ignore)
+              ((symbol-function 'y-or-n-p) (lambda (p) (push p prompts) nil)))
+      (magit-dash-pr--clean-worktree-for-entry
+       '(:number 7 :repo "o/r" :state "MERGED" :pr ((state . "MERGED") (headRefName . "feat/x")))
+       t)
+      (magit-dash-pr--clean-worktree-for-entry
+       '(:number 7 :repo "o/r" :state "MERGED" :pr ((state . "MERGED")))
+       t)
+      (should (string-match-p "(branch 'feat/x')" (cadr prompts)))
+      (should (string-match-p "(branch 'detached')" (car prompts))))))
+
 (provide 'test-magit-dash-pr)
 ;;; test-magit-dash-pr.el ends here
