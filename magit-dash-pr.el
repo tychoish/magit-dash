@@ -1914,8 +1914,9 @@ Returns a plist with :renamed, :deleted, :matching, and :skipped counts."
                                    wt-name pr-label status-desc)
                           (plist-put counts :skipped (1+ (plist-get counts :skipped))))
                       (if (or (not prompt-p)
-                              (y-or-n-p (format "%s is %s and worktree '%s' has no uncommitted changes. Delete worktree? (branch preserved) "
-                                                pr-label status-desc wt-name)))
+                              (y-or-n-p (format "%s is %s and worktree '%s' (branch '%s') has no uncommitted changes. Delete worktree? (branch preserved) "
+                                                pr-label status-desc wt-name
+                                                (or (alist-get 'branch wt) "detached"))))
                           (progn
                             (magit-dash-pr-delete-worktree wt-path repo-dir)
                             (plist-put counts :deleted (1+ (plist-get counts :deleted))))
@@ -1984,8 +1985,9 @@ Returns `:deleted', `:skipped', or `:none'."
                    wt-name pr-num)
           :skipped)
          ((or (not prompt-p)
-              (y-or-n-p (format "PR #%d is %s and worktree '%s' has no uncommitted changes. Delete worktree? (branch preserved) "
-                                pr-num (if merged-p "merged" "closed") wt-name)))
+              (y-or-n-p (format "PR #%d is %s and worktree '%s' (branch '%s') has no uncommitted changes. Delete worktree? (branch preserved) "
+                                pr-num (if merged-p "merged" "closed") wt-name
+                                (or branch-name "detached"))))
           (magit-dash-pr-delete-worktree wt-path repo-dir)
           :deleted)
          (t :skipped))))))

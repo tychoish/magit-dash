@@ -25,6 +25,8 @@
 (declare-function magit-dash--repo-at-point "magit-dash")
 (declare-function magit-dash--maybe-refresh "magit-dash")
 (declare-function magit-dash-repo-path "magit-dash")
+(declare-function magit-dash-repo-name "magit-dash")
+(declare-function magit-dash-register-many "magit-dash")
 
 (defvar magit-dash-repo-list)
 
@@ -395,6 +397,29 @@ Calls ON-COMPLETE with `ok' on success, or `error' with message on failure."
    (lambda (_) (funcall on-complete 'ok))
    (lambda (output code)
      (funcall on-complete 'error (format "submodule pull exit %d: %s" code output)))))
+
+;;;###autoload
+(defun magit-dash-register-submodules (parent &rest config)
+  "Register each submodule of PARENT as its own dashboard repository.
+PARENT is a registered repo name or a path.  CONFIG is a keyword plist of
+`magit-dash-register' options (e.g. :auto-fetch t :auto-pull t) applied to
+every submodule, which makes submodule syncing ordinary per-repo sync
+configuration.  Submodules are named \"PARENT<dir>\".  Returns the names
+registered."
+  (let* ((repo (seq-find (lambda (r) (equal (magit-dash-repo-name r) parent))
+                         magit-dash-repo-list))
+         (root (expand-file-name (if repo (magit-dash-repo-path repo) parent)))
+         (pname (if repo (magit-dash-repo-name repo)
+                  (file-name-nondirectory (directory-file-name root))))
+         (specs (seq-map
+                 (lambda (rel)
+                   (list (format "%s<%s>" pname
+                                 (file-name-nondirectory (directory-file-name rel)))
+                         (expand-file-name rel root)))
+                 (magit-dash-bump--all-submodule-relpaths root))))
+    (unless specs
+      (user-error "No submodules found in %s" root))
+    (apply #'magit-dash-register-many specs config)))
 
 (provide 'magit-dash-submodules)
 ;;; magit-dash-submodules.el ends here

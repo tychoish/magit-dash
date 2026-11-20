@@ -5366,3 +5366,39 @@ The bug was that add-text-properties returns t, not the modified string."
                           magit-dash-repo-list)))
       (should repo)
       (should (equal (magit-dash-repo-auto-commit repo) "ci(%r): autosync %s")))))
+
+;;;; Batch registration and freshness column
+
+(ert-deftest magit-dash/register-many-forms-and-common-config ()
+  "register-many accepts paths, pairs, triples and plists with shared config."
+  (let ((magit-dash-repo-list nil))
+    (should (equal '("a" "b" "c" "d")
+                   (magit-dash-register-many
+                    '("/tmp/a" ("b" "/tmp/bb") ("c" "/tmp/cc" "org/c")
+                      (:name "d" :path "/tmp/dd" :auto-push nil))
+                    :auto-fetch t :auto-push t)))
+    (should (= 4 (length magit-dash-repo-list)))
+    (let ((c (seq-find (lambda (r) (equal "c" (magit-dash-repo-name r))) magit-dash-repo-list))
+          (d (seq-find (lambda (r) (equal "d" (magit-dash-repo-name r))) magit-dash-repo-list)))
+      (should (string-suffix-p "org/c" (magit-dash-repo-repo c)))
+      (should (magit-dash-repo-auto-fetch c))
+      (should (magit-dash-repo-auto-push c))
+      (should-not (magit-dash-repo-auto-push d)))))
+
+(ert-deftest magit-dash/register-many-validates-before-registering ()
+  (let ((magit-dash-repo-list nil))
+    (should-error (magit-dash-register-many '("/tmp/a" 42)) :type 'user-error)
+    (should-not magit-dash-repo-list)))
+
+(ert-deftest magit-dash/freshness-column-registered-alongside-why ()
+  "The freshness column is defined, off by default, and does not displace `why'."
+  (should (memq 'freshness magit-dash--all-columns))
+  (should (memq 'why magit-dash--all-columns))
+  (should (assq 'freshness magit-dash--column-defs))
+  (should (assq 'why magit-dash--column-defs))
+  (should (null (cdr (assq 'freshness (default-value 'magit-dash-columns))))))
+
+(ert-deftest magit-dash/format-freshness ()
+  (should (equal "5m ⇒ 2h"
+                 (magit-dash--format-freshness '(:fetch-age 300 :updated-age 7200))))
+  (should (equal "┄ ⇒ ┄" (magit-dash--format-freshness nil))))
