@@ -348,5 +348,36 @@
         (should (equal git-args '("submodule" "foreach" "git" "pull")))
         (should (eq result 'ok))))))
 
+;;;; magit-dash-register-submodules
+
+(ert-deftest magit-dash-bump/register-submodules-names-and-config ()
+  "Each submodule of a registered parent is registered as PARENT<dir> with CONFIG."
+  (require 'magit-dash)
+  (let ((magit-dash-repo-list (list (magit-dash-repo--make :name "parent" :path "/tmp/parent")))
+        seen)
+    (cl-letf (((symbol-function 'magit-dash-bump--all-submodule-relpaths)
+               (lambda (_root) '("libs/a" "libs/b")))
+              ((symbol-function 'magit-dash-register-many)
+               (lambda (specs &rest config) (setq seen (list specs config)) '("ok"))))
+      (should (equal '("ok") (magit-dash-register-submodules "parent" :auto-fetch t)))
+      (should (equal (car seen)
+                     '(("parent<a>" "/tmp/parent/libs/a") ("parent<b>" "/tmp/parent/libs/b"))))
+      (should (equal (cadr seen) '(:auto-fetch t))))))
+
+(ert-deftest magit-dash-bump/register-submodules-accepts-path-and-errors-without-submodules ()
+  "An unregistered PARENT path names submodules after its basename; none found is an error."
+  (require 'magit-dash)
+  (let ((magit-dash-repo-list nil))
+    (cl-letf (((symbol-function 'magit-dash-bump--all-submodule-relpaths)
+               (lambda (_root) nil)))
+      (should-error (magit-dash-register-submodules "/tmp/proj") :type 'user-error))
+    (let (seen)
+      (cl-letf (((symbol-function 'magit-dash-bump--all-submodule-relpaths)
+                 (lambda (_root) '("sub/x")))
+                ((symbol-function 'magit-dash-register-many)
+                 (lambda (specs &rest _) (setq seen specs) nil)))
+        (magit-dash-register-submodules "/tmp/proj")
+        (should (equal seen '(("proj<x>" "/tmp/proj/sub/x"))))))))
+
 (provide 'test-magit-dash-submodules)
 ;;; test-magit-dash-submodules.el ends here
