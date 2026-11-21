@@ -27,6 +27,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # The update-branch verify tests exercise the real go toolchain.
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: stable
+          cache: false
+
       - name: Lint Source Code
         uses: tychoish/elisp-ci/lint@v0.1.3
         with:
