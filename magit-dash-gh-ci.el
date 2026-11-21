@@ -96,15 +96,18 @@ there is one.  Returns nil when RUNS is nil or empty."
            (current (if sha
                         (seq-filter (lambda (r) (equal sha (map-elt r 'headSha)))
                                     runs)
-                      (list (car runs))))
+                      runs))
            (failed (seq-find (lambda (r)
                                (magit-dash-gh-ci--failure-p (map-elt r 'conclusion)))
                              current))
            (pending (seq-find (lambda (r)
                                 (member (map-elt r 'status)
-                                        '("in_progress" "queued" "waiting" "pending")))
+                                        '("in_progress" "queued" "waiting" "pending" "requested")))
                               current))
-           (latest (or failed pending (car current)))
+           (cancelled (seq-find (lambda (r)
+                                  (equal "cancelled" (map-elt r 'conclusion)))
+                                current))
+           (latest (or failed pending cancelled (car current)))
            (pass (seq-count (lambda (r)
                               (equal "success" (map-elt r 'conclusion)))
                             current))
@@ -172,7 +175,9 @@ Returns a shadow \"—\" when CI-STATUS is nil or indicates no runs."
         (propertize "✓" 'face 'magit-dash-ci-pass-face))
        ((magit-dash-gh-ci--failure-p conclusion)
         (propertize "x" 'face 'magit-dash-ci-fail-face))
-       ((member status '("in_progress" "queued"))
+       ((equal conclusion "cancelled")
+        (propertize "⊘" 'face 'magit-dash-ci-pending-face))
+       ((member status '("in_progress" "queued" "waiting" "pending" "requested"))
         (propertize "⟳" 'face 'magit-dash-ci-pending-face))
        (t (propertize "—" 'face 'shadow))))))
 
@@ -197,6 +202,7 @@ Each element is a list of (ALIAS REPO SLUG BRANCH)."
           statusCheckRollup {
             state
             contexts(first: 20) {
+              totalCount
               nodes {
                 __typename
                 ... on CheckRun {
@@ -225,7 +231,11 @@ Each element is a list of (ALIAS REPO SLUG BRANCH)."
     (format "query {\n%s\n}" fields)))
 
 (defun magit-dash-gh-ci--parse-graphql-rollup (rollup)
-  "Convert GraphQL ROLLUP alist to a `magit-dash-gh-ci' status plist."
+  "Convert GraphQL ROLLUP alist to a `magit-dash-gh-ci' status plist.
+Counts cover only returned contexts.  When more contexts exist, set
+:truncated and use the overall rollup state to avoid a false success.
+GitHub reports cancellations as FAILURE, so a truncated failure can
+represent cancellation rather than a failed check."
   (when (and rollup (not (eq rollup :null)) (not (eq rollup :false)) (or (listp rollup) (hash-table-p rollup)))
     (let* ((contexts (and (not (eq (map-elt rollup 'contexts) :null))
                           (map-elt rollup 'contexts)))
@@ -248,14 +258,42 @@ Each element is a list of (ALIAS REPO SLUG BRANCH)."
                                           "in_progress"
                                         "completed"))
                            (url . ,(map-elt node 'targetUrl)))
-                       `((workflowName . ,(map-elt node 'name))
-                         (conclusion . ,(downcase (or (map-elt node 'conclusion) "")))
-                         (status . ,(downcase (or (map-elt node 'status) "")))
-                         (databaseId . ,(map-elt node 'databaseId))
-                         (url . ,(map-elt node 'detailsUrl)))))))
+                       (let ((url (map-elt node 'detailsUrl))
+                             (conclusion (map-elt node 'conclusion))
+                             (status (map-elt node 'status)))
+                         `((workflowName . ,(map-elt node 'name))
+                           (conclusion . ,(when (stringp conclusion) (downcase conclusion)))
+                           (status . ,(when (stringp status) (downcase status)))
+                           (databaseId . ,(when (and (stringp url)
+                                                     (string-match "/actions/runs/\\([0-9]+\\)" url))
+                                            (string-to-number (match-string 1 url))))
+                           (url . ,url)))))))
                nodes))))
       (if (and runs (> (length runs) 0))
-          (magit-dash-gh-ci--parse-runs runs)
+          (let* ((result (magit-dash-gh-ci--parse-runs runs))
+                 (state (map-elt rollup 'state))
+                 (total (map-elt contexts 'totalCount))
+                 (truncated (and (numberp total) (> total (length runs)))))
+            (when truncated
+              (setq result (plist-put result :truncated t)))
+            ;; The rollup covers all contexts, including those beyond the
+            ;; first page.  Do not report a pass when it reports otherwise.
+            (when (and (or truncated
+                           (equal (plist-get result :conclusion) "success"))
+                       (not (magit-dash-gh-ci--failure-p
+                             (plist-get result :conclusion)))
+                       (member state '("FAILURE" "ERROR" "PENDING" "EXPECTED")))
+              (setq result (plist-put result :conclusion
+                                      (when (member state '("FAILURE" "ERROR"))
+                                        "failure")))
+              (setq result (plist-put result :status
+                                      (if (member state '("FAILURE" "ERROR"))
+                                          "completed"
+                                        "in_progress")))
+              ;; No specific returned check explains the aggregate state.
+              (setq result (plist-put result :run-id nil))
+              (setq result (plist-put result :url nil)))
+            result)
         (let ((state (and (not (eq (map-elt rollup 'state) :null))
                           (map-elt rollup 'state))))
           (cond
