@@ -19,6 +19,10 @@
   (~magit-dash-stack-sync~, MCP tools =stack_show= and =stack_sync=). Missing worktrees are created
   under =magit-dash-chain-worktree-directory= (default =.wt=). See the
   [[file:../README.org::#pr-chain][PR Chain Merge Plans]] section.
+- *Updating one worktree*: =branch_update=, =branch_resolve= and =branch_verify= merge the base
+  into a single topic worktree, resolve conflicts hunk by hunk and commit
+  (~magit-dash-update-branch~, ~magit-dash-update-resolve~, ~magit-dash-update-verify~).
+  =manage_worktrees= =list= takes =with_prs= false to skip the GitHub lookup.
 
 * Key Functions and Options
 

@@ -333,6 +333,35 @@ via `git status --porcelain'."
           t)))))
 
 ;;;###autoload
+(defun magit-dash-worktree-dirty-many (paths)
+  "Return an alist (PATH . DIRTY) for the worktrees PATHS, checked concurrently.
+DIRTY follows `magit-dash-worktree-uncommitted-changes-p': non-nil for
+modified, staged or untracked files, and also when git fails.  All the
+`git status' processes run at once, so N worktrees cost about one."
+  (let (procs results)
+    (dolist (path paths)
+      (if (not (and path (file-directory-p path)))
+          (push (cons path nil) results)
+        (push (cons path (make-process
+                          :name "magit-dash-dirty"
+                          :buffer (generate-new-buffer " *magit-dash-dirty*" t)
+                          :command (list "git" "-C" (expand-file-name path)
+                                         "status" "--porcelain")
+                          :connection-type 'pipe :noquery t :sentinel #'ignore))
+              procs)))
+    (while (seq-some #'process-live-p (mapcar #'cdr procs))
+      (accept-process-output nil 0.005))
+    (dolist (entry procs)
+      (let ((proc (cdr entry)))
+        (push (cons (car entry)
+                    (or (not (zerop (process-exit-status proc)))
+                        (with-current-buffer (process-buffer proc)
+                          (not (string-empty-p (string-trim (buffer-string)))))))
+              results)
+        (kill-buffer (process-buffer proc))))
+    (mapcar (lambda (path) (assoc path results)) paths)))
+
+;;;###autoload
 (defun magit-dash-worktree-delete ()
   "Delete the worktree at point via magit.
 Signals `user-error' when the current row is not a worktree,

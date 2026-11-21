@@ -47,6 +47,7 @@
 (require 'magit-dash-gh-ci)
 (require 'magit-dash-chain)
 (require 'magit-dash-stack)
+(require 'magit-dash-update)
 (require 'magit-dash-pr)
 (require 'magit-dash-pr-status)
 (require 'magit-dash-gh)

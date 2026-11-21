@@ -20,6 +20,8 @@
 ;;   - `magit_dash_pr_status'
 ;;   - `chain_plan' and `chain_resume' (PR chain merge plans, see `magit-dash-chain')
 ;;   - `stack_show' and `stack_sync' (local branch stacks, see `magit-dash-stack')
+;;   - `branch_update', `branch_resolve' and `branch_verify' (bring one topic
+;;     worktree up to date with its base, see `magit-dash-update')
 
 ;; `manage_worktrees' actions: list, create, delete, move, review.
 ;; Worktrees follow the `.wt' convention: `<repo>/.wt/<name>' (see
@@ -40,6 +42,7 @@
 (require 'magit-dash-worktree)
 (require 'magit-dash-chain)
 (require 'magit-dash-stack)
+(require 'magit-dash-update)
 
 (declare-function magit-dash-repo-name "magit-dash")
 (declare-function magit-dash-repo-path "magit-dash")
@@ -127,6 +130,11 @@
 
 ;;;; Tool 1: manage_worktrees
 
+(defun magit-dash-mcp--same-dir-p (a b)
+  "Return non-nil when directories A and B are the same, ignoring slashes."
+  (string= (directory-file-name (expand-file-name a))
+           (directory-file-name (expand-file-name b))))
+
 (defun magit-dash-mcp--resolve-worktree-path (repo-dir path)
   "Resolve PATH to a worktree directory under REPO-DIR.
 Absolute (or ~) paths are expanded as is; short names such as \"foo\"
@@ -168,7 +176,9 @@ or `pr_number' (.wt/pr-<n>)."
                  :pr_number (:type "integer"
                              :description "For action=move, move to <root>/.wt/pr-<n>.")
                  :base_ref (:type "string"
-                            :description "Base ref when creating a new branch worktree (optional)."))
+                            :description "Base ref when creating a new branch worktree (optional).")
+                 :with_prs (:type "boolean"
+                            :description "For action=list: look up PR number/state through GitHub (default true).  False skips the network round trip and leaves the PR fields null."))
     :required ["repo"])
   (let* ((repo (plist-get args :repo))
          (action (or (plist-get args :action) "list"))
@@ -177,7 +187,15 @@ or `pr_number' (.wt/pr-<n>)."
     (pcase action
       ("list"
        (let* ((all-wts (magit-dash-gh--git-worktrees repo-dir))
-              (prs (ignore-errors (magit-dash-pr--fetch-repo-prs repo-slug "all" repo-dir)))
+              (prs (and (or (not (plist-member args :with_prs))
+                            (not (memq (plist-get args :with_prs) '(nil :false :json-false))))
+                        (ignore-errors (magit-dash-pr--fetch-repo-prs repo-slug "all" repo-dir))))
+              (dirty-alist (magit-dash-worktree-dirty-many
+                            (delq nil
+                                  (mapcar (lambda (wt)
+                                            (let ((p (alist-get 'path wt)))
+                                              (and p (not (magit-dash-mcp--same-dir-p p repo-dir)) p)))
+                                          all-wts))))
               (def-branch (ignore-errors (let ((default-directory repo-dir))
                                            (magit-dash-gh--default-branch))))
               (git-merged (when def-branch
@@ -188,11 +206,8 @@ or `pr_number' (.wt/pr-<n>)."
                   (let* ((wt-path (alist-get 'path wt))
                          (wt-branch (alist-get 'branch wt))
                          (wt-head (alist-get 'head wt))
-                         (main-p (string= (directory-file-name (expand-file-name wt-path))
-                                          (directory-file-name (expand-file-name repo-dir))))
-                         (dirty (and (not main-p)
-                                     (file-directory-p wt-path)
-                                     (magit-dash-worktree-uncommitted-changes-p wt-path)))
+                         (main-p (magit-dash-mcp--same-dir-p wt-path repo-dir))
+                         (dirty (and (not main-p) (cdr (assoc wt-path dirty-alist))))
                          (matched-pr (and prs (magit-dash-pr--match-worktree-to-pr wt prs)))
                          (pr-num (and matched-pr (map-elt matched-pr 'number)))
                          (pr-state (and matched-pr (map-elt matched-pr 'state)))
@@ -513,6 +528,20 @@ or `pr_number' (.wt/pr-<n>)."
           :fingerprint (magit-dash-pr-tracking-fingerprint prs)
           :prs (vconcat (mapcar #'magit-dash-mcp--pr-json tracked)))))
 
+(defun magit-dash-mcp--pr-context (repo number)
+  "Validate REPO and PR NUMBER; return (REPO-DIR . SLUG).
+REPO-DIR is nil when REPO is only an owner/name slug with no local checkout."
+  (unless (and repo (stringp repo) (not (string-empty-p (string-trim repo))))
+    (error "Repository argument `repo' is required"))
+  (unless (and (numberp number) (> number 0))
+    (error "PR `number' must be a positive integer"))
+  (let* ((repo-dir (ignore-errors (magit-dash-mcp--resolve-repo-dir repo)))
+         (slug (or (ignore-errors (magit-dash-mcp--resolve-repo-slug repo repo-dir))
+                   (if (string-match-p "\\`[^/]+/[^/]+\\'" (string-trim repo))
+                       (string-trim repo)
+                     (error "Cannot resolve repository slug for %s" repo)))))
+    (cons repo-dir slug)))
+
 (defmacro magit-dash-mcp--guard (&rest body)
   "Execute BODY, catching errors and returning (:error MESSAGE) plist."
   `(condition-case err
@@ -535,15 +564,9 @@ or `pr_number' (.wt/pr-<n>)."
   (magit-dash-mcp--guard
     (let* ((repo (plist-get args :repo))
            (number (plist-get args :number))
-           (_ (unless (and repo (stringp repo) (not (string-empty-p (string-trim repo))))
-                (error "Repository argument `repo' is required")))
-           (_ (unless (and (numberp number) (> number 0))
-                (error "PR `number' must be a positive integer")))
-           (repo-dir (ignore-errors (magit-dash-mcp--resolve-repo-dir repo)))
-           (slug (or (ignore-errors (magit-dash-mcp--resolve-repo-slug repo repo-dir))
-                     (if (string-match-p "\\`[^/]+/[^/]+\\'" (string-trim repo))
-                         (string-trim repo)
-                       (error "Cannot resolve repository slug for %s" repo))))
+           (ctx (magit-dash-mcp--pr-context repo number))
+           (repo-dir (car ctx))
+           (slug (cdr ctx))
            (limit (plist-get args :limit))
            (max-chars (plist-get args :max_chars))
            (threads (magit-dash-pr-fetch-threads-graphql slug number limit max-chars repo-dir)))
@@ -567,15 +590,9 @@ or `pr_number' (.wt/pr-<n>)."
   (magit-dash-mcp--guard
     (let* ((repo (plist-get args :repo))
            (number (plist-get args :number))
-           (_ (unless (and repo (stringp repo) (not (string-empty-p (string-trim repo))))
-                (error "Repository argument `repo' is required")))
-           (_ (unless (and (numberp number) (> number 0))
-                (error "PR `number' must be a positive integer")))
-           (repo-dir (ignore-errors (magit-dash-mcp--resolve-repo-dir repo)))
-           (slug (or (ignore-errors (magit-dash-mcp--resolve-repo-slug repo repo-dir))
-                     (if (string-match-p "\\`[^/]+/[^/]+\\'" (string-trim repo))
-                         (string-trim repo)
-                       (error "Cannot resolve repository slug for %s" repo))))
+           (ctx (magit-dash-mcp--pr-context repo number))
+           (repo-dir (car ctx))
+           (slug (cdr ctx))
            (tail-lines (plist-get args :tail_lines)))
       (magit-dash-gh-ci-pr-failures slug number tail-lines repo-dir))))
 
@@ -727,6 +744,173 @@ commit count and drift; the base line is shown once."
                        (vconcat (mapcar (lambda (s) (magit-dash-chain--step-label (hitl-plan-step-target s)))
                                         (hitl-plan-steps plan)))
                      [])))))
+
+;;;; Tools 10-12: branch_update, branch_resolve, branch_verify
+
+(defun magit-dash-mcp--worktree-dir (args &optional key)
+  "Return the absolute worktree directory named by ARGS under KEY.
+KEY defaults to :worktree.  An absolute (or ~) path is used as is; a short
+name such as \"pr-42\" needs `repo' and maps to `<root>/.wt/<name>'."
+  (let ((wt (plist-get args (or key :worktree)))
+        (repo (plist-get args :repo)))
+    (unless (and (stringp wt) (not (string-empty-p (string-trim wt))))
+      (error "Argument `%s' is required" (substring (symbol-name (or key :worktree)) 1)))
+    (let ((dir (if (or (file-name-absolute-p wt) (string-prefix-p "~" wt))
+                   (expand-file-name wt)
+                 (progn
+                   (unless (and (stringp repo) (not (string-empty-p (string-trim repo))))
+                     (error "A short worktree name needs `repo'"))
+                   (magit-dash-mcp--resolve-worktree-path
+                    (magit-dash-mcp--resolve-repo-dir repo) wt)))))
+      (unless (file-directory-p dir)
+        (error "Worktree does not exist: %s" dir))
+      dir)))
+
+(defun magit-dash-mcp--update-json (res)
+  "Return the `branch_update' result plist RES as JSON-ready data."
+  (if (plist-get res :error)
+      res
+    (let ((out nil))
+      (cl-loop for (k v) on res by #'cddr
+               do (setq out
+                        (append out
+                                (list k
+                                      (cond
+                                       ((eq k :conflicts)
+                                        (vconcat
+                                         (mapcar
+                                          (lambda (c)
+                                            (let ((cs (plist-get c :conflicts)))
+                                              (append (list :file (plist-get c :file)
+                                                            :kind (plist-get c :kind)
+                                                            :hunks (plist-get c :hunks))
+                                                      (and cs (list :conflicts (vconcat cs))))))
+                                          v)))
+                                       ((memq k '(:outcome)) (magit-dash-mcp--json-value v))
+                                       ((memq k '(:rerere :merging :dirty))
+                                        (if v t :false))
+                                       (t (or v :null)))))))
+      out)))
+
+(mcpkit-register-tool "branch_update" 'magit-dash
+  :description "Merge origin/<base> into a topic worktree in one call (never rebases, never pushes): fetches only the base branch, merges with --no-ff, and returns outcome merged | up-to-date | resumed | conflict. On conflict the worktree is left in its merge state and the conflicted files come back with kind, hunk count and (include_hunks) the ours/theirs text, ready for branch_resolve. Calling again after resolving finishes the merge. merge=false only reports ahead/behind. abort=true aborts the merge in progress. Pass `worktrees' to update several worktrees with one fetch per repository. Refuses detached HEAD, main/master and tracked changes. Push by hand only when the user asks."
+  :input-schema
+  '(:type "object"
+    :properties (:worktree (:type "string"
+                            :description "Worktree path, or short name such as pr-42 (then `repo' is required).")
+                 :worktrees (:type "array" :items (:type "string")
+                             :description "Several worktrees (paths or short names) instead of `worktree'.")
+                 :repo (:type "string"
+                        :description "Repository path, slug or name; only needed for short worktree names.")
+                 :base (:type "string"
+                        :description "Base branch to merge (default: the repository's default branch).")
+                 :fetch (:type "boolean"
+                         :description "Fetch the base branch from origin first (default true).")
+                 :merge (:type "boolean"
+                         :description "Perform the merge (default true); false only reports ahead/behind.")
+                 :abort (:type "boolean"
+                         :description "Abort the merge in progress instead of updating.")
+                 :include_hunks (:type "boolean"
+                                 :description "On conflict, include each hunk's ours/theirs text (default true).")
+                 :max_chars (:type "integer"
+                             :description "Total hunk text returned (default 6000); later hunks are marked truncated."))
+    :required [])
+  (let* ((many (plist-get args :worktrees))
+         (dirs (if many
+                   (mapcar (lambda (w) (magit-dash-mcp--worktree-dir (list :worktree w :repo (plist-get args :repo))))
+                           (seq-into many 'list))
+                 (list (magit-dash-mcp--worktree-dir args))))
+         (flag (lambda (key default)
+                 (if (plist-member args key)
+                     (not (memq (plist-get args key) '(nil :false :json-false)))
+                   default)))
+         (base (let ((b (plist-get args :base))) (and (stringp b) (not (string-empty-p b)) b)))
+         (opts (list :base base
+                     :fetch (funcall flag :fetch t)
+                     :merge (funcall flag :merge t)
+                     :abort (funcall flag :abort nil)
+                     :include-hunks (funcall flag :include_hunks t)
+                     :max-chars (plist-get args :max_chars))))
+    (if many
+        (list :worktrees
+              (vconcat (mapcar #'magit-dash-mcp--update-json
+                               (apply #'magit-dash-update-branches dirs opts))))
+      (let ((res (apply #'magit-dash-update-branch (car dirs) opts)))
+        (magit-dash-mcp--update-json (append (list :worktree (car dirs)) res))))))
+
+(mcpkit-register-tool "branch_resolve" 'magit-dash
+  :description "Resolve conflict hunks of a worktree mid-merge in one call, for many files at once. Each file takes ours, theirs, both, both_theirs_first, base (diff3) or text (with `text'), for every hunk or per hunk by index (from branch_update). Only files git lists as unmerged are touched; edits are byte-exact (CRLF safe). Fully resolved files are staged in a single git add unless stage=false. Hunks you do not choose stay in place. Finish with branch_verify (commit=true)."
+  :input-schema
+  '(:type "object"
+    :properties (:worktree (:type "string"
+                            :description "Worktree path, or short name (then `repo' is required).")
+                 :repo (:type "string" :description "Repository, for short worktree names.")
+                 :files (:type "array"
+                         :items (:type "object"
+                                 :properties (:file (:type "string" :description "Conflicted path relative to the worktree.")
+                                              :take (:type "string"
+                                                     :enum ["ours" "theirs" "both" "both_theirs_first" "base" "text"]
+                                                     :description "Choice for every hunk of the file.")
+                                              :text (:type "string" :description "Replacement text when take is text.")
+                                              :hunks (:type "array"
+                                                      :items (:type "object"
+                                                              :properties (:index (:type "integer")
+                                                                           :take (:type "string"
+                                                                                  :enum ["ours" "theirs" "both" "both_theirs_first" "base" "text"])
+                                                                           :text (:type "string"))
+                                                              :required ["index"])
+                                                      :description "Per-hunk choices overriding `take'."))
+                                 :required ["file"]))
+                 :stage (:type "boolean" :description "Stage fully resolved files (default true)."))
+    :required ["worktree" "files"])
+  (let* ((dir (magit-dash-mcp--worktree-dir args))
+         (specs (mapcar
+                 (lambda (f)
+                   (list :file (plist-get f :file)
+                         :take (plist-get f :take)
+                         :text (plist-get f :text)
+                         :hunks (mapcar (lambda (h) (list :index (plist-get h :index)
+                                                          :take (plist-get h :take)
+                                                          :text (plist-get h :text)))
+                                        (seq-into (plist-get f :hunks) 'list))))
+                 (seq-into (plist-get args :files) 'list)))
+         (stage (if (plist-member args :stage)
+                    (not (memq (plist-get args :stage) '(nil :false :json-false)))
+                  t))
+         (res (magit-dash-update-resolve dir specs stage)))
+    (list :worktree dir
+          :files (vconcat (mapcar (lambda (r)
+                                    (if (plist-get r :error)
+                                        r
+                                      (plist-put (copy-sequence r) :staged
+                                                 (if (plist-get r :staged) t :false))))
+                                  res)))))
+
+(mcpkit-register-tool "branch_verify" 'magit-dash
+  :description "Verify a worktree after a merge and optionally commit, in one call: fails on leftover conflict markers, then for Go modules vets only the packages the base changed (plus gofmt -l on changed files; tests=true also runs go test), then runs magit-dash-chain-verify-command when configured. With commit=true and no failures it stages tracked changes and commits: the merge in progress with git's own message, or tracked changes with `message'. Returns ok, failures, markers, needs_review (unmerged paths without markers, e.g. modify/delete: confirm before trusting the commit), packages and the new sha. Never pushes."
+  :input-schema
+  '(:type "object"
+    :properties (:worktree (:type "string"
+                            :description "Worktree path, or short name (then `repo' is required).")
+                 :repo (:type "string" :description "Repository, for short worktree names.")
+                 :tests (:type "boolean" :description "Also run go test on the touched packages (never -v).")
+                 :commit (:type "boolean" :description "Commit when verification passes.")
+                 :message (:type "string" :description "Commit message when there is no merge in progress.")
+                 :base (:type "string" :description "Base branch, only for the fallback diff range."))
+    :required ["worktree"])
+  (let* ((dir (magit-dash-mcp--worktree-dir args))
+         (flag (lambda (key) (eq (plist-get args key) t)))
+         (res (magit-dash-update-verify
+               dir :tests (funcall flag :tests) :commit (funcall flag :commit)
+               :message (plist-get args :message) :base (plist-get args :base))))
+    (list :worktree dir
+          :ok (if (plist-get res :ok) t :false)
+          :failures (vconcat (plist-get res :failures))
+          :markers (vconcat (plist-get res :markers))
+          :needs_review (vconcat (plist-get res :needs_review))
+          :packages (vconcat (plist-get res :packages))
+          :committed (if (plist-get res :committed) t :false)
+          :sha (or (plist-get res :sha) :null))))
 
 (provide 'magit-dash-mcp)
 

@@ -169,14 +169,41 @@ This is the only place git is invoked.  It refuses history rewriting
   "Return non-nil when a merge is in progress in the worktree DIR."
   (magit-dash-chain--git-p dir "rev-parse" "-q" "--verify" "MERGE_HEAD"))
 
+(defconst magit-dash-chain--unmerged-kinds
+  '(((1 2 3) . "both-modified") ((2 3) . "both-added") ((1 3) . "deleted-by-us")
+    ((1 2) . "deleted-by-them") ((2) . "added-by-us") ((3) . "added-by-them")
+    ((1) . "both-deleted"))
+  "Conflict kinds by the index stages present for a path.")
+
+(defun magit-dash-chain--unmerged (dir)
+  "Return an alist (PATH . KIND) of the unmerged paths in DIR.
+Reads only the index (`git ls-files -u'), so it is much cheaper than `status'."
+  (let (stages order)
+    (dolist (line (split-string
+                   (cdr (magit-dash-chain--git dir "-c" "core.quotePath=false" "ls-files" "-u"))
+                   "\n" t))
+      (when (string-match "\\`[0-7]+ [0-9a-f]+ \\([123]\\)\t\\(.*\\)\\'" line)
+        (let ((path (match-string 2 line))
+              (stage (string-to-number (match-string 1 line))))
+          (unless (assoc path stages) (push path order))
+          (push stage (alist-get path stages nil nil #'equal)))))
+    (mapcar (lambda (path)
+              (cons path (or (cdr (assoc (sort (copy-sequence (cdr (assoc path stages))) #'<)
+                                         magit-dash-chain--unmerged-kinds))
+                             "unmerged")))
+            (nreverse order))))
+
 (defun magit-dash-chain--unmerged-files (dir)
   "Return the list of unmerged paths in DIR."
-  (split-string (cdr (magit-dash-chain--git dir "diff" "--name-only" "--diff-filter=U"))
-                "\n" t))
+  (mapcar #'car (magit-dash-chain--unmerged dir)))
 
-(defun magit-dash-chain--conflict-marker-files (dir)
-  "Return tracked files in DIR containing conflict markers."
-  (let ((r (magit-dash-chain--git dir "grep" "-l" "-I" "-E" "^(<{7}|>{7})( |$)")))
+(defun magit-dash-chain--conflict-marker-files (dir &optional files)
+  "Return tracked files in DIR containing conflict markers.
+With FILES, only those paths are scanned, which is far cheaper than the
+whole tree when the caller knows what changed."
+  (let ((r (apply #'magit-dash-chain--git dir "-c" "core.quotePath=false"
+                  "grep" "-l" "-I" "-E" "^(<{7}|>{7})( |$)"
+                  (and files (cons "--" files)))))
     (and (zerop (car r)) (split-string (cdr r) "\n" t))))
 
 (defun magit-dash-chain--dirty-p (dir)
@@ -187,6 +214,49 @@ This is the only place git is invoked.  It refuses history rewriting
 (defun magit-dash-chain--head (dir)
   "Return the full SHA of HEAD in DIR."
   (magit-dash-chain--git-ok dir "rev-parse" "HEAD"))
+
+(defun magit-dash-chain--git-dir (dir)
+  "Return the absolute git directory of the worktree DIR without running git.
+A linked worktree has a `.git' file holding `gitdir: PATH'."
+  (let* ((dir (file-name-as-directory (expand-file-name dir)))
+         (dot (expand-file-name ".git" dir)))
+    (cond
+     ((file-directory-p dot) dot)
+     ((file-regular-p dot)
+      (with-temp-buffer
+        (insert-file-contents dot nil 0 4096)
+        (when (looking-at "gitdir: *\\(.+\\)$")
+          (expand-file-name (match-string 1) dir)))))))
+
+(defun magit-dash-chain--state (dir)
+  "Return the state of the worktree DIR from a single git subprocess.
+The plist has :branch (nil when detached), :head (full SHA, nil on an
+unborn branch), :dirty (tracked files changed), :unmerged (paths with
+conflicts) and :merging (a merge is in progress).  Untracked files are
+ignored."
+  (let ((res (magit-dash-chain--git dir "-c" "core.quotePath=false"
+                                    "status" "--porcelain=v2" "--branch" "-uno")))
+    (unless (zerop (car res))
+      (error "git status failed in %s: %s" dir (cdr res)))
+    (let (branch head dirty unmerged)
+      (dolist (line (split-string (cdr res) "\n" t))
+        (cond
+         ((string-prefix-p "# branch.oid " line)
+          (let ((oid (substring line 13)))
+            (setq head (and (not (equal oid "(initial)")) oid))))
+         ((string-prefix-p "# branch.head " line)
+          (let ((name (substring line 14)))
+            (setq branch (and (not (equal name "(detached)")) name))))
+         ((string-prefix-p "u " line)
+          ;; u XY sub m1 m2 m3 mW h1 h2 h3 PATH: ten fields precede the path.
+          (setq dirty t)
+          (push (replace-regexp-in-string "\\`\\(?:[^ ]+ \\)\\{10\\}" "" line)
+                unmerged))
+         ((string-match-p "\\`[12] " line) (setq dirty t))))
+      (let ((gd (magit-dash-chain--git-dir dir)))
+        (list :branch branch :head head :dirty dirty
+              :unmerged (nreverse unmerged)
+              :merging (and gd (file-exists-p (expand-file-name "MERGE_HEAD" gd))))))))
 
 (defun magit-dash-chain--normalize-dir (dir)
   "Return DIR as a canonical directory name without trailing slash."
@@ -530,42 +600,55 @@ Return a result plist: :outcome `resumed' with :sha, or `conflict' with
         (magit-dash-chain--git-ok dir "commit" "--no-edit")
         (list :outcome 'resumed :sha (magit-dash-chain--head dir))))))
 
-(defun magit-dash-chain--update-worktree (dir branch source-ref source-label)
+(defun magit-dash-chain--update-worktree (dir branch source-ref source-label &optional state)
   "Merge SOURCE-REF (shown as SOURCE-LABEL) into BRANCH checked out in DIR.
 Return a result plist with :outcome one of `merged', `up-to-date',
 `resumed' or `conflict' (with :conflicts, and :fresh when this call
 started the conflicting merge).  Resumes an in-progress merge of the same
-source instead of starting a new one."
-  (let ((cur (magit-dash-chain--current-branch dir)))
+source instead of starting a new one.  STATE is DIR's
+`magit-dash-chain--state' when the caller already has it.
+
+The common path costs three git processes: one `status' for the worktree
+state, the merge, and a `rev-parse' for the new HEAD.  Git itself reports
+\"Already up to date\", so no separate ancestry probe is needed."
+  (let* ((state (or state (magit-dash-chain--state dir)))
+         (cur (plist-get state :branch)))
     (unless (equal cur branch)
-      (error "Worktree %s is on %s, expected %s" dir (or cur "a detached HEAD") branch)))
-  (let ((src-sha (magit-dash-chain--git-ok dir "rev-parse" "--verify"
-                                           (concat source-ref "^{commit}"))))
+      (error "Worktree %s is on %s, expected %s" dir (or cur "a detached HEAD") branch))
     (cond
-     ((magit-dash-chain--merge-in-progress-p dir)
-      (magit-dash-chain--finish-merge dir src-sha))
-     ((magit-dash-chain--dirty-p dir)
+     ((plist-get state :merging)
+      (magit-dash-chain--finish-merge
+       dir (magit-dash-chain--git-ok dir "rev-parse" "--verify"
+                                     (concat source-ref "^{commit}"))))
+     ((plist-get state :dirty)
       (error "Worktree %s has uncommitted changes" dir))
-     ((magit-dash-chain--git-p dir "merge-base" "--is-ancestor" src-sha "HEAD")
-      (list :outcome 'up-to-date :sha (magit-dash-chain--head dir)))
      (t
       (let ((r (magit-dash-chain--git dir "merge" "--no-ff" "-m"
                                       (format "Merge %s into %s" source-label branch)
-                                      src-sha)))
+                                      source-ref)))
         (cond
          ((zerop (car r))
-          (list :outcome 'merged :sha (magit-dash-chain--head dir)))
+          (if (string-match-p "\\`Already up[ -]to[ -]date" (cdr r))
+              (list :outcome 'up-to-date :sha (plist-get state :head))
+            (list :outcome 'merged :sha (magit-dash-chain--head dir))))
          ((magit-dash-chain--merge-in-progress-p dir)
           (list :outcome 'conflict :fresh t
                 :conflicts (magit-dash-chain--unmerged-files dir)))
          (t (error "git merge failed in %s: %s" dir (cdr r)))))))))
 
+(defun magit-dash-chain--merging-p (dir)
+  "Return non-nil when a merge is in progress in DIR, without running git."
+  (let ((gd (magit-dash-chain--git-dir dir)))
+    (and gd (file-exists-p (expand-file-name "MERGE_HEAD" gd)))))
+
 (defun magit-dash-chain--verify (dir branch src-sha)
-  "Verify that DIR on BRANCH is a clean, fully merged state containing SRC-SHA."
+  "Verify that DIR on BRANCH is a clean, fully merged state containing SRC-SHA.
+Four cheap git processes: the branch, the index's unmerged paths, a marker
+scan and an ancestry check (`status' costs more on a large tree)."
   (cond
    ((not (equal (magit-dash-chain--current-branch dir) branch))
     (error "Verification failed: %s is not on %s" dir branch))
-   ((magit-dash-chain--merge-in-progress-p dir)
+   ((magit-dash-chain--merging-p dir)
     (error "Verification failed: merge still in progress in %s" dir))
    ((magit-dash-chain--unmerged-files dir)
     (error "Verification failed: unmerged paths remain in %s" dir))

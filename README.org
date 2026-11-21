@@ -373,6 +373,24 @@ described above; nothing runs until the plan is executed. The MCP tools
 =stack_show= (read-only) and =stack_sync= (creates an MCP-origin plan subject to
 approval) expose the same. See [[file:docs/worktrees-and-submodules.org][worktrees and submodules]].
 
+** Updating one topic worktree
+
+Where a chain plan merges many branches under approval, =magit-dash-update=
+brings a single topic worktree (usually =.wt/pr-N=) up to date with its base
+immediately: =merge origin/<base>= (never a rebase, never a push). It is built
+for few round trips: three MCP tools cover the whole job.
+
+- =branch_update= fetches only the base branch, merges, and returns the outcome
+  (=merged=, =up-to-date=, =resumed= or =conflict=). On a conflict the worktree is
+  left mid-merge and the conflicted files come back with their kind, hunk count and
+  ours/theirs text. =worktrees= updates several worktrees with one fetch per
+  repository; =abort= aborts the merge; =merge= false only reports ahead/behind.
+- =branch_resolve= resolves hunks for many files in one call (=ours=, =theirs=,
+  =both=, =base= or literal =text=, per file or per hunk) and stages the result. It only
+  touches files git lists as unmerged.
+- =branch_verify= fails on leftover conflict markers, vets the Go packages the base
+  changed, and with =commit= true commits the merge. See =magit-dash-update-verify=.
+
 * PR Status
 :PROPERTIES:
 :CUSTOM_ID: pr-status
