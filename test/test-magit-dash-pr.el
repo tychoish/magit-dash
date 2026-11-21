@@ -709,6 +709,21 @@
        '(:number 42 :repo "tychoish/magit-dash" :pr ((url . "https://github.com/tychoish/magit-dash/pull/42"))))
       (should (equal "https://github.com/tychoish/magit-dash/pull/42" called-url)))))
 
+(ert-deftest magit-dash-pr/dashboard-diff-review-opens ()
+  "magit-dash-pr-dashboard-diff-review dispatches entry to magit-dash-review-pr."
+  (let ((called-entry nil))
+    (should (eq (lookup-key magit-dash-pr-dashboard-mode-map (kbd "V"))
+                #'magit-dash-pr-dashboard-diff-review))
+    (should (eq (lookup-key magit-dash-pr-dashboard-mode-map (kbd "c v"))
+                #'magit-dash-pr-dashboard-diff-review))
+    (should (eq (lookup-key magit-dash-pr-dashboard-mode-map (kbd "v v"))
+                #'magit-dash-pr-dashboard-diff-review))
+    (cl-letf (((symbol-function 'magit-dash-review-pr)
+               (lambda (ent &optional _dir) (setq called-entry ent))))
+      (magit-dash-pr-dashboard-diff-review
+       '(:number 42 :repo "tychoish/magit-dash"))
+      (should (equal (plist-get called-entry :number) 42)))))
+
 (ert-deftest magit-dash-pr/code-review-requires-url-and-package ()
   "magit-dash-pr-code-review validates URL and package availability."
   (should-error (magit-dash-pr-code-review "") :type 'user-error)

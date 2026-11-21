@@ -47,6 +47,7 @@
 (require 'magit-dash-gh-ci)
 (require 'magit-dash-chain)
 (require 'magit-dash-stack)
+(require 'magit-dash-update)
 (require 'magit-dash-pr)
 (require 'magit-dash-pr-status)
 (require 'magit-dash-gh)
@@ -54,6 +55,8 @@
 (require 'magit-dash-submodules)
 (require 'magit-dash-worktree)
 (require 'magit-dash-status)
+(require 'magit-dash-review)
+(require 'magit-dash-review-hitl)
 (require 'magit-dash-mcp nil t)
 
 (declare-function magit-status-setup-buffer "magit-status")
