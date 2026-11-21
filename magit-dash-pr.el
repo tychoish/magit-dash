@@ -142,9 +142,10 @@ Returns a list of plists :id :resolved :path :creator :last-commentor.
       (concat (substring text 0 (max 0 (- max-chars 3))) "...")
     (or text "")))
 
-(defun magit-dash-pr-parse-unresolved-threads (graphql-response &optional limit max-chars)
-  "Extract unresolved review thread summaries from GRAPHQL-RESPONSE alist.
+(defun magit-dash-pr-parse-unresolved-threads (graphql-response &optional limit max-chars include-resolved)
+  "Extract review thread summaries from GRAPHQL-RESPONSE alist.
 Returns a list of plists with keys :id :path :line :outdated :author :body :comments.
+When INCLUDE-RESOLVED is non-nil, includes resolved threads as well.
 Caps thread count at LIMIT (default 20, max 50) and each comment's body at
 MAX-CHARS (default 1000)."
   (let* ((limit (min (or limit 20) 50))
@@ -154,37 +155,47 @@ MAX-CHARS (default 1000)."
          (pr (map-elt repo 'pullRequest))
          (rt (map-elt pr 'reviewThreads))
          (nodes (map-elt rt 'nodes))
-         (unresolved (seq-filter (lambda (th) (not (eq (map-elt th 'isResolved) t)))
-                                 nodes))
-         (capped-nodes (seq-take unresolved limit)))
+         (filtered (if include-resolved
+                       nodes
+                     (seq-filter (lambda (th) (not (eq (map-elt th 'isResolved) t)))
+                                 nodes)))
+         (capped-nodes (seq-take filtered limit)))
     (seq-map
      (lambda (thread)
        (let* ((comments-nodes (map-nested-elt thread '(comments nodes)))
               (first-comment (car comments-nodes))
               (creator (or (map-nested-elt first-comment '(author login)) "unknown"))
               (outdated (eq (map-elt thread 'isOutdated) t))
+              (resolved (eq (map-elt thread 'isResolved) t))
               (comments (mapcar
                          (lambda (c)
                            (list :id (or (map-elt c 'id) "")
                                  :author (or (map-nested-elt c '(author login)) "unknown")
                                  :body (magit-dash-pr--truncate-text
                                         (map-elt c 'body) max-chars)
-                                 :created_at (or (map-elt c 'createdAt) "")))
+                                 :created_at (or (map-elt c 'createdAt) "")
+                                 :commit_oid (map-nested-elt c '(commit oid))))
                          comments-nodes))
               (body (magit-dash-pr--truncate-text
                      (map-elt first-comment 'body) max-chars)))
          (list :id (or (map-elt thread 'id) "")
                :path (or (map-elt thread 'path) "")
                :line (map-elt thread 'line)
+               :start_line (map-elt thread 'startLine)
+               :diff_side (map-elt thread 'diffSide)
+               :original_line (map-elt thread 'originalLine)
+               :original_start_line (map-elt thread 'originalStartLine)
+               :resolved (if resolved t :false)
                :outdated (if outdated t :false)
                :author creator
                :body body
                :comments (vconcat comments))))
      capped-nodes)))
 
-(defun magit-dash-pr-fetch-threads-graphql (slug number &optional limit max-chars dir)
-  "Fetch unresolved review threads for PR NUMBER in SLUG synchronously.
+(defun magit-dash-pr-fetch-threads-graphql (slug number &optional limit max-chars dir include-resolved)
+  "Fetch review threads for PR NUMBER in SLUG synchronously.
 SLUG is an \"owner/repo\" string.  DIR is optional working directory.
+When INCLUDE-RESOLVED is non-nil, includes resolved threads.
 Returns a list of plists."
   (let* ((parts (split-string slug "/"))
          (owner (car parts))
@@ -195,9 +206,9 @@ Returns a list of plists."
     pullRequest(number:$number){
       reviewThreads(first:$first){
         nodes{
-          id isResolved isOutdated path line
+          id isResolved isOutdated path line startLine diffSide originalLine originalStartLine
           comments(first:50){
-            nodes{ id author{login} body createdAt }
+            nodes{ id author{login} body createdAt commit{oid} }
           }
         }
       }
@@ -221,7 +232,7 @@ Returns a list of plists."
                         (json-parse-string output :array-type 'list :object-type 'alist)
                       (error (error "Failed to parse GraphQL response: %s"
                                     (error-message-string err))))))
-        (magit-dash-pr-parse-unresolved-threads parsed limit max-chars)))))
+        (magit-dash-pr-parse-unresolved-threads parsed limit max-chars include-resolved)))))
 
 (defun magit-dash-pr--graphql-query ()
   "Return the GraphQL query string for fetching review threads."
