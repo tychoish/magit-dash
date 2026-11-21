@@ -43,6 +43,21 @@
 (declare-function diff-review--review-buffer "diff-review" ())
 (declare-function diff-review--region-lines "diff-review" ())
 (declare-function diff-review--threads-at-point "diff-review" ())
+(declare-function diff-review-branch "diff-review" (branch))
+(declare-function annotated-completing-read "annotated-completing-read" (collection &rest args))
+(declare-function agent-shell-workflow-dispatch "agent-shell-workflow" (id &rest args))
+(declare-function agent-shell-prompt-queue "agent-shell-prompt-queue" (prompt &optional buffer))
+(declare-function gptel-request "gptel" (&optional prompt &rest args))
+(declare-function hitl-plan-list "hitl-plan" (&optional directory domain))
+(declare-function hitl-plan-id "hitl-plan" (plan))
+(declare-function hitl-plan-status "hitl-plan" (plan))
+(declare-function hitl-plan-description "hitl-plan" (plan))
+(declare-function hitl-plan-steps "hitl-plan" (plan))
+(declare-function hitl-plan-step-status "hitl-plan" (step))
+(declare-function hitl-plan-review "hitl-plan-ui" (plan &optional select))
+(declare-function magit-dash-review-stage-hitl "magit-dash-review-hitl" (&optional review-file op-name))
+(declare-function code-review-agents-shell-prompt "code-review-agents-shell" (criterion worktree))
+(declare-function code-review-start "code-review" (url))
 
 (defgroup magit-dash-review nil
   "Diff-review and code-review integration for magit-dash."
@@ -931,6 +946,493 @@ node IDs back into REVIEW-FILE."
             (diff-review-refresh)
           (revert-buffer t t t))))
     file))
+
+;;; Agent Remediation, ASW/ASQ Dispatch, Hunk Critique, and Draft Promotion
+
+(defvar magit-dash-review-asq-enqueue-function nil
+  "Optional override function `(lambda (prompt worktree))' for ASQ prompt queueing.")
+
+(defun magit-dash-review--enqueue-prompt (prompt worktree)
+  "Enqueue PROMPT for the agent session associated with WORKTREE."
+  (let ((default-directory (file-name-as-directory
+                            (expand-file-name (or worktree default-directory)))))
+    (cond
+     ((functionp magit-dash-review-asq-enqueue-function)
+      (funcall magit-dash-review-asq-enqueue-function prompt default-directory))
+     ((fboundp 'agent-shell-prompt-queue)
+      (agent-shell-prompt-queue prompt))
+     (t
+      (error "No agent-shell queue dispatcher available for %s" default-directory)))
+    prompt))
+
+(defun magit-dash-review--format-remediation-prompt (findings review-file)
+  "Format a remediation prompt for FINDINGS in REVIEW-FILE."
+  (let* ((first-f (car findings))
+         (worktree (or (plist-get first-f :worktree) default-directory))
+         (idx 0))
+    (concat
+     (format "Remediate the following %d review finding(s) in `%s` (review file: `%s`):\n\n"
+             (length findings) worktree review-file)
+     (mapconcat
+      (lambda (f)
+        (setq idx (1+ idx))
+        (let* ((id (or (plist-get f :id) "unknown"))
+               (path (or (plist-get f :path) "(review-wide)"))
+               (line (plist-get f :line))
+               (end-line (plist-get f :end-line))
+               (loc (cond
+                     ((and line end-line (/= line end-line))
+                      (format "%s:%d-%d" path line end-line))
+                     (line (format "%s:%d" path line))
+                     (t path)))
+               (body (or (plist-get f :body) ""))
+               (hunk (or (plist-get f :hunk) "")))
+          (concat
+           (format "%d. `%s` (id: `%s`):\n   %s\n" idx loc id body)
+           (if (not (string-empty-p hunk))
+               (format "```diff\n%s\n```\n" hunk)
+             "")
+           (format "   Reply command: `emacsclient --eval '(magit-dash-review-append-reply %S %S \"agent-shell\" \"<summary>\")'`\n"
+                   review-file id))))
+      findings
+      "\n"))))
+
+(defun magit-dash-review-send-findings-to-agent (findings &optional review-file)
+  "Dispatch FINDINGS from REVIEW-FILE to `agent-shell' via ASW or ASQ."
+  (unless findings
+    (user-error "No unresolved review comments to send"))
+  (let* ((first-f (car findings))
+         (rf (expand-file-name (or review-file (plist-get first-f :review-file))))
+         (worktree (or (plist-get first-f :worktree)
+                       (plist-get first-f :root)
+                       default-directory)))
+    (if (and (fboundp 'agent-shell-workflow-dispatch)
+             (not magit-dash-review-asq-enqueue-function))
+        (agent-shell-workflow-dispatch
+         'diff-review-remediate
+         :args (list :review-file rf :findings findings :root worktree))
+      (magit-dash-review--enqueue-prompt
+       (magit-dash-review--format-remediation-prompt findings rf)
+       worktree))))
+
+;;;###autoload
+(defun magit-dash-review-enqueue-asq (&optional review-file grouping)
+  "Enqueue unresolved findings from REVIEW-FILE into ASQ.
+GROUPING is `per-file' (default: one queue item per file) or `per-thread'."
+  (interactive)
+  (let* ((file (expand-file-name
+                (or review-file
+                    (magit-dash-review--current-review-file)
+                    (user-error "No active review JSON file"))))
+         (findings (magit-dash-review-extract-findings file t)))
+    (unless findings
+      (user-error "No unresolved review comments to send"))
+    (let* ((worktree (or (plist-get (car findings) :worktree) default-directory))
+           (groups (if (eq grouping 'per-thread)
+                       (mapcar #'list findings)
+                     (mapcar #'cdr
+                             (seq-group-by
+                              (lambda (f) (or (plist-get f :path) "(review)"))
+                              findings)))))
+      (mapcar
+       (lambda (grp)
+         (let ((prompt (magit-dash-review--format-remediation-prompt grp file)))
+           (magit-dash-review--enqueue-prompt prompt worktree)))
+       groups))))
+
+;;;###autoload
+(defun magit-dash-review-send-to-agent (&optional mode review-file)
+  "Send unresolved findings from REVIEW-FILE to `agent-shell'.
+MODE is one of:
+  `workflow'     (default) — dispatch `diff-review-remediate' via ASW
+  `hitl'         (C-u)     — stage findings in `hitl-plan' (`code-review' domain)
+  `asq-per-file' (C-u C-u) — enqueue one ASQ work item per file."
+  (interactive
+   (list (cond
+          ((equal current-prefix-arg '(16)) 'asq-per-file)
+          (current-prefix-arg 'hitl)
+          (t 'workflow))
+         (magit-dash-review--current-review-file)))
+  (let* ((file (expand-file-name
+                (or review-file
+                    (magit-dash-review--current-review-file)
+                    (user-error "No active review JSON file"))))
+         (mode (or mode 'workflow))
+         (findings (magit-dash-review-extract-findings file t)))
+    (unless findings
+      (user-error "No unresolved review comments to send"))
+    (pcase mode
+      ('hitl
+       (require 'magit-dash-review-hitl)
+       (magit-dash-review-stage-hitl file 'send-to-agent))
+      ('asq-per-file
+       (magit-dash-review-enqueue-asq file 'per-file))
+      (_
+       (magit-dash-review-send-findings-to-agent findings file)))))
+
+(defun magit-dash-review--insert-draft-comment (review-file path line end-line author body)
+  "Insert a `status: \"draft\"' comment into REVIEW-FILE and return its table."
+  (let* ((file (expand-file-name review-file))
+         (data (magit-dash-review--read-json-file file))
+         (comments (append (or (map-elt data "comments") []) nil))
+         (c-ht (make-hash-table :test #'equal))
+         (id (magit-dash-review--make-comment-id
+              (format "%s:%s:%s:%s" (or path "") (or line 0) body (float-time)))))
+    (setf (map-elt c-ht "id") id)
+    (setf (map-elt c-ht "origin") "agent")
+    (setf (map-elt c-ht "status") "draft")
+    (when path (setf (map-elt c-ht "path") path))
+    (when line (setf (map-elt c-ht "lines") (vector line (max line (or end-line line)))))
+    (setf (map-elt c-ht "author") (or author "gptel"))
+    (setf (map-elt c-ht "at") (format-time-string "%FT%T%:z"))
+    (setf (map-elt c-ht "body") (string-trim body))
+    (setf (map-elt c-ht "resolved") :false)
+    (setf (map-elt c-ht "replies") [])
+    (setf (map-elt data "comments") (vconcat comments (list c-ht)))
+    (magit-dash-review--write-json-file file data)
+    (when-let* ((live-buf (find-buffer-visiting file)))
+      (with-current-buffer live-buf
+        (if (fboundp 'diff-review-refresh)
+            (diff-review-refresh)
+          (revert-buffer t t t))))
+    c-ht))
+
+;;;###autoload
+(defun magit-dash-review-critique-hunk (&optional extra-prompt review-file)
+  "Run an AI critique on the diff hunk at point and record a draft comment.
+Uses `gptel-request' when available, falling back to `agent-shell'."
+  (interactive)
+  (let* ((ctx (magit-dash-review-current-hunk))
+         (rf (expand-file-name
+              (or review-file
+                  (plist-get ctx :review-file)
+                  (magit-dash-review--current-review-file)
+                  (user-error "Not in an active diff-review session"))))
+         (path (or (plist-get ctx :path) "unknown"))
+         (line (or (plist-get ctx :line) 1))
+         (end-line (or (plist-get ctx :end-line) line))
+         (hunk (or (plist-get ctx :hunk) ""))
+         (prompt (format "Critique the following diff hunk in `%s` (lines %d-%d). Identify concrete defects, edge cases, or concurrency issues concisely.%s\n\n```diff\n%s\n```"
+                         path line end-line
+                         (if (and extra-prompt (not (string-empty-p extra-prompt)))
+                             (concat "\nFocus: " extra-prompt)
+                           "")
+                         hunk)))
+    (if (fboundp 'gptel-request)
+        (gptel-request
+         prompt
+         :callback
+         (lambda (response _info)
+           (when (and (stringp response) (not (string-empty-p (string-trim response))))
+             (magit-dash-review--insert-draft-comment
+              rf path line end-line "gptel" response))))
+      (magit-dash-review--enqueue-prompt prompt (plist-get ctx :root)))))
+
+;;;###autoload
+(defun magit-dash-review-draft-test (&optional comment-id review-file)
+  "Dispatch a DRAFT-NOT-PUSH regression test authoring task for COMMENT-ID or hunk at point."
+  (interactive)
+  (let* ((ctx (magit-dash-review-current-hunk))
+         (rf (expand-file-name
+              (or review-file
+                  (plist-get ctx :review-file)
+                  (magit-dash-review--current-review-file)
+                  (user-error "Not in an active diff-review session"))))
+         (cid (or comment-id (plist-get ctx :comment-id)))
+         (findings (magit-dash-review-extract-findings rf nil))
+         (finding (and cid (seq-find (lambda (f) (equal (plist-get f :id) cid)) findings)))
+         (worktree (or (and finding (plist-get finding :worktree))
+                       (plist-get ctx :root)
+                       default-directory))
+         (path (or (and finding (plist-get finding :path))
+                   (plist-get ctx :path)
+                   "unknown"))
+         (line (or (and finding (plist-get finding :line))
+                   (plist-get ctx :line)
+                   1))
+         (body (or (and finding (plist-get finding :body))
+                   "Write a regression test covering this change."))
+         (hunk (or (and finding (plist-get finding :hunk))
+                   (plist-get ctx :hunk)
+                   ""))
+         (prompt
+          (if (fboundp 'code-review-agents-shell-prompt)
+              (code-review-agents-shell-prompt
+               (list :id (or cid "hunk")
+                     :paths (list path)
+                     :statement body)
+               worktree)
+            (format "DRAFT-NOT-PUSH Regression Test Task\n\nWorking tree: %s\nTarget file: %s (line %d)\nReview finding: %s\n\nDiff context:\n```diff\n%s\n```\n\nInstructions:\n1. Author a deterministic regression test in `%s` that fails without the fix and passes with it.\n2. Run the test suite to verify.\n3. Leave changes uncommitted in the working tree (DRAFT-NOT-PUSH) so the reviewer can inspect them."
+                    worktree path line body hunk worktree))))
+    (magit-dash-review--enqueue-prompt prompt worktree)))
+
+;;;###autoload
+(defun magit-dash-review-promote-draft (&optional review-file comment-id)
+  "Promote a `status: \"draft\"' comment in REVIEW-FILE to `status: \"accepted\"'."
+  (interactive)
+  (let* ((ctx (magit-dash-review-current-hunk))
+         (file (expand-file-name
+                (or review-file
+                    (plist-get ctx :review-file)
+                    (magit-dash-review--current-review-file)
+                    (user-error "No active review JSON file"))))
+         (cid (or comment-id (plist-get ctx :comment-id)))
+         (data (magit-dash-review--read-json-file file))
+         (comments (append (or (map-elt data "comments") []) nil))
+         (target (if cid
+                     (seq-find (lambda (c) (equal (map-elt c "id") cid)) comments)
+                   (seq-find (lambda (c) (equal (map-elt c "status") "draft")) comments))))
+    (unless target
+      (user-error "No draft comment found to promote in %s" file))
+    (setf (map-elt target "status") "accepted")
+    (setf (map-elt data "comments") (vconcat comments))
+    (magit-dash-review--write-json-file file data)
+    (when-let* ((live-buf (find-buffer-visiting file)))
+      (with-current-buffer live-buf
+        (if (fboundp 'diff-review-refresh)
+            (diff-review-refresh)
+          (revert-buffer t t t))))
+    target))
+
+;;; EARS Criteria & code-review State Bridge
+
+(defun magit-dash-review--format-ears-criterion (crit)
+  "Format a single EARS criterion plist or alist CRIT into a markdown bullet."
+  (let ((id (or (plist-get crit :id) (map-elt crit 'id) "req"))
+        (stmt (or (plist-get crit :statement) (map-elt crit 'statement)
+                  (plist-get crit :text) (map-elt crit 'text) ""))
+        (paths (or (plist-get crit :paths) (map-elt crit 'paths))))
+    (format "- **[%s]** %s%s"
+            id stmt
+            (if paths (format " (`%s`)" (string-join paths "`, `")) ""))))
+
+;;;###autoload
+(defun magit-dash-review-project-ears-criteria (review-file &optional criteria-list local-comments)
+  "Project EARS CRITERIA-LIST and LOCAL-COMMENTS from `code-review' into REVIEW-FILE.
+Stores criteria metadata under `\"ears_criteria\"' and updates or inserts a
+review-wide summary comment thread (`id: \"ears-criteria\"')."
+  (let* ((file (expand-file-name review-file))
+         (data (magit-dash-review--read-json-file file))
+         (comments (append (or (map-elt data "comments") []) nil)))
+    (when criteria-list
+      (let* ((bullets (mapconcat #'magit-dash-review--format-ears-criterion
+                                 criteria-list "\n"))
+             (body (concat "### EARS Review Criteria\n\n" bullets))
+             (existing (seq-find (lambda (c) (equal (map-elt c "id") "ears-criteria"))
+                                 comments))
+             (c-ht (or existing (make-hash-table :test #'equal))))
+        (setf (map-elt c-ht "id") "ears-criteria")
+        (setf (map-elt c-ht "origin") "code-review")
+        (setf (map-elt c-ht "author") "code-review-criteria")
+        (setf (map-elt c-ht "at") (format-time-string "%FT%T%:z"))
+        (setf (map-elt c-ht "body") body)
+        (unless existing
+          (setf (map-elt c-ht "resolved") :false)
+          (setf (map-elt c-ht "replies") [])
+          (setq comments (cons c-ht comments)))
+        (setf (map-elt data "ears_criteria")
+              (vconcat
+               (mapcar
+                (lambda (crit)
+                  (let ((ht (make-hash-table :test #'equal)))
+                    (setf (map-elt ht "id") (or (plist-get crit :id) (map-elt crit 'id) ""))
+                    (setf (map-elt ht "statement")
+                          (or (plist-get crit :statement) (map-elt crit 'statement) ""))
+                    ht))
+                criteria-list)))))
+    (dolist (lc local-comments)
+      (let* ((cid (or (plist-get lc :id) (map-elt lc 'internal-id)
+                      (magit-dash-review--make-comment-id
+                       (format "%s:%s" (or (plist-get lc :path) (map-elt lc 'path) "")
+                               (or (plist-get lc :body) (map-elt lc 'bodyText) "")))))
+             (already (seq-find (lambda (c) (equal (map-elt c "id") cid)) comments)))
+        (unless already
+          (let ((c-ht (make-hash-table :test #'equal))
+                (path (or (plist-get lc :path) (map-elt lc 'path)))
+                (line (or (plist-get lc :line) (map-elt lc 'line)))
+                (body (or (plist-get lc :body) (map-elt lc 'bodyText) "")))
+            (setf (map-elt c-ht "id") cid)
+            (setf (map-elt c-ht "origin") "code-review")
+            (when path (setf (map-elt c-ht "path") path))
+            (when line (setf (map-elt c-ht "lines") (vector line line)))
+            (setf (map-elt c-ht "author") (or (plist-get lc :author) user-login-name))
+            (setf (map-elt c-ht "at") (format-time-string "%FT%T%:z"))
+            (setf (map-elt c-ht "body") body)
+            (setf (map-elt c-ht "resolved") :false)
+            (setf (map-elt c-ht "replies") [])
+            (setq comments (append comments (list c-ht)))))))
+    (setf (map-elt data "comments") (vconcat comments))
+    (magit-dash-review--write-json-file file data)
+    (when-let* ((live-buf (find-buffer-visiting file)))
+      (with-current-buffer live-buf
+        (if (fboundp 'diff-review-refresh)
+            (diff-review-refresh)
+          (revert-buffer t t t))))
+    data))
+
+;;;###autoload
+(defun magit-dash-review-open-backend (&optional review-file)
+  "Open the companion `code-review' buffer for REVIEW-FILE."
+  (interactive)
+  (let* ((file (expand-file-name
+                (or review-file
+                    (magit-dash-review--current-review-file)
+                    (user-error "No active review JSON file"))))
+         (data (magit-dash-review--read-json-file file))
+         (md (map-elt data "magit_dash"))
+         (url (and (hash-table-p md) (map-elt md "url")))
+         (repo (and (hash-table-p md) (map-elt md "repo")))
+         (num (and (hash-table-p md) (map-elt md "number"))))
+    (cond
+     ((and url (fboundp 'code-review-start))
+      (code-review-start url))
+     ((and repo num (fboundp 'code-review-start))
+      (code-review-start (format "https://github.com/%s/pull/%d" repo num)))
+     ((fboundp 'magit-dash-pr-dashboard-code-review)
+      (funcall 'magit-dash-pr-dashboard-code-review
+               (list :repo repo :number num)))
+     (t
+      (user-error "Cannot open code-review backend for %s" file)))))
+
+;;; ACR Unified Review Selector
+
+(defun magit-dash-review--collect-candidates (&optional root fetch-remote)
+  "Collect unified review candidates for repository at ROOT.
+Returns a list of plists `(:key :annotation :type :action :target)'."
+  (let* ((dir (and (or root default-directory)
+                   (file-directory-p (or root default-directory))
+                   (file-name-as-directory (expand-file-name (or root default-directory)))))
+         (in-git-p (and dir
+                        (zerop (call-process "git" nil nil nil "-C" dir
+                                             "rev-parse" "--is-inside-work-tree"))))
+         (candidates nil))
+
+    ;; 1. Uncommitted working-tree diff
+    (when in-git-p
+      (let ((status-out (string-trim
+                         (with-output-to-string
+                           (with-current-buffer standard-output
+                             (call-process "git" nil t nil "-C" dir "status" "--porcelain"))))))
+        (unless (string-empty-p status-out)
+          (let ((mod-count (length (split-string status-out "\n" t))))
+            (push (list :key "worktree (dirty)"
+                        :annotation (format "[worktree] %d modified file%s"
+                                            mod-count (if (= mod-count 1) "" "s"))
+                        :type 'worktree
+                        :target dir
+                        :action (lambda () (magit-dash-review-worktree-diff dir)))
+                  candidates)))))
+
+    ;; 2. Active <git-common-dir>/review/*.json files
+    (when in-git-p
+      (let* ((common-dir (ignore-errors (magit-dash-review--common-dir dir)))
+             (review-dir (and common-dir (expand-file-name "review" common-dir)))
+             (json-files (and review-dir (file-directory-p review-dir)
+                              (directory-files review-dir t "\\.json\\'"))))
+        (dolist (jf json-files)
+          (ignore-errors
+            (let* ((data (magit-dash-review--read-json-file jf))
+                   (name (file-name-sans-extension (file-name-nondirectory jf)))
+                   (viewed-ht (map-elt data "viewed"))
+                   (viewed-n (if (hash-table-p viewed-ht) (hash-table-count viewed-ht) 0))
+                   (comments (append (or (map-elt data "comments") []) nil))
+                   (open-n (seq-count (lambda (c) (not (eq (map-elt c "resolved") t))) comments))
+                   (draft-n (seq-count (lambda (c) (equal (map-elt c "status") "draft")) comments))
+                   (verdict-ht (map-elt data "verdict"))
+                   (v-state (and (hash-table-p verdict-ht) (map-elt verdict-ht "state"))))
+              (push (list :key (format "review:%s" name)
+                          :annotation (format "[review] %d viewed  %d open%s%s"
+                                              viewed-n open-n
+                                              (if (> draft-n 0) (format " (%d draft)" draft-n) "")
+                                              (if v-state (format "  [%s]" v-state) ""))
+                          :type 'review-file
+                          :target jf
+                          :action (lambda () (magit-dash-review--open-front-end jf)))
+                    candidates))))))
+
+    ;; 3. Local worktree branches
+    (when in-git-p
+      (dolist (wt (ignore-errors (magit-dash-pr--git-worktrees dir)))
+        (let ((branch (alist-get 'branch wt))
+              (wt-path (alist-get 'path wt)))
+          (when (and branch (not (member branch '("main" "master"))))
+            (push (list :key (format "branch:%s" branch)
+                        :annotation (format "[branch] %s" (or wt-path ""))
+                        :type 'branch
+                        :target branch
+                        :action (lambda ()
+                                  (if (fboundp 'diff-review-branch)
+                                      (let ((default-directory dir))
+                                        (diff-review-branch branch))
+                                    (magit-dash-review-worktree-diff (or wt-path dir)))))
+                  candidates)))))
+
+    ;; 4. Cached or remote GitHub PRs
+    (when (and in-git-p fetch-remote)
+      (let* ((slug (ignore-errors
+                     (let ((default-directory dir))
+                       (magit-dash-pr-dashboard--current-repo-slug))))
+             (prs (and slug (magit-dash-pr--fetch-repo-prs slug "open" dir))))
+        (dolist (pr prs)
+          (let ((num (map-elt pr 'number))
+                (title (or (map-elt pr 'title) ""))
+                (head (or (map-elt pr 'headRefName) "")))
+            (when num
+              (push (list :key (format "pr-%d" num)
+                          :annotation (format "[PR #%d] %s (%s)" num title head)
+                          :type 'pr
+                          :target num
+                          :action (lambda () (magit-dash-review-pr num dir)))
+                    candidates))))))
+
+    ;; 5. Staged hitl-plan items in the code-review domain
+    (when (fboundp 'hitl-plan-list)
+      (dolist (plan (ignore-errors (hitl-plan-list nil 'code-review)))
+        (let ((st (hitl-plan-status plan)))
+          (unless (memq st '(complete discarded))
+            (let* ((pid (hitl-plan-id plan))
+                   (desc (or (hitl-plan-description plan) ""))
+                   (steps (hitl-plan-steps plan))
+                   (pending (seq-count (lambda (s) (eq (hitl-plan-step-status s) 'pending))
+                                       steps)))
+              (push (list :key (format "hitl:%s" pid)
+                          :annotation (format "[HITL] %d pending steps  %s (%s)"
+                                              pending desc st)
+                          :type 'hitl-plan
+                          :target plan
+                          :action (lambda ()
+                                    (when (fboundp 'hitl-plan-review)
+                                      (hitl-plan-review plan t))
+                                    plan))
+                    candidates))))))
+
+    (nreverse candidates)))
+
+;;;###autoload
+(defun magit-dash-review-select (&optional fetch-remote)
+  "Interactively select and open a review target using `annotated-completing-read'.
+Aggregates dirty working-tree diffs, active `.git/review/*.json' files,
+local worktree branches, GitHub PRs (fetched live with prefix arg
+FETCH-REMOTE), and pending `code-review' `hitl-plan' items."
+  (interactive "P")
+  (let ((candidates (magit-dash-review--collect-candidates default-directory fetch-remote)))
+    (unless candidates
+      (user-error "No active review targets found"))
+    (let* ((table (mapcar (lambda (c)
+                            (cons (plist-get c :key) (plist-get c :annotation)))
+                          candidates))
+           (choice (if (fboundp 'annotated-completing-read)
+                       (annotated-completing-read
+                        table
+                        :prompt "Review target: "
+                        :require-match t
+                        :category 'magit-dash-review)
+                     (completing-read "Review target: " table nil t)))
+           (matched (seq-find (lambda (c) (equal (plist-get c :key) choice))
+                              candidates)))
+      (unless matched
+        (user-error "Unknown review target: %s" choice))
+      (funcall (plist-get matched :action)))))
 
 (provide 'magit-dash-review)
 ;;; magit-dash-review.el ends here
