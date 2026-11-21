@@ -55,6 +55,8 @@
 (require 'magit-dash-submodules)
 (require 'magit-dash-worktree)
 (require 'magit-dash-status)
+(require 'magit-dash-review)
+(require 'magit-dash-review-hitl)
 (require 'magit-dash-mcp nil t)
 
 (declare-function magit-status-setup-buffer "magit-status")

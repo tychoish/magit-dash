@@ -178,5 +178,479 @@
           (should (equal (map-elt (map-elt merged "magit_dash") "repo") "owner/repo"))
           (should (= (map-elt (map-elt merged "magit_dash") "number") 42)))))))
 
+(ert-deftest magit-dash-review/extract-findings-and-hunks ()
+  "magit-dash-review-extract-findings extracts unresolved threads with git diff hunks."
+  (magit-dash-review-test/with-temp-dir
+    (call-process "git" nil nil nil "init" ".")
+    (call-process "git" nil nil nil "config" "user.email" "test@example.com")
+    (call-process "git" nil nil nil "config" "user.name" "Test User")
+    (with-temp-file (expand-file-name "sample.el" default-directory)
+      (insert "(defun foo ()\n  1)\n"))
+    (call-process "git" nil nil nil "add" "sample.el")
+    (call-process "git" nil nil nil "commit" "-m" "Initial")
+    (call-process "git" nil nil nil "branch" "-M" "main")
+    (call-process "git" nil nil nil "checkout" "-b" "feature")
+    (with-temp-file (expand-file-name "sample.el" default-directory)
+      (insert "(defun foo ()\n  (+ 1 2))\n"))
+    (call-process "git" nil nil nil "commit" "-am" "Update foo")
+
+    (let* ((review-file (magit-dash-review-file default-directory 7))
+           (c-open (make-hash-table :test #'equal))
+           (c-resolved (make-hash-table :test #'equal))
+           (c-draft (make-hash-table :test #'equal))
+           (data (make-hash-table :test #'equal)))
+      (setf (map-elt c-open "id") "c01")
+      (setf (map-elt c-open "path") "sample.el")
+      (setf (map-elt c-open "lines") [2 2])
+      (setf (map-elt c-open "author") "reviewer")
+      (setf (map-elt c-open "body") "Use a constant here")
+      (setf (map-elt c-open "resolved") :false)
+      (setf (map-elt c-open "replies") [])
+
+      (setf (map-elt c-resolved "id") "c02")
+      (setf (map-elt c-resolved "path") "sample.el")
+      (setf (map-elt c-resolved "lines") [1 1])
+      (setf (map-elt c-resolved "author") "reviewer")
+      (setf (map-elt c-resolved "body") "Resolved comment")
+      (setf (map-elt c-resolved "resolved") t)
+      (setf (map-elt c-resolved "replies") [])
+
+      (setf (map-elt c-draft "id") "c03")
+      (setf (map-elt c-draft "path") "sample.el")
+      (setf (map-elt c-draft "lines") [2 2])
+      (setf (map-elt c-draft "author") "gptel")
+      (setf (map-elt c-draft "body") "Unpromoted draft")
+      (setf (map-elt c-draft "status") "draft")
+      (setf (map-elt c-draft "resolved") :false)
+      (setf (map-elt c-draft "replies") [])
+
+      (setf (map-elt data "format") "diff-review/1")
+      (setf (map-elt data "root") default-directory)
+      (setf (map-elt data "base") "main")
+      (setf (map-elt data "head") "feature")
+      (setf (map-elt data "viewed") (make-hash-table :test #'equal))
+      (setf (map-elt data "comments") (vector c-open c-resolved c-draft))
+      (magit-dash-review--write-json-file review-file data)
+
+      ;; Unresolved only excludes resolved and draft comments
+      (let ((findings (magit-dash-review-extract-findings review-file t)))
+        (should (= (length findings) 1))
+        (let ((f (car findings)))
+          (should (equal (plist-get f :id) "c01"))
+          (should (equal (plist-get f :path) "sample.el"))
+          (should (equal (plist-get f :lines) [2 2]))
+          (should (= (plist-get f :line) 2))
+          (should (equal (plist-get f :body) "Use a constant here"))
+          (should (string-match-p "(\\+ 1 2)" (plist-get f :hunk)))))
+
+      ;; All findings includes all 3
+      (let ((all-findings (magit-dash-review-extract-findings review-file nil)))
+        (should (= (length all-findings) 3))))))
+
+(ert-deftest magit-dash-review/append-reply-and-resolve-policy ()
+  "magit-dash-review-append-reply appends reply and respects auto-resolve policy."
+  (magit-dash-review-test/with-temp-dir
+    (let* ((review-file (expand-file-name "review/pr-10.json" default-directory))
+           (c1 (make-hash-table :test #'equal))
+           (data (make-hash-table :test #'equal)))
+      (setf (map-elt c1 "id") "c100")
+      (setf (map-elt c1 "path") "foo.el")
+      (setf (map-elt c1 "lines") [10 12])
+      (setf (map-elt c1 "author") "alice")
+      (setf (map-elt c1 "body") "Fix this edge case")
+      (setf (map-elt c1 "resolved") :false)
+      (setf (map-elt c1 "replies") [])
+
+      (setf (map-elt data "format") "diff-review/1")
+      (setf (map-elt data "root") default-directory)
+      (setf (map-elt data "base") "main")
+      (setf (map-elt data "head") "feat")
+      (setf (map-elt data "viewed") (make-hash-table :test #'equal))
+      (setf (map-elt data "comments") (vector c1))
+      (magit-dash-review--write-json-file review-file data)
+
+      ;; Default: magit-dash-review-agent-auto-resolve is nil -> leaves resolved :false
+      (let ((magit-dash-review-agent-auto-resolve nil))
+        (magit-dash-review-append-reply review-file "c100" "agent-shell" "Fixed in working tree")
+        (let* ((reloaded (magit-dash-review--read-json-file review-file))
+               (c (aref (map-elt reloaded "comments") 0))
+               (replies (map-elt c "replies")))
+          (should (= (length replies) 1))
+          (should (equal (map-elt (aref replies 0) "author") "agent-shell"))
+          (should (equal (map-elt (aref replies 0) "body") "Fixed in working tree"))
+          (should (eq (map-elt c "resolved") :false))))
+
+      ;; With magit-dash-review-agent-auto-resolve = t -> marks resolved t
+      (let ((magit-dash-review-agent-auto-resolve t))
+        (magit-dash-review-append-reply review-file "c100" "agent-shell" "Auto-resolved fix")
+        (let* ((reloaded (magit-dash-review--read-json-file review-file))
+               (c (aref (map-elt reloaded "comments") 0))
+               (replies (map-elt c "replies")))
+          (should (= (length replies) 2))
+          (should (eq (map-elt c "resolved") t)))))))
+
+(ert-deftest magit-dash-review/current-hunk-context ()
+  "magit-dash-review-current-hunk extracts file path, line span, and local hunk."
+  (with-temp-buffer
+    (insert "line 1\nline 2\nline 3\nline 4\n")
+    (goto-char (point-min))
+    (forward-line 1)
+    (setq-local diff-review--file-path "lisp/example.el")
+    (setq-local diff-review--hunks (list '(:line 2 :count 2 :removed ("old line 2"))))
+    (let ((ctx (magit-dash-review-current-hunk)))
+      (should (equal (plist-get ctx :path) "lisp/example.el"))
+      (should (= (plist-get ctx :line) 2))
+      (should (= (plist-get ctx :end-line) 2))
+      (should (equal (plist-get ctx :removed) '("old line 2"))))))
+
+(ert-deftest magit-dash-review/worktree-entrypoint-and-sync ()
+  "magit-dash-review-pr, magit-dash-review-worktree-diff, and magit-dash-review-sync hydrate JSON."
+  (magit-dash-review-test/with-temp-dir
+    (call-process "git" nil nil nil "init" ".")
+    (call-process "git" nil nil nil "config" "user.email" "test@example.com")
+    (call-process "git" nil nil nil "config" "user.name" "Test User")
+    (with-temp-file (expand-file-name "core.el" default-directory)
+      (insert "(provide 'core)\n"))
+    (call-process "git" nil nil nil "add" "core.el")
+    (call-process "git" nil nil nil "commit" "-m" "Init")
+
+    (let ((opened-files nil)
+          (wt-dir (expand-file-name ".wt/pr-12/" default-directory)))
+      (make-directory wt-dir t)
+      (cl-letf (((symbol-function 'diff-review-find-file)
+                 (lambda (f &rest _) (push f opened-files) (current-buffer)))
+                ((symbol-function 'magit-dash-pr--find-existing-worktree)
+                 (lambda (_dir _num _branch) wt-dir))
+                ((symbol-function 'magit-dash-review--fetch-pr-metadata)
+                 (lambda (_slug _num _dir)
+                   '((number . 12)
+                     (title . "Add review bridge")
+                     (url . "https://github.com/owner/repo/pull/12")
+                     (headRefName . "feat/bridge")
+                     (baseRefName . "main")
+                     (headRefOid . "1111111111111111111111111111111111111111")
+                     (baseRefOid . "2222222222222222222222222222222222222222"))))
+                ((symbol-function 'magit-dash-pr-fetch-threads-graphql)
+                 (lambda (_slug _num &rest _)
+                   (list (list :id "PRRT_12"
+                               :path "core.el"
+                               :line 1
+                               :resolved :false
+                               :outdated :false
+                               :author "reviewer"
+                               :body "Looks clean"
+                               :comments (vector (list :id "PRRC_12"
+                                                       :author "reviewer"
+                                                       :body "Looks clean"
+                                                       :created_at "2026-11-15T19:00:00Z")))))))
+        (let* ((rf (magit-dash-review-pr "https://github.com/owner/repo/pull/12" default-directory))
+               (data (magit-dash-review--read-json-file rf))
+               (md (map-elt data "magit_dash"))
+               (comments (map-elt data "comments")))
+          (should (member rf opened-files))
+          (should (equal (map-elt data "root") (file-name-as-directory wt-dir)))
+          (should (equal (map-elt data "head") "feat/bridge"))
+          (should (equal (map-elt md "repo") "owner/repo"))
+          (should (= (map-elt md "number") 12))
+          (should (= (length comments) 1))
+          (should (equal (map-elt (aref comments 0) "gh_thread_id") "PRRT_12")))
+
+        ;; Also test magit-dash-review-worktree-diff (omits "head")
+        (let* ((wt-rf (magit-dash-review-worktree-diff wt-dir "HEAD"))
+               (wt-data (magit-dash-review--read-json-file wt-rf)))
+          (should (equal (map-elt wt-data "root") (file-name-as-directory wt-dir)))
+          (should (equal (map-elt wt-data "base") "HEAD"))
+          (should-not (map-elt wt-data "head")))))))
+
+(ert-deftest magit-dash-review/graphql-delta-submit ()
+  "magit-dash-review-submit publishes non-draft threads, replies, resolutions, and stamps IDs."
+  (magit-dash-review-test/with-temp-dir
+    (let* ((review-file (expand-file-name "review/pr-99.json" default-directory))
+           (c-remote (make-hash-table :test #'equal))
+           (c-local (make-hash-table :test #'equal))
+           (c-draft (make-hash-table :test #'equal))
+           (local-reply (make-hash-table :test #'equal))
+           (verdict (make-hash-table :test #'equal))
+           (md (make-hash-table :test #'equal))
+           (data (make-hash-table :test #'equal))
+           (gh-calls nil))
+      ;; Existing GitHub thread: resolved locally, has 1 pending local reply
+      (setf (map-elt local-reply "id") "rep1")
+      (setf (map-elt local-reply "author") "tychoish")
+      (setf (map-elt local-reply "body") "Addressed in latest commit")
+      (setf (map-elt c-remote "id") "c-rem")
+      (setf (map-elt c-remote "gh_thread_id") "PRRT_EXISTING")
+      (setf (map-elt c-remote "gh_comment_id") "PRRC_EXISTING")
+      (setf (map-elt c-remote "gh_resolved") :false)
+      (setf (map-elt c-remote "resolved") t)
+      (setf (map-elt c-remote "path") "foo.el")
+      (setf (map-elt c-remote "lines") [10 10])
+      (setf (map-elt c-remote "author") "alice")
+      (setf (map-elt c-remote "body") "Please fix")
+      (setf (map-elt c-remote "replies") (vector local-reply))
+
+      ;; Unsynced non-draft local thread -> should be submitted
+      (setf (map-elt c-local "id") "c-loc")
+      (setf (map-elt c-local "origin") "local")
+      (setf (map-elt c-local "path") "bar.el")
+      (setf (map-elt c-local "lines") [20 25])
+      (setf (map-elt c-local "author") "tychoish")
+      (setf (map-elt c-local "body") "New inline comment")
+      (setf (map-elt c-local "resolved") :false)
+      (setf (map-elt c-local "replies") [])
+
+      ;; Unpromoted draft thread -> MUST be excluded from GraphQL submission
+      (setf (map-elt c-draft "id") "c-drf")
+      (setf (map-elt c-draft "status") "draft")
+      (setf (map-elt c-draft "path") "bar.el")
+      (setf (map-elt c-draft "lines") [30 30])
+      (setf (map-elt c-draft "author") "gptel")
+      (setf (map-elt c-draft "body") "Unpromoted AI draft")
+      (setf (map-elt c-draft "resolved") :false)
+      (setf (map-elt c-draft "replies") [])
+
+      (setf (map-elt verdict "state") "approved")
+      (setf (map-elt md "repo") "owner/repo")
+      (setf (map-elt md "number") 99)
+      (setf (map-elt md "pr_node_id") "PR_kwDO99")
+      (setf (map-elt data "format") "diff-review/1")
+      (setf (map-elt data "root") default-directory)
+      (setf (map-elt data "base") "main")
+      (setf (map-elt data "head") "feat")
+      (setf (map-elt data "magit_dash") md)
+      (setf (map-elt data "verdict") verdict)
+      (setf (map-elt data "viewed") (make-hash-table :test #'equal))
+      (setf (map-elt data "comments") (vector c-remote c-local c-draft))
+      (magit-dash-review--write-json-file review-file data)
+
+      (cl-letf (((symbol-function 'magit-dash-gh--call-process)
+                 (lambda (args _dir)
+                   (push args gh-calls)
+                   (let ((joined (string-join args " ")))
+                     (cond
+                      ((string-match-p "addPullRequestReview(" joined)
+                       ;; Ensure draft thread was excluded from payload
+                       (should-not (string-match-p "Unpromoted AI draft" joined))
+                       (should (string-match-p "New inline comment" joined))
+                       (should (string-match-p "APPROVE" joined))
+                       (cons 0 (json-serialize
+                                '((data . ((addPullRequestReview .
+                                            ((pullRequestReview .
+                                              ((id . "PRR_1")
+                                               (state . "APPROVED")
+                                               (comments .
+                                                ((nodes . [((id . "PRRC_NEW_1")
+                                                            (path . "bar.el")
+                                                            (body . "New inline comment")
+                                                            (pullRequestReviewThread . ((id . "PRRT_NEW_1"))))])))))))))))))
+                      ((string-match-p "addPullRequestReviewThreadReply" joined)
+                       (cons 0 (json-serialize
+                                '((data . ((addPullRequestReviewThreadReply .
+                                            ((comment . ((id . "PRRC_REPLY_1")))))))))))
+                      ((string-match-p "resolveReviewThread" joined)
+                       (cons 0 (json-serialize
+                                '((data . ((resolveReviewThread .
+                                            ((thread . ((id . "PRRT_EXISTING")
+                                                        (isResolved . t)))))))))))
+                      (t (error "Unexpected gh call: %S" args)))))))
+        (magit-dash-review-submit review-file "LGTM overall")
+        (should (= (length gh-calls) 3))
+        (let* ((reloaded (magit-dash-review--read-json-file review-file))
+               (comments (append (map-elt reloaded "comments") nil))
+               (rem (seq-find (lambda (c) (equal (map-elt c "id") "c-rem")) comments))
+               (loc (seq-find (lambda (c) (equal (map-elt c "id") "c-loc")) comments))
+               (drf (seq-find (lambda (c) (equal (map-elt c "id") "c-drf")) comments)))
+          ;; Post-submit IDs stamped onto c-local
+          (should (equal (map-elt loc "gh_thread_id") "PRRT_NEW_1"))
+          (should (equal (map-elt loc "gh_comment_id") "PRRC_NEW_1"))
+          (should (equal (map-elt loc "origin") "github"))
+          ;; Draft thread remains untouched with no gh_thread_id
+          (should-not (map-elt drf "gh_thread_id"))
+          ;; Reply ID and resolution stamped onto c-remote
+          (should (eq (map-elt rem "gh_resolved") t))
+          (should (equal (map-elt (aref (map-elt rem "replies") 0) "gh_comment_id")
+                         "PRRC_REPLY_1")))))))
+
+(ert-deftest magit-dash-review/send-to-agent-and-enqueue-asq ()
+  "magit-dash-review-send-to-agent and magit-dash-review-enqueue-asq group and dispatch findings."
+  (magit-dash-review-test/with-temp-dir
+    (let* ((review-file (expand-file-name "review/pr-33.json" default-directory))
+           (c1 (make-hash-table :test #'equal))
+           (c2 (make-hash-table :test #'equal))
+           (c3 (make-hash-table :test #'equal))
+           (data (make-hash-table :test #'equal))
+           (enqueued nil))
+      (setf (map-elt c1 "id") "f1")
+      (setf (map-elt c1 "path") "a.el")
+      (setf (map-elt c1 "lines") [1 2])
+      (setf (map-elt c1 "author") "tychoish")
+      (setf (map-elt c1 "body") "Fix a.el part 1")
+      (setf (map-elt c1 "resolved") :false)
+      (setf (map-elt c1 "replies") [])
+
+      (setf (map-elt c2 "id") "f2")
+      (setf (map-elt c2 "path") "a.el")
+      (setf (map-elt c2 "lines") [10 12])
+      (setf (map-elt c2 "author") "tychoish")
+      (setf (map-elt c2 "body") "Fix a.el part 2")
+      (setf (map-elt c2 "resolved") :false)
+      (setf (map-elt c2 "replies") [])
+
+      (setf (map-elt c3 "id") "f3")
+      (setf (map-elt c3 "path") "b.el")
+      (setf (map-elt c3 "lines") [5 5])
+      (setf (map-elt c3 "author") "tychoish")
+      (setf (map-elt c3 "body") "Fix b.el")
+      (setf (map-elt c3 "resolved") :false)
+      (setf (map-elt c3 "replies") [])
+
+      (setf (map-elt data "format") "diff-review/1")
+      (setf (map-elt data "root") default-directory)
+      (setf (map-elt data "base") "main")
+      (setf (map-elt data "head") "feat")
+      (setf (map-elt data "viewed") (make-hash-table :test #'equal))
+      (setf (map-elt data "comments") (vector c1 c2 c3))
+      (magit-dash-review--write-json-file review-file data)
+
+      (let ((magit-dash-review-asq-enqueue-function
+             (lambda (prompt wt)
+               (push (cons prompt wt) enqueued))))
+        ;; Per-file grouping produces 2 items (a.el and b.el)
+        (magit-dash-review-enqueue-asq review-file 'per-file)
+        (should (= (length enqueued) 2))
+        ;; Per-thread grouping produces 3 items
+        (setq enqueued nil)
+        (magit-dash-review-enqueue-asq review-file 'per-thread)
+        (should (= (length enqueued) 3)))
+
+      ;; When all comments are resolved, send-to-agent signals user-error
+      (setf (map-elt c1 "resolved") t)
+      (setf (map-elt c2 "resolved") t)
+      (setf (map-elt c3 "resolved") t)
+      (magit-dash-review--write-json-file review-file data)
+      (should-error (magit-dash-review-send-to-agent 'workflow review-file)
+                    :type 'user-error))))
+
+(ert-deftest magit-dash-review/hunk-critique-draft-test-and-promote ()
+  "magit-dash-review-critique-hunk inserts draft comment; promote-draft promotes it; draft-test queues prompt."
+  (magit-dash-review-test/with-temp-dir
+    (let* ((review-file (expand-file-name "review/pr-44.json" default-directory))
+           (data (make-hash-table :test #'equal))
+           (enqueued nil))
+      (setf (map-elt data "format") "diff-review/1")
+      (setf (map-elt data "root") default-directory)
+      (setf (map-elt data "base") "main")
+      (setf (map-elt data "head") "feat")
+      (setf (map-elt data "viewed") (make-hash-table :test #'equal))
+      (setf (map-elt data "comments") [])
+      (magit-dash-review--write-json-file review-file data)
+
+      ;; 1. Critique hunk via mocked gptel-request
+      (cl-letf (((symbol-function 'gptel-request)
+                 (lambda (_prompt &rest args)
+                   (let ((cb (plist-get args :callback)))
+                     (funcall cb "Potential race condition when buffer is killed." nil))))
+                ((symbol-function 'magit-dash-review-current-hunk)
+                 (lambda ()
+                   (list :review-file review-file
+                         :root default-directory
+                         :path "lisp/worker.el"
+                         :line 40
+                         :end-line 48
+                         :hunk "@@ -40,3 +40,5 @@"))))
+        (magit-dash-review-critique-hunk "check race conditions" review-file)
+        (let* ((reloaded (magit-dash-review--read-json-file review-file))
+               (comments (map-elt reloaded "comments")))
+          (should (= (length comments) 1))
+          (let* ((c (aref comments 0))
+                 (cid (map-elt c "id")))
+            (should (equal (map-elt c "status") "draft"))
+            (should (equal (map-elt c "path") "lisp/worker.el"))
+            (should (equal (map-elt c "lines") [40 48]))
+            (should (string-match-p "race condition" (map-elt c "body")))
+
+            ;; 2. Promote draft comment to accepted
+            (magit-dash-review-promote-draft review-file cid)
+            (let* ((after-promote (magit-dash-review--read-json-file review-file))
+                   (cp (aref (map-elt after-promote "comments") 0)))
+              (should (equal (map-elt cp "status") "accepted")))
+
+            ;; 3. Draft regression test in worktree
+            (let ((magit-dash-review-asq-enqueue-function
+                   (lambda (prompt wt)
+                     (push (cons prompt wt) enqueued))))
+              (magit-dash-review-draft-test cid review-file)
+              (should (= (length enqueued) 1))
+              (should (string-match-p "lisp/worker.el" (caar enqueued))))))))))
+
+(ert-deftest magit-dash-review/project-ears-criteria-and-local-comments ()
+  "magit-dash-review-project-ears-criteria bridges EARS requirements and local code-review comments."
+  (magit-dash-review-test/with-temp-dir
+    (let* ((review-file (expand-file-name "review/pr-60.json" default-directory))
+           (data (make-hash-table :test #'equal)))
+      (setf (map-elt data "format") "diff-review/1")
+      (setf (map-elt data "root") default-directory)
+      (setf (map-elt data "base") "main")
+      (setf (map-elt data "head") "feat")
+      (setf (map-elt data "viewed") (make-hash-table :test #'equal))
+      (setf (map-elt data "comments") [])
+      (magit-dash-review--write-json-file review-file data)
+
+      (let ((criteria (list '(:id "req-001"
+                              :statement "WHEN a thread is draft THE SYSTEM SHALL exclude it from GitHub submit."
+                              :paths ("magit-dash-review.el"))))
+            (local-comments (list '(:id "cr-local-1"
+                                    :path "magit-dash-review.el"
+                                    :line 12
+                                    :author "tychoish"
+                                    :body "Bridged from code-review"))))
+        (magit-dash-review-project-ears-criteria review-file criteria local-comments)
+        (let* ((reloaded (magit-dash-review--read-json-file review-file))
+               (comments (append (map-elt reloaded "comments") nil))
+               (ears-vec (map-elt reloaded "ears_criteria"))
+               (ears-c (seq-find (lambda (c) (equal (map-elt c "id") "ears-criteria")) comments))
+               (bridged-c (seq-find (lambda (c) (equal (map-elt c "id") "cr-local-1")) comments)))
+          (should (= (length ears-vec) 1))
+          (should ears-c)
+          (should (string-match-p "req-001" (map-elt ears-c "body")))
+          (should bridged-c)
+          (should (equal (map-elt bridged-c "path") "magit-dash-review.el"))
+          (should (equal (map-elt bridged-c "body") "Bridged from code-review")))))))
+
+(ert-deftest magit-dash-review/acr-unified-review-selector ()
+  "magit-dash-review-select collects dirty worktree, review JSON files, and dispatches selection."
+  (magit-dash-review-test/with-temp-dir
+    (call-process "git" nil nil nil "init" ".")
+    (call-process "git" nil nil nil "config" "user.email" "test@example.com")
+    (call-process "git" nil nil nil "config" "user.name" "Test User")
+    (with-temp-file (expand-file-name "main.el" default-directory)
+      (insert ";; initial\n"))
+    (call-process "git" nil nil nil "add" "main.el")
+    (call-process "git" nil nil nil "commit" "-m" "Init")
+    ;; Make working tree dirty
+    (with-temp-file (expand-file-name "main.el" default-directory)
+      (insert ";; modified\n"))
+    ;; Create an active review JSON file
+    (let* ((review-file (magit-dash-review-file default-directory 77))
+           (data (make-hash-table :test #'equal)))
+      (setf (map-elt data "format") "diff-review/1")
+      (setf (map-elt data "root") default-directory)
+      (setf (map-elt data "base") "main")
+      (setf (map-elt data "head") "feat-77")
+      (setf (map-elt data "viewed") (make-hash-table :test #'equal))
+      (setf (map-elt data "comments") [])
+      (magit-dash-review--write-json-file review-file data)
+
+      (let ((cands (magit-dash-review--collect-candidates default-directory nil))
+            (opened nil))
+        (should (seq-find (lambda (c) (equal (plist-get c :key) "worktree (dirty)")) cands))
+        (should (seq-find (lambda (c) (equal (plist-get c :key) "review:pr-77")) cands))
+        (cl-letf (((symbol-function 'annotated-completing-read)
+                   (lambda (_table &rest _) "review:pr-77"))
+                  ((symbol-function 'magit-dash-review--open-front-end)
+                   (lambda (f) (setq opened f))))
+          (magit-dash-review-select nil)
+          (should (equal opened review-file)))))))
+
 (provide 'test-magit-dash-review)
 ;;; test-magit-dash-review.el ends here

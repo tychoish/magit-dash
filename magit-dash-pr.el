@@ -56,6 +56,7 @@
 (declare-function magit-dash-worktree-symlink-worktree "magit-dash-worktree")
 (declare-function magit-dash-worktree-main-dir "magit-dash-worktree")
 (declare-function magit-dash-gh-actions-fetch-for-pr "magit-dash-gh-actions")
+(declare-function magit-dash-review-pr "magit-dash-review" (&optional pr-number-or-url repo-dir))
 (declare-function code-review-start "code-review" (url))
 
 (defun magit-dash-pr-code-review-available-p ()
@@ -586,8 +587,11 @@ Uses active columns.  WIDTH is available window width; when nil,
                     active))))
 
 (defun magit-dash-pr-dashboard--setup-code-review-keys ()
-  "Bind or unbind code-review keys in `magit-dash-pr-dashboard-mode-map'."
+  "Bind or unbind review keys in `magit-dash-pr-dashboard-mode-map'."
   (when (boundp 'magit-dash-pr-dashboard-mode-map)
+    (keymap-set magit-dash-pr-dashboard-mode-map "V"   #'magit-dash-pr-dashboard-diff-review)
+    (keymap-set magit-dash-pr-dashboard-mode-map "c v" #'magit-dash-pr-dashboard-diff-review)
+    (keymap-set magit-dash-pr-dashboard-mode-map "v v" #'magit-dash-pr-dashboard-diff-review)
     (if (magit-dash-pr-code-review-available-p)
         (progn
           (keymap-set magit-dash-pr-dashboard-mode-map "R" #'magit-dash-pr-dashboard-code-review)
@@ -602,6 +606,8 @@ Uses active columns.  WIDTH is available window width; when nil,
     (when (magit-dash-pr-code-review-available-p)
       (keymap-set m "R"   #'magit-dash-pr-dashboard-code-review)
       (keymap-set m "c r" #'magit-dash-pr-dashboard-code-review))
+    (keymap-set m "V"   #'magit-dash-pr-dashboard-diff-review)
+    (keymap-set m "c v" #'magit-dash-pr-dashboard-diff-review)
     (keymap-set m "w"   #'magit-dash-pr-dashboard-open-worktree)
     (keymap-set m "c w" #'magit-dash-pr-dashboard-create-worktree)
     (keymap-set m "c a" #'magit-dash-pr-dashboard-create-all-worktrees)
@@ -620,6 +626,7 @@ Uses active columns.  WIDTH is available window width; when nil,
     (keymap-set m "v o"   #'magit-dash-pr-toggle-org)
     (keymap-set m "v t"   #'magit-dash-pr-toggle-column)
     (keymap-set m "v s"   #'magit-dash-pr-dashboard-switch-view)
+    (keymap-set m "v v"   #'magit-dash-pr-dashboard-diff-review)
     (keymap-set m "g"   #'magit-dash-pr-dashboard-refresh)
     (keymap-set m "r"   #'magit-dash-pr-dashboard-refresh)
     (keymap-set m "f"   (cons "filter" (make-sparse-keymap)))
@@ -1187,6 +1194,24 @@ cannot be loaded."
     (unless url
       (user-error "No pull request URL found for entry"))
     (magit-dash-pr-code-review url)))
+
+;;;###autoload
+(defalias 'magit-dash-gh-pr-dashboard-code-review #'magit-dash-pr-dashboard-code-review)
+
+;;;###autoload
+(defun magit-dash-pr-dashboard-diff-review (&optional entry)
+  "Open a native-buffer `diff-review' session for the pull request at point (or ENTRY)."
+  (interactive)
+  (require 'magit-dash-review)
+  (let* ((ent (or entry (magit-dash-pr-dashboard--entry-at-point)))
+         (repo (and (listp ent) (plist-get ent :repo)))
+         (local-path (and repo (magit-dash-pr-dashboard--find-local-path repo))))
+    (unless ent
+      (user-error "No pull request entry at point"))
+    (magit-dash-review-pr ent (or local-path default-directory))))
+
+;;;###autoload
+(defalias 'magit-dash-gh-pr-dashboard-diff-review #'magit-dash-pr-dashboard-diff-review)
 
 (defun magit-dash-pr-dashboard-set-filter ()
   "Interactively set one PR dashboard filter field."
@@ -2189,6 +2214,7 @@ Signals `user-error' when not found."
 Key groups mirror `magit-dash-menu': w worktree, c CI, f filter, m mark."
   [["Pull Request"
     ("b"   "Open in browser"          magit-dash-pr-dashboard-open-browser)
+    ("V"   "Open in diff-review"      magit-dash-pr-dashboard-diff-review)
     ("R"   "Open in code-review"      magit-dash-pr-dashboard-code-review
      :if magit-dash-pr-code-review-available-p)]
    ["Mark / Bulk"
