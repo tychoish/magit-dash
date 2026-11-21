@@ -568,5 +568,369 @@ Returns a plist (:review-file :root :base :head :path :line :end-line :hunk
           :comment-id comment-id
           :removed removed)))
 
+;;; PR Worktree Orchestration, Hydration, and Front-End Entrypoints
+
+(defun magit-dash-review--parse-pr-target (pr-number-or-url &optional repo-dir)
+  "Normalize PR-NUMBER-OR-URL and REPO-DIR into `(:number :repo :repo-dir :pr)'."
+  (let* ((dir (expand-file-name
+               (or repo-dir
+                   (and (fboundp 'magit-dash-worktree-main-dir)
+                        (ignore-errors (magit-dash-worktree-main-dir default-directory)))
+                   default-directory)))
+         (slug nil)
+         (num nil)
+         (pr-data nil))
+    (cond
+     ((and (listp pr-number-or-url) (plist-get pr-number-or-url :number))
+      (setq num (plist-get pr-number-or-url :number)
+            slug (plist-get pr-number-or-url :repo)
+            pr-data (plist-get pr-number-or-url :pr)))
+     ((integerp pr-number-or-url)
+      (setq num pr-number-or-url))
+     ((and (stringp pr-number-or-url)
+           (string-match "github\\.com/\\([^/]+/[^/]+\\)/pull/\\([0-9]+\\)" pr-number-or-url))
+      (setq slug (match-string 1 pr-number-or-url)
+            num (string-to-number (match-string 2 pr-number-or-url))))
+     ((and (stringp pr-number-or-url)
+           (string-match "\\`#?\\([0-9]+\\)\\'" (string-trim pr-number-or-url)))
+      (setq num (string-to-number (match-string 1 (string-trim pr-number-or-url))))))
+    (unless slug
+      (setq slug (or (ignore-errors
+                       (let ((default-directory dir))
+                         (magit-dash-pr-dashboard--current-repo-slug)))
+                     "local/repo")))
+    (unless (and (integerp num) (> num 0))
+      (error "Invalid pull request number or URL: %S" pr-number-or-url))
+    (list :number num :repo slug :repo-dir dir :pr pr-data)))
+
+(defun magit-dash-review--fetch-pr-metadata (slug pr-number repo-dir)
+  "Fetch pull request metadata for PR-NUMBER in SLUG via `gh pr view'."
+  (pcase-let ((`(,code . ,output)
+               (magit-dash-gh--call-process
+                (list "pr" "view" (number-to-string pr-number)
+                      "-R" slug
+                      "--json" "number,title,url,headRefName,baseRefName,headRefOid,baseRefOid,state,reviewDecision")
+                repo-dir)))
+    (unless (zerop code)
+      (error "Failed to fetch PR metadata for %s#%d: %s" slug pr-number output))
+    (json-parse-string output :object-type 'alist)))
+
+(defun magit-dash-review--open-front-end (review-file)
+  "Open REVIEW-FILE in `diff-review-find-file' when available, else `find-file'."
+  (if (fboundp 'diff-review-find-file)
+      (diff-review-find-file review-file)
+    (find-file-noselect review-file))
+  review-file)
+
+;;;###autoload
+(defun magit-dash-review-pr (&optional pr-number-or-url repo-dir)
+  "Hydrate and open a native-buffer `diff-review' session for PR-NUMBER-OR-URL.
+Reuses or creates the `.wt/pr-<num>' worktree via `magit-dash-pr', fetches
+PR metadata and GraphQL reviewThreads, performs a three-way merge into
+`<git-common-dir>/review/pr-<num>.json', and opens `diff-review-find-file'."
+  (interactive
+   (list (read-string "PR number or URL: ") default-directory))
+  (let* ((target (magit-dash-review--parse-pr-target pr-number-or-url repo-dir))
+         (pr-num (plist-get target :number))
+         (slug (plist-get target :repo))
+         (dir (plist-get target :repo-dir))
+         (pr-info (or (plist-get target :pr)
+                      (magit-dash-review--fetch-pr-metadata slug pr-num dir)))
+         (head-ref (or (map-elt pr-info 'headRefName) (format "pr-%d" pr-num)))
+         (base-ref (or (map-elt pr-info 'baseRefName) "main"))
+         (head-oid (map-elt pr-info 'headRefOid))
+         (base-oid (map-elt pr-info 'baseRefOid))
+         (url (map-elt pr-info 'url))
+         (existing-wt (magit-dash-pr--find-existing-worktree dir pr-num head-ref))
+         (wt-dir (or existing-wt
+                     (ignore-errors
+                       (magit-dash-pr--create-worktree-for-entry
+                        (list :number pr-num :repo slug :pr pr-info) nil))
+                     dir))
+         (raw-threads (or (ignore-errors
+                            (magit-dash-pr-fetch-threads-graphql slug pr-num 50 4000 dir t))
+                          nil))
+         (transcoded (mapcar
+                      (lambda (node)
+                        (magit-dash-review--transcode-thread node wt-dir head-oid base-oid))
+                      raw-threads))
+         (review-file (magit-dash-review-file dir pr-num))
+         (existing-ht (and (file-exists-p review-file)
+                           (magit-dash-review--read-json-file review-file)))
+         (remote-meta (list :repo slug
+                            :number pr-num
+                            :url url
+                            :worktree (file-name-as-directory (expand-file-name wt-dir))
+                            :head-ref head-ref
+                            :base-ref base-ref
+                            :head_oid head-oid
+                            :base_oid base-oid))
+         (merged (magit-dash-review--merge-json existing-ht remote-meta transcoded)))
+    (magit-dash-review--write-json-file review-file merged)
+    (magit-dash-review--open-front-end review-file)))
+
+;;;###autoload
+(defun magit-dash-review-worktree-diff (&optional worktree-dir base-ref)
+  "Open a `diff-review' session for uncommitted changes in WORKTREE-DIR.
+Writes `<git-common-dir>/review/worktree-<name>.json' with `head' omitted
+so `diff-review' compares the live working tree against BASE-REF (default
+\"HEAD\")."
+  (interactive)
+  (let* ((wt-dir (file-name-as-directory
+                  (expand-file-name (or worktree-dir default-directory))))
+         (wt-name (file-name-nondirectory (directory-file-name wt-dir)))
+         (common-dir (magit-dash-review--common-dir wt-dir))
+         (review-file (expand-file-name
+                       (format "review/worktree-%s.json" wt-name)
+                       common-dir))
+         (existing-ht (and (file-exists-p review-file)
+                           (magit-dash-review--read-json-file review-file)))
+         (data (or existing-ht (make-hash-table :test #'equal))))
+    (setf (map-elt data "format") "diff-review/1")
+    (setf (map-elt data "root") wt-dir)
+    (setf (map-elt data "base") (or base-ref (and existing-ht (map-elt existing-ht "base")) "HEAD"))
+    (map-delete data "head")
+    (unless (hash-table-p (map-elt data "viewed"))
+      (setf (map-elt data "viewed") (make-hash-table :test #'equal)))
+    (unless (vectorp (map-elt data "comments"))
+      (setf (map-elt data "comments") []))
+    (magit-dash-review--write-json-file review-file data)
+    (magit-dash-review--open-front-end review-file)))
+
+;;;###autoload
+(defun magit-dash-review-sync (&optional review-file)
+  "Refetch remote PR threads and metadata and three-way merge into REVIEW-FILE."
+  (interactive)
+  (let* ((file (expand-file-name
+                (or review-file
+                    (magit-dash-review--current-review-file)
+                    (user-error "No active review JSON file to sync"))))
+         (existing-ht (magit-dash-review--read-json-file file))
+         (md (map-elt existing-ht "magit_dash"))
+         (slug (and md (map-elt md "repo")))
+         (pr-num (and md (map-elt md "number")))
+         (wt-dir (or (and md (map-elt md "worktree"))
+                     (map-elt existing-ht "root")
+                     default-directory)))
+    (unless (and slug pr-num)
+      (user-error "Review file %s has no `magit_dash' PR metadata to sync" file))
+    (let* ((pr-info (magit-dash-review--fetch-pr-metadata slug pr-num wt-dir))
+           (head-oid (or (map-elt pr-info 'headRefOid) (map-elt md "head_oid")))
+           (base-oid (or (map-elt pr-info 'baseRefOid) (map-elt md "base_oid")))
+           (raw-threads (magit-dash-pr-fetch-threads-graphql slug pr-num 50 4000 wt-dir t))
+           (transcoded (mapcar
+                        (lambda (node)
+                          (magit-dash-review--transcode-thread node wt-dir head-oid base-oid))
+                        raw-threads))
+           (remote-meta (list :repo slug
+                              :number pr-num
+                              :url (or (map-elt pr-info 'url) (map-elt md "url"))
+                              :worktree wt-dir
+                              :head-ref (or (map-elt pr-info 'headRefName) (map-elt existing-ht "head"))
+                              :base-ref (or (map-elt pr-info 'baseRefName) (map-elt existing-ht "base"))
+                              :head_oid head-oid
+                              :base_oid base-oid))
+           (merged (magit-dash-review--merge-json existing-ht remote-meta transcoded)))
+      (magit-dash-review--write-json-file file merged)
+      (when-let* ((live-buf (find-buffer-visiting file)))
+        (with-current-buffer live-buf
+          (if (fboundp 'diff-review-refresh)
+              (diff-review-refresh)
+            (revert-buffer t t t))))
+      file)))
+
+;;; GraphQL Delta Submission
+
+(defun magit-dash-review--verdict-to-gh-event (verdict-ht)
+  "Map VERDICT-HT state to a GitHub GraphQL PullRequestReviewEvent string."
+  (let ((state (and (hash-table-p verdict-ht) (map-elt verdict-ht "state"))))
+    (pcase state
+      ("approved" "APPROVE")
+      ("changes" "REQUEST_CHANGES")
+      (_ "COMMENT"))))
+
+(defun magit-dash-review--collect-unsynced-threads (comments)
+  "Return non-draft local comments in COMMENTS lacking a `gh_thread_id'."
+  (seq-filter
+   (lambda (c)
+     (let ((gh-id (map-elt c "gh_thread_id"))
+           (status (map-elt c "status"))
+           (path (map-elt c "path")))
+       (and (or (null gh-id) (string-empty-p gh-id))
+            (not (equal status "draft"))
+            path (not (string-empty-p path)))))
+   (append (or comments []) nil)))
+
+(defun magit-dash-review--fetch-pr-node-id (slug pr-number dir)
+  "Fetch the GraphQL node ID for PR-NUMBER in SLUG."
+  (pcase-let* ((parts (split-string slug "/"))
+               (owner (car parts))
+               (repo (cadr parts))
+               (query "query($owner:String! $repo:String! $number:Int!){
+  repository(owner:$owner name:$repo){
+    pullRequest(number:$number){ id }
+  }
+}")
+               (`(,code . ,output)
+                (magit-dash-gh--call-process
+                 (list "api" "graphql"
+                       "-f" (concat "query=" query)
+                       "-F" (concat "owner=" owner)
+                       "-F" (concat "repo=" repo)
+                       "-F" (format "number=%d" pr-number))
+                 dir)))
+    (unless (zerop code)
+      (error "Failed to fetch PR node ID for %s#%d: %s" slug pr-number output))
+    (let ((parsed (json-parse-string output :object-type 'alist)))
+      (or (map-nested-elt parsed '(data repository pullRequest id))
+          (error "Missing pullRequest.id in GraphQL response: %s" output)))))
+
+;;;###autoload
+(defun magit-dash-review-submit (&optional review-file feedback)
+  "Publish unsynced non-draft threads, replies, resolutions, and verdict in REVIEW-FILE.
+Excludes comments with `status: \"draft\"'.  Stamps returned GitHub GraphQL
+node IDs back into REVIEW-FILE."
+  (interactive
+   (list (or (magit-dash-review--current-review-file)
+             (user-error "No active review JSON file to submit"))
+         (read-string "Overall review summary (optional): ")))
+  (let* ((file (expand-file-name
+                (or review-file
+                    (magit-dash-review--current-review-file)
+                    (user-error "No active review JSON file to submit"))))
+         (data (magit-dash-review--read-json-file file))
+         (md (map-elt data "magit_dash"))
+         (slug (and md (map-elt md "repo")))
+         (pr-num (and md (map-elt md "number")))
+         (dir (or (and md (map-elt md "worktree"))
+                  (map-elt data "root")
+                  default-directory))
+         (comments (append (or (map-elt data "comments") []) nil))
+         (verdict-ht (map-elt data "verdict"))
+         (new-threads (magit-dash-review--collect-unsynced-threads comments))
+         (event (magit-dash-review--verdict-to-gh-event verdict-ht)))
+    (unless (and slug pr-num)
+      (user-error "Review file %s lacks `magit_dash' PR metadata" file))
+
+    ;; 1. Submit new threads and/or verdict via addPullRequestReview
+    (when (or new-threads verdict-ht (and feedback (not (string-empty-p feedback))))
+      (let* ((pr-id (or (map-elt md "pr_node_id")
+                        (magit-dash-review--fetch-pr-node-id slug pr-num dir)))
+             (threads-payload
+              (vconcat
+               (mapcar
+                (lambda (c)
+                  (let* ((t-ht (make-hash-table :test #'equal))
+                         (lines (map-elt c "lines"))
+                         (l1 (and (vectorp lines) (>= (length lines) 1) (aref lines 0)))
+                         (l2 (and (vectorp lines) (>= (length lines) 2) (aref lines 1))))
+                    (setf (map-elt t-ht "path") (map-elt c "path"))
+                    (when l2 (setf (map-elt t-ht "line") l2))
+                    (when (and l1 l2 (< l1 l2))
+                      (setf (map-elt t-ht "startLine") l1))
+                    (setf (map-elt t-ht "body") (or (map-elt c "body") ""))
+                    t-ht))
+                new-threads)))
+             (input-ht (make-hash-table :test #'equal))
+             (payload-ht (make-hash-table :test #'equal))
+             (vars-ht (make-hash-table :test #'equal))
+             (mutation "mutation($input:AddPullRequestReviewInput!){
+  addPullRequestReview(input:$input){
+    pullRequestReview{
+      id
+      state
+      comments(first:50){
+        nodes{ id path body pullRequestReviewThread{ id } }
+      }
+    }
+  }
+}"))
+        (setf (map-elt input-ht "pullRequestId") pr-id)
+        (setf (map-elt input-ht "event") event)
+        (when (and feedback (not (string-empty-p feedback)))
+          (setf (map-elt input-ht "body") feedback))
+        (when (> (length threads-payload) 0)
+          (setf (map-elt input-ht "threads") threads-payload))
+        (setf (map-elt vars-ht "input") input-ht)
+        (setf (map-elt payload-ht "query") mutation)
+        (setf (map-elt payload-ht "variables") vars-ht)
+        (pcase-let ((`(,code . ,output)
+                     (magit-dash-gh--call-process
+                      (list "api" "graphql"
+                            "-f" (concat "query=" mutation)
+                            "-F" (format "input=%s" (json-serialize input-ht)))
+                      dir)))
+          (unless (zerop code)
+            (error "Failed to submit pull request review: %s" output))
+          (let* ((resp (json-parse-string output :object-type 'alist :array-type 'list))
+                 (ret-nodes (map-nested-elt resp '(data addPullRequestReview pullRequestReview comments nodes))))
+            (cl-loop for local-c in new-threads
+                     for idx from 0
+                     for remote-node = (nth idx ret-nodes)
+                     when remote-node do
+                     (let ((cid (map-elt remote-node 'id))
+                           (tid (map-nested-elt remote-node '(pullRequestReviewThread id))))
+                       (when tid (setf (map-elt local-c "gh_thread_id") tid))
+                       (when cid (setf (map-elt local-c "gh_comment_id") cid))
+                       (setf (map-elt local-c "origin") "github")
+                       (setf (map-elt local-c "gh_resolved") :false)))))))
+
+    ;; 2. Submit pending replies on existing GitHub threads
+    (dolist (c comments)
+      (let ((tid (map-elt c "gh_thread_id")))
+        (when (and tid (not (string-empty-p tid)))
+          (dolist (reply (append (or (map-elt c "replies") []) nil))
+            (let ((rcid (map-elt reply "gh_comment_id"))
+                  (rstatus (map-elt reply "status")))
+              (when (and (or (null rcid) (string-empty-p rcid))
+                         (not (equal rstatus "draft")))
+                (let ((reply-mutation "mutation($threadId:ID! $body:String!){
+  addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$threadId body:$body}){
+    comment{ id }
+  }
+}"))
+                  (pcase-let ((`(,code . ,output)
+                               (magit-dash-gh--call-process
+                                (list "api" "graphql"
+                                      "-f" (concat "query=" reply-mutation)
+                                      "-F" (concat "threadId=" tid)
+                                      "-F" (concat "body=" (or (map-elt reply "body") "")))
+                                dir)))
+                    (unless (zerop code)
+                      (error "Failed to submit thread reply on %s: %s" tid output))
+                    (let* ((resp (json-parse-string output :object-type 'alist))
+                           (new-cid (map-nested-elt resp '(data addPullRequestReviewThreadReply comment id))))
+                      (when new-cid
+                        (setf (map-elt reply "gh_comment_id") new-cid)))))))))))
+
+    ;; 3. Submit thread resolution changes
+    (dolist (c comments)
+      (let ((tid (map-elt c "gh_thread_id")))
+        (when (and tid (not (string-empty-p tid)))
+          (let ((local-res (eq (map-elt c "resolved") t))
+                (remote-res (eq (map-elt c "gh_resolved") t)))
+            (unless (eq local-res remote-res)
+              (let ((res-mutation (if local-res
+                                      "mutation($threadId:ID!){ resolveReviewThread(input:{threadId:$threadId}){ thread{ id isResolved } } }"
+                                    "mutation($threadId:ID!){ unresolveReviewThread(input:{threadId:$threadId}){ thread{ id isResolved } } }")))
+                (pcase-let ((`(,code . ,output)
+                             (magit-dash-gh--call-process
+                              (list "api" "graphql"
+                                    "-f" (concat "query=" res-mutation)
+                                    "-F" (concat "threadId=" tid))
+                              dir)))
+                  (unless (zerop code)
+                    (error "Failed to update thread resolution on %s: %s" tid output))
+                  (setf (map-elt c "gh_resolved") (if local-res t :false)))))))))
+
+    (setf (map-elt data "comments") (vconcat comments))
+    (magit-dash-review--write-json-file file data)
+    (when-let* ((live-buf (find-buffer-visiting file)))
+      (with-current-buffer live-buf
+        (if (fboundp 'diff-review-refresh)
+            (diff-review-refresh)
+          (revert-buffer t t t))))
+    file))
+
 (provide 'magit-dash-review)
 ;;; magit-dash-review.el ends here
