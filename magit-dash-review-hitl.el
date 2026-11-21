@@ -310,5 +310,194 @@ JSON updates or outbound `send-to-agent' findings in a single batch."
   :accept-buffer #'magit-dash-review-hitl-accept-buffer-p
   :sanitize-target #'magit-dash-review-hitl-sanitize-target)
 
+;;; Operations
+
+(defun magit-dash-review-hitl--effective-body (target step plan)
+  "Return the effective comment body for TARGET, honoring STEP or PLAN notes."
+  (let ((step-note (and step (hitl-plan-step-note step)))
+        (plan-note (and plan (eq (hitl-plan-log-notes plan) 'one)
+                        (hitl-plan-note plan))))
+    (cond
+     ((and (stringp step-note) (not (string-empty-p (string-trim step-note))))
+      step-note)
+     ((and (stringp plan-note) (not (string-empty-p (string-trim plan-note))))
+      plan-note)
+     (t (or (plist-get target :body) "")))))
+
+(defun magit-dash-review-hitl--target-to-comment-ht (target status-str body)
+  "Construct a diff-review/1 comment hash table from TARGET with STATUS-STR and BODY."
+  (let* ((ht (make-hash-table :test #'equal))
+         (path (plist-get target :path))
+         (line (plist-get target :line))
+         (end-line (or (plist-get target :end-line) line))
+         (worktree (plist-get target :worktree))
+         (id (or (plist-get target :id)
+                 (magit-dash-review--make-comment-id
+                  (format "%s:%s:%s:%s" (or path "") (or line 0) body (float-time)))))
+         (blob (and path worktree (file-directory-p worktree)
+                    (magit-dash-review--resolve-blob worktree "HEAD" path))))
+    (setf (map-elt ht "id") id)
+    (setf (map-elt ht "origin") "hitl")
+    (when status-str
+      (setf (map-elt ht "status") status-str))
+    (when (plist-get target :severity)
+      (setf (map-elt ht "severity") (plist-get target :severity)))
+    (when path
+      (setf (map-elt ht "path") path))
+    (when line
+      (setf (map-elt ht "lines") (vector line (max line end-line))))
+    (when blob
+      (setf (map-elt ht "blob") blob))
+    (setf (map-elt ht "author") (or (plist-get target :author) "agent-shell"))
+    (setf (map-elt ht "at") (format-time-string "%FT%T%:z"))
+    (setf (map-elt ht "body") body)
+    (setf (map-elt ht "resolved") :false)
+    (setf (map-elt ht "replies") [])
+    ht))
+
+(defun magit-dash-review-hitl--queue-json-update (review-file update-plist)
+  "Queue UPDATE-PLIST for REVIEW-FILE in `magit-dash-review-hitl--batch-json-updates'."
+  (let ((cell (assoc review-file magit-dash-review-hitl--batch-json-updates)))
+    (if cell
+        (push update-plist (cdr cell))
+      (push (cons review-file (list update-plist))
+            magit-dash-review-hitl--batch-json-updates))))
+
+(defun magit-dash-review-hitl--apply-send-to-agent ()
+  "Operation `:apply' handler for `send-to-agent'."
+  (let* ((target hitl-plan-current-target)
+         (body (magit-dash-review-hitl--effective-body
+                target hitl-plan-current-step hitl-plan-current-plan))
+         (finding (plist-put (copy-sequence target) :body body)))
+    (push finding magit-dash-review-hitl--batch-findings)))
+
+(defun magit-dash-review-hitl--apply-record-finding (&optional status-override)
+  "Operation `:apply' handler for `record-finding' (or `draft-finding')."
+  (let* ((target hitl-plan-current-target)
+         (rf (plist-get target :review-file))
+         (body (magit-dash-review-hitl--effective-body
+                target hitl-plan-current-step hitl-plan-current-plan))
+         (comment-ht (magit-dash-review-hitl--target-to-comment-ht
+                      target (or status-override "accepted") body)))
+    (magit-dash-review-hitl--queue-json-update
+     rf (list :type 'comment :comment comment-ht))))
+
+(defun magit-dash-review-hitl--apply-draft-finding ()
+  "Operation `:apply' handler for `draft-finding'."
+  (magit-dash-review-hitl--apply-record-finding "draft"))
+
+(defun magit-dash-review-hitl--validate-verdict (&optional state &rest _)
+  "Validate STATE argument for `apply-verdict'."
+  (let ((s (or state "approved")))
+    (unless (member s '("approved" "changes" "comment"))
+      (format "Verdict state must be \"approved\", \"changes\", or \"comment\", got: %S" s))))
+
+(defun magit-dash-review-hitl--verdict-from-json (obj)
+  "Extract `(STATE BY HEAD)' argument list from JSON OBJ for `apply-verdict'."
+  (let ((get-key (lambda (k)
+                   (let ((s (symbol-name k)))
+                     (cond
+                      ((hash-table-p obj) (or (map-elt obj s) (map-elt obj k)))
+                      ((and (consp obj) (keywordp (car obj)))
+                       (plist-get obj (intern (concat ":" s))))
+                      ((consp obj)
+                       (or (map-elt obj k) (map-elt obj s))))))))
+    (list (or (funcall get-key 'state) "approved")
+          (funcall get-key 'by)
+          (funcall get-key 'head))))
+
+(defun magit-dash-review-hitl--apply-verdict (&optional state by head)
+  "Operation `:apply' handler for `apply-verdict'."
+  (let* ((target hitl-plan-current-target)
+         (rf (plist-get target :review-file))
+         (v-ht (make-hash-table :test #'equal)))
+    (setf (map-elt v-ht "state") (or state "approved"))
+    (setf (map-elt v-ht "by") (or by (plist-get target :author) user-login-name))
+    (setf (map-elt v-ht "at") (format-time-string "%FT%T%:z"))
+    (when head
+      (setf (map-elt v-ht "head") head))
+    (magit-dash-review-hitl--queue-json-update
+     rf (list :type 'verdict :verdict v-ht))))
+
+(hitl-plan-register-op 'code-review 'send-to-agent
+  :key ?a
+  :label "Send finding to agent-shell"
+  :queueable t
+  :apply #'magit-dash-review-hitl--apply-send-to-agent
+  :describe (lambda (&rest _) "send-to-agent"))
+
+(hitl-plan-register-op 'code-review 'record-finding
+  :key ?r
+  :label "Record accepted finding in review JSON"
+  :queueable t
+  :apply #'magit-dash-review-hitl--apply-record-finding
+  :describe (lambda (&rest _) "record-finding"))
+
+(hitl-plan-register-op 'code-review 'draft-finding
+  :key ?d
+  :label "Record draft finding in review JSON"
+  :queueable t
+  :apply #'magit-dash-review-hitl--apply-draft-finding
+  :describe (lambda (&rest _) "draft-finding"))
+
+(hitl-plan-register-op 'code-review 'apply-verdict
+  :key ?v
+  :label "Apply review verdict"
+  :queueable t
+  :order-last t
+  :read-args (lambda ()
+               (list (completing-read "Verdict state: "
+                                      '("approved" "changes" "comment")
+                                      nil t nil nil "approved")))
+  :validate #'magit-dash-review-hitl--validate-verdict
+  :from-json #'magit-dash-review-hitl--verdict-from-json
+  :apply #'magit-dash-review-hitl--apply-verdict
+  :describe (lambda (&optional state &rest _)
+              (format "apply-verdict (%s)" (or state "approved"))))
+
+;;; Interactive Staging Entrypoint
+
+;;;###autoload
+(defun magit-dash-review-stage-hitl (&optional review-file op-name)
+  "Stage unresolved threads from REVIEW-FILE into a `code-review' `hitl-plan'.
+OP-NAME defaults to `send-to-agent'.  Opens `hitl-plan-review' when called
+interactively and returns the created `hitl-plan' struct."
+  (interactive
+   (list (or (magit-dash-review--current-review-file)
+             (read-file-name "Review JSON file: " nil nil t))
+         'send-to-agent))
+  (let* ((file (expand-file-name (or review-file
+                                     (magit-dash-review--current-review-file)
+                                     (user-error "No active review JSON file"))))
+         (op (or op-name 'send-to-agent))
+         (findings (magit-dash-review-extract-findings file t)))
+    (unless findings
+      (user-error "No unresolved review findings in %s" file))
+    (let* ((worktree (plist-get (car findings) :worktree))
+           (targets (mapcar
+                     (lambda (f)
+                       (magit-dash-review-hitl-sanitize-target
+                        (list :id (plist-get f :id)
+                              :review-file file
+                              :worktree (plist-get f :worktree)
+                              :path (plist-get f :path)
+                              :line (plist-get f :line)
+                              :end-line (plist-get f :end-line)
+                              :author (plist-get f :author)
+                              :body (plist-get f :body)
+                              :hunk (plist-get f :hunk))))
+                     findings))
+           (plan (hitl-plan-create
+                  :domain 'code-review
+                  :description (format "Review findings (%s)"
+                                       (file-name-nondirectory file))
+                  :scope (list :review-file file :worktree worktree)
+                  :targets targets
+                  :ops (list (if (consp op) op (list :name op))))))
+      (when (and (called-interactively-p 'any)
+                 (fboundp 'hitl-plan-review))
+        (hitl-plan-review plan t))
+      plan)))
+
 (provide 'magit-dash-review-hitl)
 ;;; magit-dash-review-hitl.el ends here
