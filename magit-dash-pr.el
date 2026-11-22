@@ -652,9 +652,6 @@ Uses active columns.  WIDTH is available window width; when nil,
   (setq-local magit-dash-pr-dashboard--marked-entries nil)
   (magit-dash-pr-dashboard--setup-code-review-keys))
 
-(with-eval-after-load 'code-review
-  (magit-dash-pr-dashboard--setup-code-review-keys))
-
 (defun magit-dash-pr--parse-status-rollup (rollup)
   "Calculate overall CI state from GitHub ROLLUP check runs or contexts.
 ROLLUP may be a list of check runs/contexts, a vector, or an alist with `state'.

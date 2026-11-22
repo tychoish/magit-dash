@@ -2203,6 +2203,29 @@ they are not consulted even when their own auto-* flags are set."
           (should (null version-control)))
       (magit-dash-global-mode -1))))
 
+(ert-deftest magit-dash/global-mode-after-load-hook ()
+  "Enabling `magit-dash-global-mode' manages after-load hook; disabling cleans up."
+  (let ((magit-dash-global-mode nil)
+        (after-load-functions nil))
+    (unwind-protect
+        (progn
+          (magit-dash-global-mode 1)
+          (should (memq #'magit-dash-global--on-after-load after-load-functions))
+          (magit-dash-global-mode -1)
+          (should-not (memq #'magit-dash-global--on-after-load after-load-functions)))
+      (magit-dash-global-mode -1))))
+
+(ert-deftest magit-dash/global-mode-on-after-load-code-review ()
+  "When code-review loads, `magit-dash-global--on-after-load' refreshes PR review keys."
+  (let ((called nil))
+    (cl-letf (((symbol-function 'magit-dash-pr-dashboard--setup-code-review-keys)
+               (lambda () (setq called t))))
+      (magit-dash-global--on-after-load "/path/to/code-review.el")
+      (should called)
+      (setq called nil)
+      (magit-dash-global--on-after-load "/path/to/other.el")
+      (should-not called))))
+
 (ert-deftest magit-dash/column-disabled ()
   "A disabled column is excluded from active-columns."
   (let ((magit-dash-columns

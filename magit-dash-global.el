@@ -36,6 +36,7 @@ One of `strip', `short', or nil.")
 (declare-function magit-dash-worktree-post-add-hook-function "magit-dash-worktree")
 (declare-function magit-dash-open-other-window "magit-dash")
 (declare-function magit-dash-dispatch "magit-dash-status")
+(declare-function magit-dash-pr-dashboard--setup-code-review-keys "magit-dash-pr")
 
 (defun magit-dash--which-key-register-replacements ()
   "Register command abbreviations in `which-key-replacement-alist'.
@@ -89,6 +90,14 @@ Applied for `magit-dash-mode'.  Does nothing if
   (remove-hook 'magit-post-refresh-hook #'magit-dash--on-magit-post-refresh)
   (remove-hook 'magit-post-worktree-add-hook #'magit-dash-worktree-post-add-hook-function))
 
+(defun magit-dash-global--on-after-load (file)
+  "Update integrations when deferred packages load.
+FILE is the loaded file passed by `after-load-functions'."
+  (when (and (stringp file)
+             (string-match-p "code-review" file)
+             (fboundp 'magit-dash-pr-dashboard--setup-code-review-keys))
+    (magit-dash-pr-dashboard--setup-code-review-keys)))
+
 (defcustom magit-dash-global-managed-settings
   '((vc-follow-symlinks . t)
     (version-control . t))
@@ -131,6 +140,7 @@ Sets up keybindings, savehist variables, and hooks while leaving the main
         (magit-dash-global--apply-settings)
         (magit-dash-global--setup-magit)
         (add-hook 'magit-mode-hook #'magit-dash-global--setup-magit)
+        (add-hook 'after-load-functions #'magit-dash-global--on-after-load)
         (add-hook 'which-key-mode-hook #'magit-dash--which-key-register-replacements)
         (when (boundp 'savehist-additional-variables)
           (add-to-list 'savehist-additional-variables 'magit-dash-columns)
@@ -138,6 +148,7 @@ Sets up keybindings, savehist variables, and hooks while leaving the main
           (add-to-list 'savehist-additional-variables 'magit-dash--ephemeral-tags)))
     (magit-dash-global--revert-settings)
     (remove-hook 'magit-mode-hook #'magit-dash-global--setup-magit)
+    (remove-hook 'after-load-functions #'magit-dash-global--on-after-load)
     (magit-dash-global--teardown-magit)
     (remove-hook 'which-key-mode-hook #'magit-dash--which-key-register-replacements)))
 
