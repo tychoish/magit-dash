@@ -4426,21 +4426,20 @@ Pick from existing tags or type a new symbol name."
               targets)
       (magit-dash-refresh))))
 
-(defun magit-dash-clear-tags (&optional all)
+(defun magit-dash-clear-tags (&optional all-repos)
   "Clear runtime tags from the marked repositories, or the repo at point.
-With prefix argument ALL, clear runtime tags from every repository."
+With prefix argument ALL-REPOS, clear runtime tags from every repository."
   (interactive "P")
-  (cond
-   (all
-    (clrhash magit-dash--ephemeral-tags)
-    (message "magit-dash: cleared all runtime tags"))
-   (t
+  (if all-repos
+      (progn
+        (clrhash magit-dash--ephemeral-tags)
+        (message "magit-dash: cleared all runtime tags"))
     (let ((targets (magit-dash--tag-targets)))
       (seq-do (lambda (repo)
                 (map-delete magit-dash--ephemeral-tags (magit-dash-repo-path repo)))
               targets)
       (message "magit-dash: cleared runtime tags on %d repo%s"
-               (length targets) (if (cdr targets) "s" "")))))
+               (length targets) (if (cdr targets) "s" ""))))
   (magit-dash-refresh))
 
 (declare-function agent-shell-workflow-dispatch-group "agent-shell-workflow")
