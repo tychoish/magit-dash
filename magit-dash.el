@@ -605,6 +605,7 @@ first)."
                    raw))))
    (t nil)))
 
+;;;###autoload
 (cl-defun magit-dash-register (&key name path repo include-prs include-ci auto-fetch auto-pull auto-commit auto-push auto-sync-command hooks tags tag label labels commands sort-hint worktree sync-branches timer clone-url remote-url worktree-symlinks symlinks remote-sync sync-on-refresh auto-sync-on-refresh refresh-sync fetch-on-refresh gh-account gh-host pr upstream-repo upstream upstream-branch (show-worktrees 'default) hide-worktrees (show-submodules 'default) hide-submodules auto-commit-template)
   "Register or replace a repository with NAME at absolute PATH.
 REPO is the upstream repository path or URL for bootstrapping.
