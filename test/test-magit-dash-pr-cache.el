@@ -854,5 +854,181 @@
     (should (magit-dash-pr-cache-test/stale-p-of
              (car (magit-dash-pr-dashboard--cached-entries (list :state "open" :repo "o/r")))))))
 
+;;; Final-review regressions
+
+(defun magit-dash-pr-cache-test/seed-three ()
+  "Cache open PRs 1 through 3 of o/r."
+  (seq-do (lambda (n)
+            (magit-dash-pr-cache-put "o/r" n (magit-dash-pr-cache-test/pr n)))
+          '(1 2 3)))
+
+(ert-deftest magit-dash-pr-cache/unbuildable-row-suppresses-eviction ()
+  (magit-dash-pr-cache-test/with-state
+    (magit-dash-pr-cache-test/seed-three)
+    (magit-dash-pr-cache-test/discover
+     (list :state "open" :repo "o/r")
+     "[{\"number\":1,\"state\":\"OPEN\"},{\"number\":2,\"state\":\"OPEN\",\"comments\":{\"totalCount\":\"x\"}}]")
+    (seq-do (lambda (n)
+              (should-not (plist-get (magit-dash-pr-cache-get "o/r" n) :gone)))
+            '(1 2 3))))
+
+(ert-deftest magit-dash-pr-cache/fractional-number-suppresses-eviction ()
+  (magit-dash-pr-cache-test/with-state
+    (magit-dash-pr-cache-test/seed-three)
+    (magit-dash-pr-cache-test/discover
+     (list :state "open" :repo "o/r")
+     "[{\"number\":1,\"state\":\"OPEN\"},{\"number\":1.5,\"state\":\"OPEN\"}]")
+    (seq-do (lambda (n)
+              (should-not (plist-get (magit-dash-pr-cache-get "o/r" n) :gone)))
+            '(1 2 3))))
+
+(ert-deftest magit-dash-pr-cache/all-rows-skipped-does-not-evict-but-empty-does ()
+  (magit-dash-pr-cache-test/with-state
+    (magit-dash-pr-cache-test/seed-three)
+    (magit-dash-pr-cache-test/discover
+     (list :state "open" :repo "o/r")
+     "[{\"number\":1,\"comments\":{\"totalCount\":\"x\"}}]")
+    (seq-do (lambda (n)
+              (should-not (plist-get (magit-dash-pr-cache-get "o/r" n) :gone)))
+            '(1 2 3))
+    (magit-dash-pr-cache-test/discover (list :state "open" :repo "o/r") "[]")
+    (seq-do (lambda (n)
+              (should (plist-get (magit-dash-pr-cache-get "o/r" n) :gone)))
+            '(1 2 3))))
+
+(ert-deftest magit-dash-pr-cache/malformed-legacy-record-moved-aside-once ()
+  (magit-dash-pr-cache-test/with-state
+    (magit-dash-pr-cache-put "owner/repo" 1 '((number . 1) (title . "lower")))
+    (magit-dash-pr-cache-test/write-legacy "Owner/Repo" 2 '(:repo "bad repo" :number 2))
+    (magit-dash-pr-cache-test/write-legacy
+     "Owner/Repo" 1 (magit-dash-pr-cache-test/legacy-record 1 "legacy" (+ (float-time) 5)))
+    (magit-dash-pr-cache-reset-migrated)
+    (magit-dash-pr-cache-get "owner/repo" 1)
+    (should-not (file-directory-p (expand-file-name "Owner" (magit-dash-pr-cache--root))))
+    (should (file-exists-p (expand-file-name "owner/repo/2.eld.bad"
+                                             (magit-dash-pr-cache--root))))
+    (magit-dash-pr-cache-reset-migrated)
+    (let ((logged nil))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (fmt &rest args) (push (apply #'format fmt args) logged))))
+        (magit-dash-pr-cache-get "owner/repo" 1)
+        (magit-dash-pr-cache-list "owner/repo"))
+      (should-not logged))))
+
+(ert-deftest magit-dash-pr-cache/legacy-merge-prefers-updated-at-over-fetched-at ()
+  (magit-dash-pr-cache-test/with-state
+    (magit-dash-pr-cache-put "owner/repo" 1 '((number . 1) (title . "lower")
+                                              (updatedAt . "2026-03-01T00:00:00Z")))
+    (magit-dash-pr-cache-test/write-legacy
+     "Owner/Repo" 1
+     (plist-put (magit-dash-pr-cache-test/legacy-record 1 "legacy" (+ (float-time) 500))
+                :updated-at "2026-01-01T00:00:00Z"))
+    (magit-dash-pr-cache-reset-migrated)
+    (should (equal "lower" (map-elt (plist-get (magit-dash-pr-cache-get "owner/repo" 1) :payload)
+                                    'title)))
+    (should (eq t (magit-dash-pr-cache--better-p '(:updated-at "b") '(:updated-at "a"))))
+    (should-not (magit-dash-pr-cache--better-p '(:updated-at "a" :fetched-at 9) '(:updated-at "b")))))
+
+(ert-deftest magit-dash-pr-cache/unreadable-canonical-record-logged-distinctly ()
+  (magit-dash-pr-cache-test/with-state
+    (magit-dash-pr-cache-test/write-raw "owner/repo" 1 '(:repo "bad repo"))
+    (magit-dash-pr-cache-test/write-legacy
+     "Owner/Repo" 1 (magit-dash-pr-cache-test/legacy-record 1 "legacy" 100.0))
+    (magit-dash-pr-cache-reset-migrated)
+    (let ((logged nil))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (fmt &rest args) (push (apply #'format fmt args) logged))))
+        (magit-dash-pr-cache-get "owner/repo" 1))
+      (should (seq-some (lambda (m) (string-match-p "canonical record .* unreadable" m))
+                        logged)))
+    (should (equal "legacy" (map-elt (plist-get (magit-dash-pr-cache-get "owner/repo" 1) :payload)
+                                     'title)))))
+
+(ert-deftest magit-dash-pr-cache/migration-scan-runs-once-per-repo ()
+  (magit-dash-pr-cache-test/with-state
+    (seq-do (lambda (n)
+              (make-directory (expand-file-name (format "owner%d/repo" n)
+                                                (magit-dash-pr-cache--root))
+                              t))
+            (number-sequence 1 2000))
+    (let ((scans 0)
+          (orig (symbol-function 'magit-dash-pr-cache--legacy-dirs))
+          (start (float-time)))
+      (cl-letf (((symbol-function 'magit-dash-pr-cache--legacy-dirs)
+                 (lambda (repo)
+                   (setq scans (1+ scans))
+                   (funcall orig repo))))
+        (seq-do (lambda (n)
+                  (magit-dash-pr-cache-put "o/r" n (magit-dash-pr-cache-test/pr n)))
+                (number-sequence 1 100))
+        (magit-dash-pr-cache-get "O/R" 1)
+        (magit-dash-pr-cache-mark-gone "o/r" 2)
+        (magit-dash-pr-cache-delete "o/r" 3))
+      (should (= 1 scans))
+      (should (< (- (float-time) start) 30)))))
+
+(ert-deftest magit-dash-pr-cache/replace-row-nil-state-is-open ()
+  (magit-dash-pr-cache-test/with-state
+    (let ((key (cons "o/r" 1)))
+      (with-temp-buffer
+        (magit-dash-pr-dashboard-mode)
+        (setq magit-dash-pr-dashboard--filters (list :repo "o/r"))
+        (setq tabulated-list-entries
+              (list (magit-dash-pr-dashboard--build-entry
+                     (magit-dash-pr-cache-test/pr 1) "o/r")))
+        ;; no :state in the filters, no state in the output: still open
+        (magit-dash-pr-dashboard--replace-row
+         (current-buffer) key "{\"number\":1,\"title\":\"new\"}")
+        (should (equal '("new") (magit-dash-pr-cache-test/titles)))
+        (magit-dash-pr-dashboard--replace-row
+         (current-buffer) key "{\"number\":1,\"state\":null,\"title\":\"newer\"}")
+        (should (equal '("newer") (magit-dash-pr-cache-test/titles)))
+        ;; a closed PR drops under the implicit open filter
+        (magit-dash-pr-dashboard--replace-row
+         (current-buffer) key "{\"number\":1,\"state\":\"CLOSED\"}")
+        (should (null tabulated-list-entries))))))
+
+(ert-deftest magit-dash-pr-cache/replace-row-malformed-json-keeps-row ()
+  (magit-dash-pr-cache-test/with-state
+    (with-temp-buffer
+      (magit-dash-pr-dashboard-mode)
+      (setq magit-dash-pr-dashboard--filters (list :state "open" :repo "o/r"))
+      (setq tabulated-list-entries
+            (list (magit-dash-pr-dashboard--build-entry
+                   (magit-dash-pr-cache-test/pr 1) "o/r")))
+      (let ((logged nil))
+        (cl-letf (((symbol-function 'message)
+                   (lambda (fmt &rest args) (push (apply #'format fmt args) logged))))
+          (magit-dash-pr-dashboard--replace-row
+           (current-buffer) (cons "o/r" 1) "{\"number\":1,"))
+        (should (seq-some (lambda (m) (string-match-p "malformed output" m)) logged)))
+      (should (equal '("pr 1") (magit-dash-pr-cache-test/titles))))))
+
+(ert-deftest magit-dash-pr-cache/store-status-without-record-keeps-row-case ()
+  (magit-dash-pr-cache-test/with-state
+    (with-temp-buffer
+      (magit-dash-pr-dashboard-mode)
+      (setq tabulated-list-entries
+            (list (magit-dash-pr-dashboard--build-entry
+                   (magit-dash-pr-cache-test/pr 1) "Foo/Bar")))
+      (should (magit-dash-pr-dashboard--store-status
+               "foo/bar" 1 '(:ci "SUCCESS" :approvals 1 :required 2)
+               (magit-dash-pr-cache-test/pr 1)))
+      (should (equal "Foo/Bar" (plist-get (magit-dash-pr-cache-get "foo/bar" 1) :repo))))))
+
+(ert-deftest magit-dash-pr-cache/non-finite-fetched-at-is-rejected ()
+  (seq-do (lambda (bad)
+            (should (magit-dash-pr-cache--problem
+                     (list :repo "o/r" :number 1 :fetched-at bad)))
+            (should-not (magit-dash-pr-cache-effective-fetched-at
+                         (list :fetched-at bad)))
+            (should (magit-dash-pr-cache-stale-p (list :fetched-at bad)))
+            (should (magit-dash-pr-cache--problem
+                     (list :repo "o/r" :number 1 :fetched-at 1.0
+                           :field-times (list (cons 'mergeable bad))))))
+          (list 0.0e+NaN 1.0e+INF -1.0e+INF))
+  (should (= 5.0 (magit-dash-pr-cache-effective-fetched-at
+                  (list :fetched-at 10.0 :field-times (list (cons 'a 5.0) (cons 'b 0.0e+NaN)))))))
+
 (provide 'test-magit-dash-pr-cache)
 ;;; test-magit-dash-pr-cache.el ends here

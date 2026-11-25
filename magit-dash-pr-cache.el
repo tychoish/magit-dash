@@ -52,10 +52,19 @@
 ;;
 ;; Case and migration.  Repo names are case-insensitive: records are filed
 ;; under lowercase directories, and legacy mixed-case directories are
-;; migrated (renamed, or merged keeping the newest `:fetched-at') on first
-;; access; listings also dedupe by (lowercase repo, number).
+;; migrated (renamed, or merged keeping the greater `:updated-at', then
+;; `:fetched-at') on first access of a repo in a session (memoized, see
+;; `magit-dash-pr-cache-reset-migrated'); every listing migrates its scope
+;; again and dedupes by (lowercase repo, number).  A malformed legacy
+;; record is moved aside as <number>.eld.bad and logged once.  A legacy
+;; directory created by another Emacs mid-session is picked up by the next
+;; listing, not by single-record reads.  A non-finite `:fetched-at' makes
+;; a record invalid.
 ;;
-;; Known limitations: records are validated by shape, not against GitHub;
+;; Known limitations: ghost eviction needs every discovered row to parse
+;; (any unusable row suppresses it); the search-p trade-off above means
+;; kept CI/review values from cross-repo refreshes look as fresh as the
+;; row; records are validated by shape, not against GitHub;
 ;; the `:url' is checked only for a matching pull request number, since a
 ;; renamed or transferred repo legitimately has another name in it;
 ;; cross-repo (search) discovery, filtered discovery, truncated discovery
@@ -115,19 +124,27 @@ Values below 10 are clamped to 10."
 (defconst magit-dash-pr-cache--future-skew 300
   "Seconds a `:fetched-at' may lie in the future before it counts as stale.")
 
+(defun magit-dash-pr-cache--finite-p (value)
+  "Return non-nil when VALUE is a finite number (not NaN or infinite)."
+  (and (numberp value)
+       (= value value)
+       (< (abs value) 1.0e+INF)))
+
 (defun magit-dash-pr-cache-effective-fetched-at (record)
   "Return the oldest freshness time of RECORD, or nil when it has none.
-That is the minimum of `:fetched-at' and every `:field-times' entry."
+That is the minimum of `:fetched-at' and every `:field-times' entry.  A
+non-finite `:fetched-at' counts as none; non-finite field times are
+ignored."
   (let ((fetched (plist-get record :fetched-at)))
-    (when (numberp fetched)
+    (when (magit-dash-pr-cache--finite-p fetched)
       (apply #'min fetched
-             (seq-filter #'numberp
+             (seq-filter #'magit-dash-pr-cache--finite-p
                          (seq-map #'cdr (plist-get record :field-times)))))))
 
 (defun magit-dash-pr-cache-future-p (record &optional now)
   "Return non-nil when RECORD's `:fetched-at' lies beyond the clock skew at NOW."
   (let ((fetched (plist-get record :fetched-at)))
-    (and (numberp fetched)
+    (and (magit-dash-pr-cache--finite-p fetched)
          (> fetched (+ (or now (float-time)) magit-dash-pr-cache--future-skew)))))
 
 (defun magit-dash-pr-cache-stale-p (record &optional now)
@@ -176,41 +193,94 @@ with no \".\" or \"..\" component.  Case is folded."
                    (magit-dash-pr-cache--case-subdirs
                     (magit-dash-pr-cache--root) (car parts)))))))
 
+(defun magit-dash-pr-cache--better-p (a b)
+  "Return non-nil when record A should replace record B.
+The greater `:updated-at' wins (a record lacking one loses to one that
+has it); equal or absent `:updated-at' falls back to the greater
+`:fetched-at'."
+  (let ((ua (plist-get a :updated-at))
+        (ub (plist-get b :updated-at)))
+    (cond
+     ((and (stringp ua) (stringp ub) (not (string= ua ub)))
+      (string> ua ub))
+     ((and (stringp ua) (not (stringp ub))) t)
+     ((and (stringp ub) (not (stringp ua))) nil)
+     (t
+      (> (or (plist-get a :fetched-at) 0)
+         (or (plist-get b :fetched-at) 0))))))
+
+(defvar magit-dash-pr-cache--migrated nil
+  "Hash table of (ROOT . LOWERCASE-REPO) keys already migrated this session.")
+
+(defun magit-dash-pr-cache-reset-migrated ()
+  "Forget which repos were migrated, so the next access scans again.
+Meant for tests and for picking up legacy directories created by another
+Emacs instance mid-session."
+  (setq magit-dash-pr-cache--migrated nil))
+
+(defun magit-dash-pr-cache--merge-record (src canon)
+  "Merge the legacy record file SRC into the canonical directory CANON."
+  (let* ((dest (expand-file-name (file-name-nondirectory src) canon))
+         (theirs (magit-dash-pr-cache--read-file src))
+         (ours (and (file-exists-p dest)
+                    (magit-dash-pr-cache--read-file dest))))
+    (cond
+     ((null theirs)
+      (message "magit-dash-pr-cache: moving malformed legacy record %s aside" src)
+      (rename-file src (expand-file-name
+                        (concat (file-name-nondirectory src) ".bad") canon)
+                   t))
+     ((not (file-exists-p dest))
+      (rename-file src dest))
+     ((null ours)
+      (message "magit-dash-pr-cache: canonical record %s is unreadable; replacing it with %s"
+               dest src)
+      (rename-file dest (concat dest ".bad") t)
+      (rename-file src dest))
+     ((magit-dash-pr-cache--better-p theirs ours)
+      (rename-file src dest t))
+     (t (delete-file src)))))
+
 (defun magit-dash-pr-cache--migrate-legacy (repo)
   "Move records of mixed-case directories of REPO into the lowercase one.
 When no lowercase directory exists the legacy one is renamed; otherwise
-each record is merged in, the newest `:fetched-at' winning.  Failures are
-logged and never signal."
-  (seq-do
-   (lambda (legacy)
-     (condition-case err
-         (progn
-           (let ((canon (magit-dash-pr-cache--repo-dir repo)))
-             (if (not (file-directory-p canon))
-		 (progn
-                   (make-directory (file-name-directory (directory-file-name canon)) t)
-                   (rename-file (directory-file-name legacy) (directory-file-name canon)))
-               (seq-do
-		(lambda (src)
-                  (let* ((dest (expand-file-name (file-name-nondirectory src) canon))
-			 (theirs (magit-dash-pr-cache--read-file src))
-			 (ours (and (file-exists-p dest)
-                                    (magit-dash-pr-cache--read-file dest))))
-                    (cond
-                     ((null theirs) nil)
-                     ((or (null ours)
-                          (> (or (plist-get theirs :fetched-at) 0)
-                             (or (plist-get ours :fetched-at) 0)))
-                      (rename-file src dest t))
-                     (t (delete-file src)))))
-		(directory-files legacy t "\\.eld\\'"))
-               (ignore-errors (delete-directory legacy))))
-           (ignore-errors (delete-directory
-                           (file-name-directory (directory-file-name legacy)))))
-       (error
-        (message "magit-dash-pr-cache: could not migrate %s: %s"
-                 legacy (error-message-string err)))))
-   (magit-dash-pr-cache--legacy-dirs repo)))
+each record is merged in (see `magit-dash-pr-cache--better-p'), a
+malformed one is moved aside as <number>.eld.bad, and the emptied legacy
+directory is removed, so a bad record is not retried or logged again.
+Failures are logged and never signal.  Marks REPO as migrated."
+  (let ((canon (magit-dash-pr-cache--repo-dir repo)))
+    (when canon
+      (unless magit-dash-pr-cache--migrated
+        (setq magit-dash-pr-cache--migrated (make-hash-table :test #'equal)))
+      (setf (map-elt magit-dash-pr-cache--migrated
+                     (cons (magit-dash-pr-cache--root) (downcase repo)))
+            t)
+      (seq-do
+       (lambda (legacy)
+         (condition-case err
+             (progn
+               (if (not (file-directory-p canon))
+                   (progn
+                     (make-directory (file-name-directory (directory-file-name canon)) t)
+                     (rename-file (directory-file-name legacy) (directory-file-name canon)))
+                 (seq-do (lambda (src)
+                           (magit-dash-pr-cache--merge-record src canon))
+                         (directory-files legacy t "\\.eld\\'"))
+                 (ignore-errors (delete-directory legacy)))
+               (ignore-errors (delete-directory
+                               (file-name-directory (directory-file-name legacy)))))
+           (error
+            (message "magit-dash-pr-cache: could not migrate %s: %s"
+                     legacy (error-message-string err)))))
+       (magit-dash-pr-cache--legacy-dirs repo)))))
+
+(defun magit-dash-pr-cache--ensure-migrated (repo)
+  "Migrate REPO's legacy directories unless already done this session.
+Once per repo, so reads and writes do not walk the cache root."
+  (unless (and magit-dash-pr-cache--migrated
+               (map-elt magit-dash-pr-cache--migrated
+                        (cons (magit-dash-pr-cache--root) (downcase repo))))
+    (magit-dash-pr-cache--migrate-legacy repo)))
 
 (defun magit-dash-pr-cache--migrate-scope (org)
   "Migrate every mixed-case repo directory, limited to ORG (any case) if non-nil."
@@ -230,10 +300,11 @@ logged and never signal."
 
 (defun magit-dash-pr-cache--file (repo number)
   "Return the file for REPO and NUMBER, or nil when either is malformed.
-Migrates legacy mixed-case directories of REPO first."
+Migrates legacy mixed-case directories of REPO first, once per session
+\(see `magit-dash-pr-cache-reset-migrated')."
   (when-let* (((integerp number))
               (dir (magit-dash-pr-cache--repo-dir repo)))
-    (magit-dash-pr-cache--migrate-legacy repo)
+    (magit-dash-pr-cache--ensure-migrated repo)
     (expand-file-name (format "%s.eld" number) dir)))
 
 (defun magit-dash-pr-cache--null-to-nil (value)
@@ -292,12 +363,13 @@ Recurses on the car only and iterates along lists, so a very long list
      ((not (or (null payload)
                (and (proper-list-p payload) (seq-every-p #'consp payload))))
       "bad :payload")
-     ((not (or (null fetched) (numberp fetched))) "bad :fetched-at")
+     ((not (or (null fetched) (magit-dash-pr-cache--finite-p fetched)))
+      "bad :fetched-at")
      ((not (let ((times (plist-get record :field-times)))
              (and (proper-list-p times)
                   (seq-every-p (lambda (cell)
                                  (and (consp cell) (symbolp (car cell))
-                                      (numberp (cdr cell))))
+                                      (magit-dash-pr-cache--finite-p (cdr cell))))
                                times))))
       "bad :field-times")
      ((and url-number (not (eql url-number (plist-get record :number))))
@@ -348,7 +420,8 @@ A malformed `:status' is dropped (with a message) but keeps the record."
           (directory-files dir t "\\`\\.pr-.*\\.tmp\\'")))
 
 (defun magit-dash-pr-cache--dedupe (records)
-  "Return RECORDS with one per (lowercase repo, number), the newest `:fetched-at'."
+  "Return RECORDS with one per (lowercase repo, number), the best.
+See `magit-dash-pr-cache--better-p'."
   (let ((best (make-hash-table :test #'equal))
         (order nil))
     (seq-do (lambda (record)
@@ -359,8 +432,7 @@ A malformed `:status' is dropped (with a message) but keeps the record."
                  ((null kept)
                   (push key order)
                   (setf (map-elt best key) record))
-                 ((> (or (plist-get record :fetched-at) 0)
-                     (or (plist-get kept :fetched-at) 0))
+                 ((magit-dash-pr-cache--better-p record kept)
                   (setf (map-elt best key) record)))))
             records)
     (seq-map (lambda (key)
