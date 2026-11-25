@@ -1411,7 +1411,7 @@
       ;; Check args with :conflicts
       (let ((args (magit-dash-pr-dashboard--build-args
                    '(:repo "org/repo" :conflicts t))))
-        (should (member "number,title,state,mergedAt,author,createdAt,updatedAt,comments,reviewDecision,statusCheckRollup,isDraft,url,headRefName,baseRefName,mergeable,mergeStateStatus" args))
+        (should (member "number,title,state,mergedAt,author,createdAt,updatedAt,comments,reviewDecision,statusCheckRollup,isDraft,url,headRefName,headRefOid,baseRefName,mergeable,mergeStateStatus" args))
         (should (seq-some (lambda (a) (string-match-p "CONFLICTING.*DIRTY" a)) args)))
       ;; Check views menu binding
       (let ((flat (format "%S" (get 'magit-dash-pr-views-menu 'transient--layout))))
