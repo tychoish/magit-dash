@@ -152,7 +152,9 @@ FILE, so editing one later updates it instead of adding a second copy."
 (defun magit-dash-review--common-dir (root)
   "Return the common git directory for repository at ROOT."
   (or (and (fboundp 'diff-review--common-dir)
-           (diff-review--common-dir root))
+           (condition-case nil
+               (diff-review--common-dir root)
+             (error nil)))
       (let ((default-directory (file-name-as-directory (expand-file-name root))))
         (file-name-as-directory
          (file-truename

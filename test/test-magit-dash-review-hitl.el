@@ -19,6 +19,7 @@
   "Execute BODY with `default-directory' and `hitl-plan-directory' in a fresh temp dir."
   (declare (indent 0))
   `(let* ((dir (make-temp-file "magit-dash-review-hitl-test-" t))
+          (magic-mode-alist nil)
           (hitl-plan-directory (expand-file-name "plans/" dir))
           (hitl-plan--store (make-hash-table :test #'equal)))
      (make-directory hitl-plan-directory t)

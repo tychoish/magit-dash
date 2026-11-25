@@ -15,9 +15,12 @@
 ;;; Test Helpers
 
 (defmacro magit-dash-review-test/with-temp-dir (&rest body)
-  "Execute BODY with `default-directory' set to a fresh temp directory."
+  "Execute BODY with `default-directory' set to a fresh temp directory.
+`magic-mode-alist' is cleared so that a loaded diff-review does not open the
+review files these tests visit in its read-only mode."
   (declare (indent 0))
-  `(let ((dir (make-temp-file "magit-dash-review-test-" t)))
+  `(let ((dir (make-temp-file "magit-dash-review-test-" t))
+         (magic-mode-alist nil))
      (unwind-protect
          (let ((default-directory dir))
            ,@body)
@@ -1603,6 +1606,13 @@ in `magit-dash-review-test/cr-calls' after BODY."
   (should (string-match-p "markFileAsViewed" (magit-dash-review--viewed-mutation t)))
   (should-not (string-match-p "unmark" (magit-dash-review--viewed-mutation t)))
   (should (string-match-p "unmarkFileAsViewed" (magit-dash-review--viewed-mutation nil))))
+
+(ert-deftest magit-dash-review/common-dir-falls-back-when-diff-review-signals ()
+  "A loaded diff-review that errors on a non-git directory must not break the lookup."
+  (magit-dash-review-test/with-temp-dir
+    (cl-letf (((symbol-function 'diff-review--common-dir)
+               (lambda (_root) (error "Git rev-parse: not a git repository"))))
+      (should (stringp (magit-dash-review--common-dir dir))))))
 
 (ert-deftest magit-dash-review/legacy-submit-direct ()
   (magit-dash-review-test/with-temp-dir
