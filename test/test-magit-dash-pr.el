@@ -2050,5 +2050,185 @@
             (should (= 1 (plist-get counts :deleted)))))
       (delete-directory dir t))))
 
+;;;; login priming, lookup hardening, refresh concurrency cap
+
+(defun magit-dash-pr-test--wait-until (pred &optional timeout)
+  "Run the event loop until PRED is non-nil or TIMEOUT (default 5) seconds pass."
+  (let ((deadline (+ (float-time) (or timeout 5))))
+    (while (and (not (funcall pred)) (< (float-time) deadline))
+      (accept-process-output nil 0.02))
+    (funcall pred)))
+
+(ert-deftest magit-dash-pr/account-login-start-failure-marks-failed ()
+  (let ((repo (make-temp-file "repo" t)))
+    (unwind-protect
+        (let ((magit-dash-pr--account-logins (make-hash-table :test #'equal))
+              (magit-dash-pr--repo-hosts (make-hash-table :test #'equal)))
+          (cl-letf (((symbol-function 'magit-dash-gh--repo-account) #'ignore)
+                    ((symbol-function 'magit-dash-gh--run-process)
+                     (lambda (&rest _) (error "no fork"))))
+            (should-not (magit-dash-pr-own-p "me" repo))
+            (should (eq :failed (car (map-elt magit-dash-pr--account-logins
+                                              '(:default . "github.com")))))))
+      (delete-directory repo t))))
+
+(ert-deftest magit-dash-pr/account-login-lookup-times-out ()
+  "A silent lookup is killed, cancelled and marked failed."
+  (let ((repo (make-temp-file "repo" t))
+        (magit-dash-pr--account-logins (make-hash-table :test #'equal))
+        (magit-dash-pr--repo-hosts (make-hash-table :test #'equal))
+        (magit-dash-pr--login-timeout 0.1)
+        (hung nil)
+        (cancelled-p nil)
+        (called nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'magit-dash-gh--repo-account) #'ignore)
+                  ((symbol-function 'magit-dash-gh--run-process)
+                   (lambda (_args _dir on-success &optional on-error _attempt cancelled handle)
+                     (setq cancelled-p cancelled)
+                     (setq hung (make-process :name "login-hung"
+                                              :command '("sleep" "5") :noquery t))
+                     (setcar handle hung)
+                     (setq called (list on-success on-error))
+                     hung)))
+          (should-not (magit-dash-pr-own-p "me" repo))
+          (should (eq :pending (car (map-elt magit-dash-pr--account-logins
+                                             '(:default . "github.com")))))
+          (should (magit-dash-pr-test--wait-until
+                   (lambda ()
+                     (eq :failed (car (map-elt magit-dash-pr--account-logins
+                                               '(:default . "github.com")))))))
+          (should (magit-dash-pr-test--wait-until (lambda () (not (process-live-p hung)))))
+          (should (funcall cancelled-p))
+          ;; a late answer does not resurrect the lookup
+          (funcall (car called) "me\n")
+          (should (eq :failed (car (map-elt magit-dash-pr--account-logins
+                                            '(:default . "github.com"))))))
+      (when (process-live-p hung)
+        (delete-process hung))
+      (delete-directory repo t))))
+
+(ert-deftest magit-dash-pr/repo-host-fallback-is-not-cached ()
+  (let ((repo (make-temp-file "repo" t))
+        (magit-dash-pr--repo-hosts (make-hash-table :test #'equal)))
+    (unwind-protect
+        (progn
+          (call-process "git" nil nil nil "-C" repo "init" "-q")
+          (should (equal "github.com" (magit-dash-pr--repo-host repo)))
+          (should-not (map-elt magit-dash-pr--repo-hosts repo))
+          (call-process "git" nil nil nil "-C" repo "remote" "add" "origin"
+                        "git@ghe.example.com:o/r.git")
+          (should (equal "ghe.example.com" (magit-dash-pr--repo-host repo)))
+          (should (equal "ghe.example.com" (map-elt magit-dash-pr--repo-hosts repo))))
+      (delete-directory repo t))))
+
+(ert-deftest magit-dash-pr/prime-account-logins-one-lookup-per-repo ()
+  (let ((a (make-temp-file "repo" t))
+        (b (make-temp-file "repo" t))
+        (spawned nil))
+    (unwind-protect
+        (let ((magit-dash-pr--account-logins (make-hash-table :test #'equal))
+              (magit-dash-pr--repo-hosts (make-hash-table :test #'equal)))
+          (cl-letf (((symbol-function 'magit-dash-gh--repo-account) #'ignore)
+                    ((symbol-function 'magit-dash-gh--run-process)
+                     (lambda (_args dir &rest _) (push dir spawned) nil)))
+            (magit-dash-pr--prime-account-logins (list a b a))
+            (magit-dash-pr--prime-account-logins (list a b))
+            ;; both share the default github.com login: one lookup in flight
+            (should (= 1 (length spawned)))))
+      (delete-directory a t)
+      (delete-directory b t))))
+
+(ert-deftest magit-dash-pr/dashboard-refresh-primes-logins ()
+  (let ((primed 0))
+    (with-temp-buffer
+      (magit-dash-pr-dashboard-mode)
+      (cl-letf (((symbol-function 'magit-dash-pr--prime-account-logins)
+                 (lambda (&rest _) (setq primed (1+ primed))))
+                ((symbol-function 'magit-dash-gh--run-process)
+                 (lambda (&rest _) nil)))
+        (magit-dash-pr-dashboard-refresh)
+        (should (= 1 primed))))))
+
+(ert-deftest magit-dash-pr/primed-login-names-own-pr-pr-n ()
+  "With the login primed before first use, an own PR is pr-N."
+  (let ((repo (make-temp-file "repo" t))
+        (magit-dash-pr--account-logins (make-hash-table :test #'equal))
+        (magit-dash-pr--repo-hosts (make-hash-table :test #'equal))
+        (answer nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'magit-dash-gh--repo-account) #'ignore)
+                  ((symbol-function 'magit-dash-gh--run-process)
+                   (lambda (_args _dir on-success &rest _)
+                     (setq answer on-success)
+                     nil)))
+          (magit-dash-pr--prime-account-logins (list repo))
+          (funcall answer "me\n")
+          (should (equal "pr-3" (magit-dash-pr--entry-worktree-name
+                                 '(:number 3 :author "me") repo)))
+          (should (equal "cr-3" (magit-dash-pr--entry-worktree-name
+                                 '(:number 3 :author "other") repo))))
+      (delete-directory repo t))))
+
+(ert-deftest magit-dash-pr/reset-account-logins-clears-token-cache ()
+  (let ((magit-dash-gh--token-cache (make-hash-table :test #'equal))
+        (magit-dash-pr--account-logins (make-hash-table :test #'equal))
+        (magit-dash-pr--repo-hosts (make-hash-table :test #'equal)))
+    (setf (map-elt magit-dash-gh--token-cache '("u" . "github.com"))
+          (cons "tok" (current-time)))
+    (magit-dash-pr-reset-account-logins)
+    (should (zerop (hash-table-count magit-dash-gh--token-cache)))))
+
+(ert-deftest magit-dash-pr/run-limited-caps-concurrency ()
+  (let ((started nil)
+        (dones nil)
+        (tasks nil))
+    (dotimes (i 6)
+      (push (lambda (done) (push i started) (push done dones)) tasks))
+    (magit-dash-pr--run-limited (nreverse tasks) 2)
+    (should (= 2 (length started)))
+    (funcall (car (last dones)))
+    (should (= 3 (length started)))
+    (seq-do #'funcall (butlast dones))
+    (should (>= (length started) 4))
+    (while dones
+      (let ((d (pop dones)))
+        (funcall d)))
+    (should (= 6 (length started)))))
+
+(ert-deftest magit-dash-pr/run-limited-failing-task-frees-its-slot ()
+  (let ((ran nil))
+    (magit-dash-pr--run-limited
+     (list (lambda (_done) (error "boom"))
+           (lambda (_done) (push 'b ran))
+           (lambda (_done) (push 'c ran)))
+     1)
+    (should (equal '(b) ran))))
+
+(ert-deftest magit-dash-pr/refresh-entries-caps-concurrent-gh-processes ()
+  (with-temp-buffer
+    (magit-dash-pr-test/rows-fixture)
+    (let ((magit-dash-pr-refresh-max-processes 1)
+          (views nil)
+          (view-done nil)
+          (fetches nil))
+      (cl-letf (((symbol-function 'magit-dash-gh--run-process)
+                 (lambda (args _dir on-success &rest _)
+                   (push args views)
+                   (setq view-done on-success)
+                   nil))
+                ((symbol-function 'magit-dash-pr-status-fetch-one)
+                 (lambda (slug number _dir on-success &rest _)
+                   (push (cons slug number) fetches)
+                   (funcall on-success (list :ci nil)))))
+        (magit-dash-pr-dashboard-refresh-entries
+         (seq-map #'car tabulated-list-entries))
+        ;; only the first view runs until it finishes
+        (should (= 1 (length views)))
+        (should (null fetches))
+        (funcall view-done "{\"number\":1,\"state\":\"OPEN\"}")
+        (should (= 1 (length fetches)))
+        (should (= 2 (length views)))))))
+
 (provide 'test-magit-dash-pr)
 ;;; test-magit-dash-pr.el ends here

@@ -936,7 +936,6 @@ even when other real candidates exist."
                                    (lambda (_) (setq called t))
                                    (lambda (&rest _) (setq called t))
                                    nil (lambda () t))
-       (accept-process-output nil 0.3)
        (should-not called)))))
 
 (ert-deftest magit-dash-gh/run-process-waits-for-late-stderr-before-retry ()
@@ -971,7 +970,7 @@ echo done" counter counter)
         (magit-dash-gh-test--with-fake-gh
          (format "n=$(cat %s 2>/dev/null); n=$((${n:-0}+1)); echo $n > %s
 if [ $n -eq 1 ]; then echo 'HTTP 502' >&2; exit 1; fi
-sleep 30" counter counter)
+exec sleep 5" counter counter)
          (lambda (dir)
            (let ((magit-dash-gh-retry-delay 0)
                  (handle (list nil))
@@ -985,11 +984,174 @@ sleep 30" counter counter)
                (accept-process-output nil 0.05))
              (should (process-live-p (car handle)))
              (should-not (eq first (car handle)))
-             (magit-dash-gh--handle-cancel handle)
-             (accept-process-output nil 0.2)
-             (should-not (seq-find (lambda (p) (equal (process-name p) "magit-gh"))
-                                   (process-list))))))
+             (let ((second (car handle)))
+               (magit-dash-gh--handle-cancel handle)
+               (should (magit-dash-gh-test--wait-until
+                        (lambda () (not (process-live-p second)))))))))
       (delete-file counter))))
+
+
+;;;; token cache, stderr hygiene, retry start failures
+
+(defun magit-dash-gh-test--wait-until (pred &optional timeout)
+  "Run the event loop until PRED is non-nil or TIMEOUT (default 10) seconds pass."
+  (let ((deadline (+ (float-time) (or timeout 10))))
+    (while (and (not (funcall pred)) (< (float-time) deadline))
+      (accept-process-output nil 0.02))
+    (funcall pred)))
+
+(defun magit-dash-gh-test--new-live-procs (before)
+  "Return live processes named magit-gh that were not in the list BEFORE."
+  (seq-filter (lambda (p)
+                (and (not (memq p before))
+                     (equal (process-name p) "magit-gh")
+                     (process-live-p p)))
+              (process-list)))
+
+(ert-deftest magit-dash-gh/account-token-is-cached-per-user-and-host ()
+  (let ((calls 0)
+        (magit-dash-gh--token-cache (make-hash-table :test #'equal))
+        (magit-dash-gh-token-ttl 60))
+    (cl-letf (((symbol-function 'call-process)
+               (lambda (_cmd _in dest _display &rest args)
+                 (setq calls (1+ calls))
+                 (with-current-buffer (car dest)
+                   (insert (format "tok-%s-%d\n" (nth 3 args) calls)))
+                 0)))
+      (should (equal "tok-alice-1" (magit-dash-gh--account-token "alice" "github.com")))
+      (should (equal "tok-alice-1" (magit-dash-gh--account-token "alice" "github.com")))
+      (should (= 1 calls))
+      (magit-dash-gh--account-token "bob" "github.com")
+      (magit-dash-gh--account-token "alice" "ghe.example")
+      (should (= 3 calls))
+      (magit-dash-gh-reset-token-cache)
+      (magit-dash-gh--account-token "alice" "github.com")
+      (should (= 4 calls)))))
+
+(ert-deftest magit-dash-gh/account-token-cache-expires ()
+  (let ((calls 0)
+        (magit-dash-gh--token-cache (make-hash-table :test #'equal))
+        (magit-dash-gh-token-ttl 60))
+    (cl-letf (((symbol-function 'call-process)
+               (lambda (_cmd _in dest &rest _)
+                 (setq calls (1+ calls))
+                 (with-current-buffer (car dest) (insert "tok\n"))
+                 0)))
+      (magit-dash-gh--account-token "alice" "github.com")
+      (setf (cdr (map-elt magit-dash-gh--token-cache '("alice" . "github.com")))
+            (time-subtract (current-time) 120))
+      (magit-dash-gh--account-token "alice" "github.com")
+      (should (= 2 calls))
+      (setq magit-dash-gh-token-ttl nil)
+      (magit-dash-gh--account-token "alice" "github.com")
+      (should (= 3 calls)))))
+
+(ert-deftest magit-dash-gh/account-token-failure-not-cached-and-redacted ()
+  (let ((calls 0)
+        (magit-dash-gh--token-cache (make-hash-table :test #'equal)))
+    (cl-letf (((symbol-function 'call-process)
+               (lambda (_cmd _in dest &rest _)
+                 (setq calls (1+ calls))
+                 (with-current-buffer (car dest)
+                   (insert "bad ghp_SECRET123abc token"))
+                 1)))
+      (let ((err (should-error (magit-dash-gh--account-token "bob" "github.com")
+                               :type 'user-error)))
+        (should-not (string-match-p "SECRET123" (error-message-string err))))
+      (should-error (magit-dash-gh--account-token "bob" "github.com") :type 'user-error)
+      (should (= 2 calls)))))
+
+(ert-deftest magit-dash-gh/sanitize-redacts-and-truncates ()
+  (let ((magit-dash-gh-message-max-length 40))
+    (dolist (secret '("ghp_abcDEF123" "gho_abc123" "github_pat_11ABC_xyz" "Bearer abc.def-1"))
+      (let ((out (magit-dash-gh--sanitize (format "boom %s end" secret))))
+        (should-not (string-match-p (regexp-quote (car (last (split-string secret " ")))) out))
+        (should (string-match-p "\\[redacted\\]" out))))
+    (let ((out (magit-dash-gh--sanitize (make-string 100 ?x))))
+      (should (< (length out) 60))
+      (should (string-suffix-p "[truncated]" out)))
+    (should (equal "" (magit-dash-gh--sanitize nil)))))
+
+(ert-deftest magit-dash-gh/run-process-error-output-is-redacted-and-bounded ()
+  (magit-dash-gh-test--with-fake-gh
+   "echo 'auth failed ghp_TOPSECRET99 Bearer abcdef' >&2; yes xxxxxxxxxx | head -n 400 >&2; exit 4"
+   (lambda (dir)
+     (let ((result (magit-dash-gh-test--run dir)))
+       (should (eq :err (car result)))
+       (should-not (string-match-p "TOPSECRET99\\|abcdef" (cadr result)))
+       (should (<= (length (cadr result))
+                   (+ magit-dash-gh-message-max-length 20)))))))
+
+(ert-deftest magit-dash-gh/run-process-retry-start-failure-calls-on-error ()
+  "A make-process failure on the retry reaches ON-ERROR instead of the timer."
+  (let ((counter (make-temp-file "gh-count"))
+        (real-make-process (symbol-function 'make-process)))
+    (unwind-protect
+        (magit-dash-gh-test--with-fake-gh
+         (format "n=$(cat %s 2>/dev/null); n=$((${n:-0}+1)); echo $n > %s
+echo 'HTTP 503' >&2; exit 1" counter counter)
+         (lambda (dir)
+           (let ((magit-dash-gh-retry-delay 0)
+                 (magit-dash-gh-retry-attempts 3)
+                 (starts 0)
+                 (result nil))
+             (cl-letf (((symbol-function 'make-process)
+                        (lambda (&rest args)
+                          (setq starts (1+ starts))
+                          (if (> starts 1)
+                              (error "no fork")
+                            (apply real-make-process args)))))
+               (magit-dash-gh--run-process
+                '("x") dir
+                (lambda (out) (setq result (list :ok out)))
+                (lambda (out code) (setq result (list :err out code))))
+               (should (magit-dash-gh-test--wait-until (lambda () result)))
+               (should (eq :err (car result)))
+               (should (string-match-p "no fork" (cadr result)))
+               (should (= 2 starts))))))
+      (delete-file counter))))
+
+(ert-deftest magit-dash-gh/run-process-retry-start-failure-without-on-error-messages ()
+  (let ((real-make-process (symbol-function 'make-process))
+        (starts 0)
+        (msgs nil))
+    (magit-dash-gh-test--with-fake-gh
+     "echo 'HTTP 502' >&2; exit 1"
+     (lambda (dir)
+       (let ((magit-dash-gh-retry-delay 0))
+         (cl-letf (((symbol-function 'make-process)
+                    (lambda (&rest args)
+                      (setq starts (1+ starts))
+                      (if (> starts 1)
+                          (error "no fork")
+                        (apply real-make-process args))))
+                   ((symbol-function 'message)
+                    (lambda (fmt &rest args) (push (apply #'format fmt args) msgs))))
+           (magit-dash-gh--run-process '("x") dir #'ignore)
+           (should (magit-dash-gh-test--wait-until
+                    (lambda () (seq-find (lambda (m) (string-match-p "retry failed" m)) msgs))))))))))
+
+(ert-deftest magit-dash-gh/run-process-survives-killed-buffers ()
+  "Killing the process buffers before the exit does not break the finish step."
+  (magit-dash-gh-test--with-fake-gh
+   "exec sleep 5"
+   (lambda (dir)
+     (let ((before (process-list))
+           (result nil)
+           (magit-dash-gh-stderr-grace 0.1)
+           (proc nil))
+       (setq proc (magit-dash-gh--run-process
+                   '("x") dir
+                   (lambda (out) (setq result (list :ok out)))
+                   (lambda (out code) (setq result (list :err out code)))))
+       (let ((buf (process-buffer proc)))
+         (when (buffer-live-p buf)
+           (let ((kill-buffer-query-functions nil))
+             (kill-buffer buf))))
+       (when (process-live-p proc)
+         (delete-process proc))
+       (magit-dash-gh-test--wait-until (lambda () result) 3)
+       (should (null (magit-dash-gh-test--new-live-procs before)))))))
 
 ;;; test-magit-dash-gh.el ends here
 

@@ -109,19 +109,59 @@ Nil GUARDS means that the work was not scheduled by a refresh."
   (unless (executable-find "gh")
     (user-error "magit-gh: `gh' CLI not found on PATH")))
 
+(defcustom magit-dash-gh-token-ttl 60
+  "Seconds a token from `gh auth token' is reused before asking `gh' again.
+Nil or 0 disables the cache."
+  :type '(choice (const :tag "No cache" nil) number)
+  :group 'magit-dash)
+
+(defcustom magit-dash-gh-message-max-length 500
+  "Longest `gh' output, in characters, echoed into messages and error strings."
+  :type 'integer
+  :group 'magit-dash)
+
+(defvar magit-dash-gh--token-cache (make-hash-table :test #'equal)
+  "Tokens by (USER . HOST), each value (TOKEN . TIME).")
+
+(defun magit-dash-gh-reset-token-cache ()
+  "Forget every cached account token."
+  (interactive)
+  (clrhash magit-dash-gh--token-cache))
+
+(defconst magit-dash-gh--secret-regexp
+  "\\_<gh[pousr]_[[:alnum:]_]+\\|github_pat_[[:alnum:]_]+\\|[Bb]earer[[:blank:]]+[^[:space:]\"']+"
+  "Regexp matching GitHub token shapes that must never reach messages.")
+
+(defun magit-dash-gh--sanitize (text)
+  "Return TEXT with token-like strings redacted and its length bounded."
+  (let ((redacted (replace-regexp-in-string
+                   magit-dash-gh--secret-regexp "[redacted]" (or text "") t t)))
+    (if (> (length redacted) magit-dash-gh-message-max-length)
+        (concat (substring redacted 0 magit-dash-gh-message-max-length) "...[truncated]")
+      redacted)))
+
 (defun magit-dash-gh--account-token (user &optional host)
   "Return the auth token for USER on HOST using `gh auth token'.
-HOST defaults to \"github.com\".
-Signals `user-error' if token resolution fails."
+HOST defaults to \"github.com\".  A successful lookup is reused for
+`magit-dash-gh-token-ttl' seconds.  Signals `user-error' if token
+resolution fails; the token is never put in a message."
   (let* ((h (or host "github.com"))
-         (args (list "auth" "token" "-u" user "-h" h)))
-    (with-temp-buffer
-      (let ((code (apply #'call-process "gh" nil (list (current-buffer) t) nil args)))
-        (let ((output (string-trim (buffer-string))))
-          (if (= code 0)
-              output
+         (key (cons user h))
+         (hit (map-elt magit-dash-gh--token-cache key)))
+    (if (and hit
+             (numberp magit-dash-gh-token-ttl)
+             (< (float-time (time-since (cdr hit))) magit-dash-gh-token-ttl))
+        (car hit)
+      (with-temp-buffer
+        (let* ((code (apply #'call-process "gh" nil (list (current-buffer) t) nil
+                            (list "auth" "token" "-u" user "-h" h)))
+               (output (string-trim (buffer-string))))
+          (unless (eql code 0)
             (user-error "magit-gh: failed to obtain token for account '%s' on host '%s': %s"
-                        user h output)))))))
+                        user h (magit-dash-gh--sanitize output)))
+          (setf (map-elt magit-dash-gh--token-cache key)
+                (cons output (current-time)))
+          output)))))
 
 (defun magit-dash-gh--call-with-account (account fn)
   "Call FN with `process-environment' configured for ACCOUNT.
@@ -814,6 +854,21 @@ Return (EXIT-CODE . OUTPUT)."
   "Seconds to wait for a failed `gh' call's stderr to finish arriving.
 Only a fallback: normally the stderr process's own sentinel ends the wait.")
 
+(defun magit-dash-gh--retry-process (args dir on-success on-error attempt cancelled-p handle)
+  "Timer entry for a retry of `magit-dash-gh--run-process'.
+A failure to start the retry calls ON-ERROR (or messages) instead of
+escaping from the timer, so the caller always hears a final outcome."
+  (when (consp handle)
+    (setcdr handle nil))
+  (condition-case err
+      (magit-dash-gh--run-process args dir on-success on-error attempt cancelled-p handle)
+    (error
+     (unless (and cancelled-p (funcall cancelled-p))
+       (let ((msg (magit-dash-gh--sanitize (error-message-string err))))
+         (if on-error
+             (funcall on-error msg 1)
+           (message "magit-gh: gh %s retry failed: %s" (car args) msg)))))))
+
 (defun magit-dash-gh--run-process (args dir on-success &optional on-error attempt cancelled-p handle)
   "Run `gh' with ARGS in DIR asynchronously.
 Transient HTTP 502/503/504 failures are retried up to
@@ -860,14 +915,20 @@ Return the process, or nil."
                   (setq done t)
                   (when (timerp grace)
                     (cancel-timer grace))
-                  (let* ((stdout (with-current-buffer buf (buffer-string)))
+                  (let* ((stdout (if (buffer-live-p buf)
+                                     (with-current-buffer buf (buffer-string))
+                                   ""))
                          (output (if (= code 0)
                                      stdout
                                    (concat stdout
-                                           (with-current-buffer errbuf
-                                             (buffer-string))))))
-                    (kill-buffer buf)
-                    (kill-buffer errbuf)
+                                           (if (buffer-live-p errbuf)
+                                               (with-current-buffer errbuf
+                                                 (buffer-string))
+                                             "")))))
+                    (when (buffer-live-p buf)
+                      (kill-buffer buf))
+                    (when (buffer-live-p errbuf)
+                      (kill-buffer errbuf))
                     (when (consp handle)
                       (setcar handle nil))
                     (cond
@@ -878,20 +939,21 @@ Return the process, or nil."
                      ((and (< (or attempt 1) magit-dash-gh-retry-attempts)
                            (string-match-p "HTTP 50[234]" output))
                       (let ((delay (* magit-dash-gh-retry-delay
-                                      (expt 2 (1- (or attempt 1))))))
-                        (message "magit-gh: gh %s hit a gateway error, retrying in %ss"
+                                      (expt 2 (1- (or attempt 1)))
+                                      (+ 1.0 (/ (random 250) 1000.0)))))
+                        (message "magit-gh: gh %s hit a gateway error, retrying in %.1fs"
                                  (car args) delay)
-                        (let ((timer (run-with-timer delay nil #'magit-dash-gh--run-process
+                        (let ((timer (run-with-timer delay nil #'magit-dash-gh--retry-process
                                                      args dir on-success on-error
                                                      (1+ (or attempt 1)) cancelled-p handle)))
                           (when (consp handle)
                             (setcdr handle timer)))))
                      (on-error
-                      (funcall on-error output code))
+                      (funcall on-error (magit-dash-gh--sanitize output) code))
                      (t
                       (message "magit-gh: gh %s exited %d: %s"
                                (car args) code
-                               (string-trim output))))))))
+                               (magit-dash-gh--sanitize (string-trim output)))))))))
              (proc (condition-case err
                        (make-process
                         :name "magit-gh"

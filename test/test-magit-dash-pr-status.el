@@ -444,7 +444,7 @@
         (partial nil)
         (failure nil))
     (cl-letf (((symbol-function 'magit-dash-gh--run-process)
-               (lambda (_args dir on-success on-error)
+               (lambda (_args dir on-success on-error &rest _)
                  (if (equal dir "/tmp/w1")
                      (funcall on-error "gh: HTTP 401" 1)
                    (funcall on-success
@@ -479,7 +479,7 @@
                  (funcall response dir (lambda (out) (cons 0 out))
                           (lambda () (cons 1 "gh: HTTP 401")))))
               ((symbol-function 'magit-dash-gh--run-process)
-               (lambda (_args dir on-success on-error)
+               (lambda (_args dir on-success on-error &rest _)
                  (funcall response dir on-success
                           (lambda () (funcall on-error "gh: HTTP 401" 1))))))
       (magit-dash-pr-status-collect-all "/tmp/here" (lambda (n) (setq sync-notes n)))
@@ -508,7 +508,7 @@
         (failure nil)
         (succeeded nil))
     (cl-letf (((symbol-function 'magit-dash-gh--run-process)
-               (lambda (_args _dir _on-success on-error)
+               (lambda (_args _dir _on-success on-error &rest _)
                  (funcall on-error "boom" 1))))
       (magit-dash-pr-status-collect-all-async
        (lambda (_) (setq succeeded t))
@@ -534,7 +534,7 @@
         (partial nil))
     (unwind-protect
         (cl-letf (((symbol-function 'magit-dash-gh--run-process)
-                   (lambda (_args dir on-success _on-error)
+                   (lambda (_args dir on-success _on-error &rest _)
                      (if (equal dir "/tmp/w1")
                          hung
                        (funcall on-success
@@ -566,7 +566,7 @@
         (called nil))
     (unwind-protect
         (cl-letf (((symbol-function 'magit-dash-gh--run-process)
-                   (lambda (_args _dir on-success _on-error)
+                   (lambda (_args _dir on-success _on-error &rest _)
                      (setq late on-success)
                      hung)))
           (let ((cancel (magit-dash-pr-status-collect-all-async
@@ -589,7 +589,7 @@
         (result 'unset)
         (partial nil))
     (cl-letf (((symbol-function 'magit-dash-gh--run-process)
-               (lambda (_args dir on-success _on-error)
+               (lambda (_args dir on-success _on-error &rest _)
                  (if (equal dir "/tmp/w1")
                      (error "cannot start gh")
                    (funcall on-success
@@ -620,7 +620,7 @@
         (result nil)
         (error-result nil))
     (cl-letf (((symbol-function 'magit-dash-gh--run-process)
-               (lambda (args _dir on-success _on-error)
+               (lambda (args _dir on-success _on-error &rest _)
                  (setq seen args)
                  (funcall on-success
                           (json-encode
@@ -896,9 +896,12 @@ recording.  Return a plist of :result :error :calls :successes :errors."
 n=$(cat %s 2>/dev/null || echo 0); n=$((n+1)); echo $n > %s
 if [ $n -le %d ]; then echo '%s' >&2; exit 1; fi
 [ -n '%s' ] && echo '%s' >&2
-sleep %s
+%s
 cat %s
-" counter counter failures stderr (or warn "") (or warn "") sleep
+" counter counter failures stderr (or warn "") (or warn "")
+                         (if (and (numberp sleep) (> sleep 0))
+                             (format "exec sleep %s" sleep)
+                           "")
                          (expand-file-name "body.json" dir))))
           (set-file-modes (expand-file-name "gh" dir) #o755)
           (let ((exec-path (cons dir exec-path))
@@ -919,11 +922,11 @@ cat %s
                (lambda (e)
                  (push e errors)
                  (when on-error (funcall on-error e))))
-              (while (and (not successes) (not errors) (< tries wait))
-                (setq tries (1+ tries))
-                (accept-process-output nil 0.05))
+              (let ((deadline (+ (float-time) (/ (* wait 0.05) 1.0))))
+                (while (and (not successes) (not errors) (< (float-time) deadline))
+                  (accept-process-output nil 0.02)))
               ;; Let any stray duplicate callback arrive.
-              (accept-process-output nil 0.2))
+              (accept-process-output nil 0.1))
             (list :result (car successes)
                   :error (car errors)
                   :successes successes
@@ -1055,9 +1058,11 @@ cat %s
 (ert-deftest magit-dash-pr-status/fetch-one-real-timeout-kills-gh ()
   (let ((magit-dash-pr-status-fetch-one-timeout 0.3))
     (magit-dash-pr-status-test/fetch-one-with-fake-gh 0 :sleep 30 :wait 20)
-    (accept-process-output nil 0.2)
-    (should-not (seq-find (lambda (p) (equal (process-name p) "magit-gh"))
-                          (process-list)))))
+    (should (magit-dash-pr-status-test/wait-until
+             (lambda ()
+               (not (seq-find (lambda (p) (and (equal (process-name p) "magit-gh")
+                                               (process-live-p p)))
+                              (process-list))))))))
 
 (ert-deftest magit-dash-pr-status/fetch-one-timeout-kills-retried-process ()
   "A retry already running when the timeout fires is killed too."
@@ -1067,9 +1072,11 @@ cat %s
     (should (= 1 (length (plist-get out :errors))))
     (should (string-match-p "timed out" (plist-get out :error)))
     (should (= 2 (plist-get out :calls)))
-    (accept-process-output nil 0.2)
-    (should-not (seq-find (lambda (p) (equal (process-name p) "magit-gh"))
-                          (process-list)))))
+    (should (magit-dash-pr-status-test/wait-until
+             (lambda ()
+               (not (seq-find (lambda (p) (and (equal (process-name p) "magit-gh")
+                                               (process-live-p p)))
+                              (process-list))))))))
 
 (ert-deftest magit-dash-pr-status/null-thread-nodes-not-counted ()
   (let* ((node (copy-tree (car (map-nested-elt (magit-dash-pr-status-test/response)
@@ -1166,6 +1173,153 @@ cat %s
         #'ignore
         (lambda (_) (setq count (1+ count)) (error "callback boom")))))
     (should (= 1 count))))
+
+;;;; fetch-page-async: retries, cancellation, callbacks
+
+(defun magit-dash-pr-status-test/wait-until (pred &optional timeout)
+  "Run the event loop until PRED is non-nil or TIMEOUT (default 10) seconds pass.
+Return PRED's final value."
+  (let ((deadline (+ (float-time) (or timeout 10))))
+    (while (and (not (funcall pred)) (< (float-time) deadline))
+      (accept-process-output nil 0.02))
+    (funcall pred)))
+
+(defun magit-dash-pr-status-test/with-counting-gh (script fn)
+  "Call FN with a temp dir whose `gh' runs SCRIPT after bumping a call counter."
+  (let ((dir (make-temp-file "fp-async" t)))
+    (unwind-protect
+        (progn
+          (with-temp-file (expand-file-name "gh" dir)
+            (insert (format "#!/bin/sh
+n=$(cat %s 2>/dev/null || echo 0); n=$((n+1)); echo $n > %s
+%s
+" (expand-file-name "count" dir) (expand-file-name "count" dir) script)))
+          (set-file-modes (expand-file-name "gh" dir) #o755)
+          (let ((exec-path (cons dir exec-path))
+                (process-environment (cons (concat "PATH=" dir ":" (getenv "PATH"))
+                                           process-environment)))
+            (cl-letf (((symbol-function 'magit-dash-gh--repo-account) #'ignore))
+              (funcall fn dir))))
+      (delete-directory dir t))))
+
+(defun magit-dash-pr-status-test/gh-calls (dir)
+  "Return how many times the counting fake gh in DIR has run."
+  (let ((file (expand-file-name "count" dir)))
+    (if (file-exists-p file)
+        (string-to-number (with-temp-buffer (insert-file-contents file) (buffer-string)))
+      0)))
+
+(ert-deftest magit-dash-pr-status/fetch-page-async-always-504-makes-three-calls ()
+  "Only one retry layer runs: 3 attempts, not 3x3."
+  (magit-dash-pr-status-test/with-counting-gh
+   "echo 'gh: HTTP 504' >&2; exit 1"
+   (lambda (dir)
+     (let ((magit-dash-gh-retry-delay 0)
+           (magit-dash-gh-retry-attempts 3)
+           (magit-dash-pr-status-retry-delay 0)
+           (magit-dash-pr-status-retry-attempts 3)
+           (errors nil))
+       (magit-dash-pr-status--fetch-page-async
+        "q" dir 10 nil #'ignore (lambda (e) (push e errors)))
+       (should (magit-dash-pr-status-test/wait-until (lambda () errors)))
+       (accept-process-output nil 0.2)
+       (should (= 1 (length errors)))
+       (should (string-match-p "HTTP 504" (car errors)))
+       (should (= 3 (magit-dash-pr-status-test/gh-calls dir)))))))
+
+(ert-deftest magit-dash-pr-status/fetch-page-async-cancel-stops-pending-retry ()
+  "Cancelling the job while the retry timer is pending stops further calls."
+  (magit-dash-pr-status-test/with-counting-gh
+   "echo 'gh: HTTP 504' >&2; exit 1"
+   (lambda (dir)
+     (let ((magit-dash-gh-retry-delay 0.5)
+           (magit-dash-gh-retry-attempts 3)
+           (job (list nil))
+           (called nil))
+       (magit-dash-pr-status--fetch-page-async
+        "q" dir 10 nil (lambda (_) (setq called t)) (lambda (_) (setq called t))
+        nil nil job)
+       (should (magit-dash-pr-status-test/wait-until
+                (lambda ()
+                  (seq-find (lambda (h) (and (consp h) (timerp (cdr h)))) (cdr job)))))
+       (should (= 1 (magit-dash-pr-status-test/gh-calls dir)))
+       (magit-dash-pr-status--job-cancel job)
+       (accept-process-output nil 1.0)
+       (should (= 1 (magit-dash-pr-status-test/gh-calls dir)))
+       (should-not called)))))
+
+(ert-deftest magit-dash-pr-status/fetch-page-async-cancel-kills-live-process ()
+  (magit-dash-pr-status-test/with-counting-gh
+   "exec sleep 5"
+   (lambda (dir)
+     (let ((before (process-list))
+           (job (list nil))
+           (called nil))
+       (magit-dash-pr-status--fetch-page-async
+        "q" dir 10 nil (lambda (_) (setq called t)) (lambda (_) (setq called t))
+        nil nil job)
+       (let ((live (seq-filter (lambda (p) (and (not (memq p before))
+                                                (equal (process-name p) "magit-gh")))
+                               (process-list))))
+         (should (= 1 (length live)))
+         (magit-dash-pr-status--job-cancel job)
+         (should (magit-dash-pr-status-test/wait-until
+                  (lambda () (not (process-live-p (car live))))))
+         (should-not called))))))
+
+(ert-deftest magit-dash-pr-status/fetch-page-async-success-callback-error-is-messaged ()
+  "An error in ON-SUCCESS is messaged and never reclassified as ON-ERROR."
+  (magit-dash-pr-status-test/with-counting-gh
+   (format "cat <<'EOF'\n%s\nEOF" (json-encode (magit-dash-pr-status-test/response)))
+   (lambda (dir)
+     (let ((msgs nil)
+           (errors nil)
+           (seen nil))
+       (cl-letf (((symbol-function 'message)
+                  (lambda (fmt &rest args) (push (apply #'format fmt args) msgs))))
+         (magit-dash-pr-status--fetch-page-async
+          "q" dir 10 nil
+          (lambda (_) (setq seen t) (error "downstream boom"))
+          (lambda (e) (push e errors)))
+         (should (magit-dash-pr-status-test/wait-until (lambda () seen)))
+         (accept-process-output nil 0.1))
+       (should-not errors)
+       (should (seq-find (lambda (m) (string-match-p "downstream boom" m)) msgs))))))
+
+(ert-deftest magit-dash-pr-status/fetch-page-async-bad-response-calls-on-error ()
+  (magit-dash-pr-status-test/with-counting-gh
+   "echo 'not json {'"
+   (lambda (dir)
+     (let ((errors nil))
+       (magit-dash-pr-status--fetch-page-async
+        "q" dir 10 nil #'ignore (lambda (e) (push e errors)))
+       (should (magit-dash-pr-status-test/wait-until (lambda () errors)))
+       (should (= 1 (length errors)))))))
+
+(ert-deftest magit-dash-pr-status/fetch-one-retry-start-failure-calls-on-error-without-timeout ()
+  "A failure to start the retry reports through ON-ERROR even with no timeout."
+  (let ((real-make-process (symbol-function 'make-process))
+        (starts 0)
+        (errors nil)
+        (magit-dash-pr-status-fetch-one-timeout nil)
+        (magit-dash-gh-retry-delay 0)
+        (magit-dash-gh-retry-attempts 3))
+    (magit-dash-pr-status-test/with-counting-gh
+     "echo 'gh: HTTP 503' >&2; exit 1"
+     (lambda (dir)
+       (cl-letf (((symbol-function 'make-process)
+                  (lambda (&rest args)
+                    (setq starts (1+ starts))
+                    (if (> starts 1)
+                        (error "no fork")
+                      (apply real-make-process args)))))
+         (magit-dash-pr-status-fetch-one
+          magit-dash-pr-status-test/slug 7 dir #'ignore
+          (lambda (e) (push e errors)))
+         (should (magit-dash-pr-status-test/wait-until (lambda () errors)))
+         (accept-process-output nil 0.1)
+         (should (= 1 (length errors)))
+         (should (string-match-p "no fork" (car errors))))))))
 
 (provide 'test-magit-dash-pr-status)
 ;;; test-magit-dash-pr-status.el ends here

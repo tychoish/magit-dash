@@ -1454,19 +1454,56 @@ Rows fill as results arrive.  Cancels a collection still running for BUF."
            (lambda (prs _notes _pending)
              (magit-dash-pr-dashboard--fill-statuses buf prs))))))
 
-(defun magit-dash-pr-dashboard--refresh-status (buf key pr dir)
+(defun magit-dash-pr-dashboard--refresh-status (buf key pr dir &optional done)
   "Fetch the status of KEY (REPO . NUMBER) for BUF and store it with PR.
-On failure the existing status, cached and displayed, is left untouched."
+On failure the existing status, cached and displayed, is left untouched.
+DONE, a function of no arguments, runs once the fetch has finished either way."
   (magit-dash-pr-status-fetch-one
    (car key) (cdr key) dir
    (lambda (status)
-     (when (buffer-live-p buf)
-       (with-current-buffer buf
-         (when (magit-dash-pr-dashboard--store-status (car key) (cdr key) status pr)
-           (magit-dash-pr-dashboard--rebuild-keys (list key))))))
+     (unwind-protect
+         (when (buffer-live-p buf)
+           (with-current-buffer buf
+             (when (magit-dash-pr-dashboard--store-status (car key) (cdr key) status pr)
+               (magit-dash-pr-dashboard--rebuild-keys (list key)))))
+       (when done
+         (funcall done))))
    (lambda (err)
      (message "magit-gh: could not refresh status of %s#%s: %s"
-              (car key) (cdr key) err))))
+              (car key) (cdr key) err)
+     (when done
+       (funcall done)))))
+
+(defcustom magit-dash-pr-refresh-max-processes 4
+  "Most `gh' processes `magit-dash-pr-dashboard-refresh-entries' runs at once."
+  :type 'integer
+  :group 'magit-dash)
+
+(defun magit-dash-pr--run-limited (tasks limit)
+  "Run TASKS at most LIMIT at a time.
+Each task is a function taking one DONE callback it must call when its
+work has finished.  A task that signals is messaged and counts as done."
+  (let ((queue (copy-sequence tasks))
+        (active 0)
+        (pump nil))
+    (setq pump
+          (lambda ()
+            (while (and queue (< active (max 1 limit)))
+              (let ((task (pop queue))
+                    (finished nil))
+                (setq active (1+ active))
+                (let ((done (lambda ()
+                              (unless finished
+                                (setq finished t)
+                                (setq active (1- active))
+                                (funcall pump)))))
+                  (condition-case err
+                      (funcall task done)
+                    (error
+                     (message "magit-gh: refresh task failed: %s"
+                              (error-message-string err))
+                     (funcall done))))))))
+    (funcall pump)))
 
 (defun magit-dash-pr-dashboard-refresh-entries (&optional entries)
   "Refresh only ENTRIES (entry plists) from GitHub, one `gh pr view' each.
@@ -1482,23 +1519,28 @@ discovery query runs and no other row changes."
          (dir (or (ignore-errors (magit-dash-gh--repo-dir))
                   (expand-file-name "~"))))
     (message "magit-gh: refreshing %d PR(s)..." (length entries))
-    (seq-do (lambda (entry)
-              (let ((key (magit-dash-pr-dashboard--entry-key entry)))
-                (magit-dash-gh--run-process
-                 (magit-dash-pr-dashboard--view-args key) dir
-                 (lambda (output)
-                   (magit-dash-pr-dashboard--replace-row buf key output))
-                 (lambda (output _code)
-                   (message "magit-gh: could not refresh %s#%s: %s"
-                            (car key) (cdr key) (string-trim output))))
-                (require 'magit-dash-pr-status)
-                (condition-case err
-                    (magit-dash-pr-dashboard--refresh-status
-                     buf key (plist-get entry :pr) dir)
-                  (error
-                   (message "magit-gh: could not refresh status of %s#%s: %s"
-                            (car key) (cdr key) (error-message-string err))))))
-            entries)))
+    (require 'magit-dash-pr-status)
+    (magit-dash-pr--run-limited
+     (seq-mapcat
+      (lambda (entry)
+        (let ((key (magit-dash-pr-dashboard--entry-key entry)))
+          (list
+           (lambda (done)
+             (magit-dash-gh--run-process
+              (magit-dash-pr-dashboard--view-args key) dir
+              (lambda (output)
+                (unwind-protect
+                    (magit-dash-pr-dashboard--replace-row buf key output)
+                  (funcall done)))
+              (lambda (output _code)
+                (message "magit-gh: could not refresh %s#%s: %s"
+                         (car key) (cdr key) (string-trim output))
+                (funcall done))))
+           (lambda (done)
+             (magit-dash-pr-dashboard--refresh-status
+              buf key (plist-get entry :pr) dir done)))))
+      entries)
+     magit-dash-pr-refresh-max-processes)))
 
 (defun magit-dash-pr-dashboard-refresh ()
   "Fetch PRs matching current filters and repopulate the PR table.
@@ -1528,6 +1570,7 @@ other buffers."
               (magit-dash-pr-dashboard--cached-entries filters))
         (when tabulated-list-entries
           (magit-dash-pr-dashboard--print)))
+      (magit-dash-pr--prime-account-logins)
       (message "magit-gh: fetching PRs...")
       (magit-dash-gh--run-process
        args dir
@@ -1973,6 +2016,9 @@ for a lookup in flight or recently failed.")
 (defvar magit-dash-pr--repo-hosts (make-hash-table :test #'equal)
   "Cache of the git remote host by repository directory.")
 
+(defconst magit-dash-pr--login-timeout 20
+  "Seconds a default-login lookup may run before it is killed and marked failed.")
+
 (defconst magit-dash-pr--login-retry-seconds 300
   "Seconds a pending or failed default-login lookup suppresses a new one.")
 
@@ -1982,26 +2028,28 @@ Call this after switching the active `gh auth' account or changing a
 repository's configured account, since the default login is cached per host."
   (interactive)
   (clrhash magit-dash-pr--account-logins)
-  (clrhash magit-dash-pr--repo-hosts))
+  (clrhash magit-dash-pr--repo-hosts)
+  (magit-dash-gh-reset-token-cache))
 
 (defun magit-dash-pr--repo-host (repo)
-  "Return the host of REPO's origin remote, or \"github.com\"."
+  "Return the host of REPO's origin remote, or \"github.com\".
+The \"github.com\" fallback is not cached when the git lookup fails, so a
+later call can still find the real host."
   (if (not (and (stringp repo) (file-directory-p repo)))
       "github.com"
     (or (map-elt magit-dash-pr--repo-hosts repo)
-        (setf (map-elt magit-dash-pr--repo-hosts repo)
-              (or (when-let* ((url (ignore-errors
-                                    (with-temp-buffer
-                                      (let ((default-directory repo))
-                                        (when (zerop (call-process
-                                                      "git" nil (list (current-buffer) nil) nil
-                                                      "config" "--get" "remote.origin.url"))
-                                          (string-trim (buffer-string)))))))
-                              ((string-match
-                                "\\`\\(?:[[:alpha:]+]+://\\)?\\(?:[^@/]+@\\)?\\([^:/]+\\)[:/]"
-                                url)))
-                    (match-string 1 url))
-                  "github.com")))))
+        (when-let* ((url (ignore-errors
+                          (with-temp-buffer
+                            (let ((default-directory repo))
+                              (when (zerop (call-process
+                                            "git" nil (list (current-buffer) nil) nil
+                                            "config" "--get" "remote.origin.url"))
+                                (string-trim (buffer-string)))))))
+                    ((string-match
+                      "\\`\\(?:[[:alpha:]+]+://\\)?\\(?:[^@/]+@\\)?\\([^:/]+\\)[:/]"
+                      url)))
+          (setf (map-elt magit-dash-pr--repo-hosts repo) (match-string 1 url)))
+        "github.com")))
 
 (defun magit-dash-pr--account-login (repo)
   "Return the gh login in use for REPO, or nil when not known yet.
@@ -2028,18 +2076,45 @@ the cache; a pending or failed lookup is not retried for
                   magit-dash-pr--login-retry-seconds)))
       (setf (map-elt magit-dash-pr--account-logins key)
             (cons :pending (current-time)))
-      (magit-dash-gh--run-process
-       (list "api" "user" "--hostname" host "--jq" ".login") repo
-       (lambda (output)
-         (let ((login (string-trim output)))
-           (setf (map-elt magit-dash-pr--account-logins key)
-                 (if (string-empty-p login)
-                     (cons :failed (current-time))
-                   login))))
-       (lambda (&rest _)
-         (setf (map-elt magit-dash-pr--account-logins key)
-               (cons :failed (current-time)))))
+      (let* ((settled nil)
+             (handle (list nil))
+             (timer nil)
+             (settle (lambda (value)
+                       (unless settled
+                         (setq settled t)
+                         (when (timerp timer)
+                           (cancel-timer timer))
+                         (setf (map-elt magit-dash-pr--account-logins key) value)))))
+        (setq timer (run-with-timer
+                     magit-dash-pr--login-timeout nil
+                     (lambda ()
+                       (unless settled
+                         (funcall settle (cons :failed (current-time)))
+                         (magit-dash-gh--handle-cancel handle)))))
+        (condition-case nil
+            (magit-dash-gh--run-process
+             (list "api" "user" "--hostname" host "--jq" ".login") repo
+             (lambda (output)
+               (let ((login (string-trim output)))
+                 (funcall settle (if (string-empty-p login)
+                                     (cons :failed (current-time))
+                                   login))))
+             (lambda (&rest _)
+               (funcall settle (cons :failed (current-time))))
+             nil (lambda () settled) handle)
+          (error
+           (funcall settle (cons :failed (current-time))))))
       nil))))
+
+(defun magit-dash-pr--prime-account-logins (&optional dirs)
+  "Start the gh login lookup for each of DIRS, once per repository.
+DIRS defaults to the paths of `magit-dash-repo-list'.  Lookups already
+cached or in flight are not repeated, so this is cheap to call on every
+refresh; it lets own PRs be named pr-N from their first use."
+  (seq-do #'magit-dash-pr--account-login
+          (seq-uniq (or dirs
+                        (and (boundp 'magit-dash-repo-list)
+                             (seq-map #'magit-dash-repo-path magit-dash-repo-list))))))
 
 (defun magit-dash-pr-own-p (author-login repo)
   "Return non-nil when AUTHOR-LOGIN is the gh account login in use for REPO.

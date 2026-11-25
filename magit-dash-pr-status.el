@@ -267,11 +267,12 @@ AFTER may be nil.  Return the parsed, validated response.  Signal
                    (user-error "gh api graphql could not run: %s"
                                (error-message-string err))))))
     (unless (and (integerp code) (zerop code))
-      (user-error "gh api graphql failed (%s): %s" code (string-trim out)))
+      (user-error "gh api graphql failed (%s): %s" code
+                  (magit-dash-gh--sanitize (string-trim out))))
     (magit-dash-pr-status--validate-response out)))
 
 (defun magit-dash-pr-status--job-register (job handle)
-  "Record process or timer HANDLE in JOB so `--job-cancel' can stop it.
+  "Record process, timer or run-process HANDLE cons in JOB for `--job-cancel'.
 JOB is a cons (CANCELLED . HANDLES), or nil when nothing needs cancelling."
   (when job
     (push handle (cdr job))))
@@ -283,6 +284,8 @@ Callbacks of a cancelled job are never called."
     (setcar job t)
     (seq-do (lambda (handle)
               (cond
+               ((consp handle)
+                (magit-dash-gh--handle-cancel handle))
                ((timerp handle)
                 (cancel-timer handle))
                ((and (processp handle) (process-live-p handle))
@@ -290,47 +293,48 @@ Callbacks of a cancelled job are never called."
             (cdr job))
     (setcdr job nil)))
 
-(defun magit-dash-pr-status--fetch-page-async (q dir first after on-success on-error &optional attempt delay job)
+(defun magit-dash-pr-status--fetch-page-async (q dir first after on-success on-error &optional _attempt _delay job)
   "Asynchronously fetch one page of FIRST PRs matching Q from DIR starting after cursor AFTER.
 Call ON-SUCCESS with validated parsed response.
 Call ON-ERROR with error message string on fatal failure, including a
-failure to start `gh'.
-Transient 5xx failures are retried up to `magit-dash-pr-status-retry-attempts' times.
-JOB, when non-nil, collects the process and retry timers (see
+failure to start `gh'.  Transient 5xx failures are retried only by
+`magit-dash-gh--run-process', never a second time here.  Errors signalled
+by ON-SUCCESS itself are messaged, not turned into ON-ERROR calls.
+_ATTEMPT and _DELAY are ignored and kept for compatibility.
+JOB, when non-nil, collects the process and retry timer (see
 `magit-dash-pr-status--job-cancel'); once it is cancelled no callback runs."
-  (let* ((att (or attempt 1))
-         (del (or delay magit-dash-pr-status-retry-delay))
-         (args (list "api" "graphql"
-                     "-f" (concat "query=" (magit-dash-pr-status--query))
-                     "-f" (concat "q=" q)
-                     "-F" (format "first=%d" first)
-                     (if after "-f" "-F") (if after (concat "after=" after) "after=null"))))
+  (let ((args (list "api" "graphql"
+                    "-f" (concat "query=" (magit-dash-pr-status--query))
+                    "-f" (concat "q=" q)
+                    "-F" (format "first=%d" first)
+                    (if after "-f" "-F") (if after (concat "after=" after) "after=null")))
+        (handle (list nil)))
     (unless (car job)
+      (magit-dash-pr-status--job-register job handle)
       (condition-case err
-          (magit-dash-pr-status--job-register
-           job
-           (magit-dash-gh--run-process
-            args dir
-            (lambda (out)
-              (unless (car job)
-                (condition-case err
-                    (funcall on-success (magit-dash-pr-status--validate-response out))
-                  (error (funcall on-error (error-message-string err))))))
-            (lambda (out code)
-              (cond
-               ((car job) nil)
-               ((and (< att magit-dash-pr-status-retry-attempts)
-                     (magit-dash-pr-status--transient-failure-p (cons code out)))
-                (message "magit-dash: gh api graphql failed transiently (%s), retrying in %ss" code del)
-                (magit-dash-pr-status--job-register
-                 job
-                 (run-at-time del nil
-                              #'magit-dash-pr-status--fetch-page-async
-                              q dir first after on-success on-error
-                              (1+ att) (* 2 del) job)))
-               (t
-                (funcall on-error
-                         (format "gh api graphql failed (%s): %s" code (string-trim out))))))))
+          (let ((proc (magit-dash-gh--run-process
+                       args dir
+                       (lambda (out)
+                         (unless (car job)
+                           (let ((response (condition-case err
+                                               (magit-dash-pr-status--validate-response out)
+                                             (error (funcall on-error (error-message-string err))
+                                                    nil))))
+                             (when response
+                               (condition-case err
+                                   (funcall on-success response)
+                                 (error (message "magit-dash: page callback failed: %s"
+                                                 (error-message-string err))))))))
+                       (lambda (out code)
+                         (unless (car job)
+                           (funcall on-error
+                                    (format "gh api graphql failed (%s): %s"
+                                            code (string-trim out)))))
+                       nil
+                       (lambda () (car job))
+                       handle)))
+            (when (and (processp proc) (process-live-p proc) (null (car handle)))
+              (setcar handle proc)))
         (error (funcall on-error (error-message-string err)))))))
 
 (defun magit-dash-pr-status--fetch-search (q dir)
