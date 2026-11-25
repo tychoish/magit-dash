@@ -81,6 +81,12 @@ the other accounts' results from being shown."
   :type '(choice (const :tag "No timeout" nil) number)
   :group 'magit-dash-pr-status)
 
+(defcustom magit-dash-pr-status-fetch-one-timeout 60
+  "Seconds `magit-dash-pr-status-fetch-one' waits before giving up; nil disables.
+On expiry its `gh' process is killed and ON-ERROR runs once."
+  :type '(choice (const :tag "No timeout" nil) number)
+  :group 'magit-dash-pr-status)
+
 (defvar magit-dash-pr-status-page-size 10
   "Number of PRs requested per GraphQL page.
 Each PR nests reviews, checks and threads, so large pages exceed
@@ -161,9 +167,13 @@ The owner starts with an alphanumeric; the name may not be only dots.")
 (defun magit-dash-pr-status--parse-json (out)
   "Parse OUT as JSON into alists and lists; signal `user-error' if malformed."
   (let ((parsed (condition-case nil
-                    (json-parse-string out :object-type 'alist
+                    (json-parse-string (if (string-match "^[[{]" out)
+                                           (substring out (match-beginning 0))
+                                         out)
+                                       :object-type 'alist
                                        :array-type 'list :null-object nil)
-                  ((json-parse-error json-end-of-file) 'invalid))))
+                  ((json-parse-error json-end-of-file json-utf8-decode-error)
+                   'invalid))))
     (when (or (eq parsed 'invalid) (not (listp parsed)))
       (user-error "gh api graphql returned non-JSON output"))
     parsed))
@@ -437,7 +447,9 @@ an approval."
          (contexts (map-nested-elt rollup '(contexts nodes)))
          (threads (map-nested-elt node '(reviewThreads nodes)))
          (reviews (map-nested-elt node '(reviews nodes)))
-         (unresolved (seq-remove (lambda (th) (eq (map-elt th 'isResolved) t))
+         (unresolved (seq-remove (lambda (th)
+                                   (or (memq th '(nil :null))
+                                       (eq (map-elt th 'isResolved) t)))
                                  threads)))
     (list :number (map-elt node 'number)
           :repo (map-nested-elt node '(repository nameWithOwner))
@@ -559,6 +571,9 @@ failures) such an error propagates to the caller; on the asynchronous
 path the callback runs in a process sentinel, so Emacs reports the
 error there instead of the caller seeing it."
   (let ((fired nil)
+        (timer nil)
+        (proc nil)
+        (handle (list nil))
         (setup-error nil))
     (condition-case err
         (progn
@@ -566,52 +581,73 @@ error there instead of the caller seeing it."
           (unless (and (natnump number) (> number 0))
             (user-error "PR number must be a positive integer: %S" number))
           (let ((parts (split-string slug "/")))
-            (magit-dash-gh--run-process
-             (list "api" "graphql"
-                   "-f" (format "query=query($owner:String! $name:String! $number:Int!){
+            (setq proc
+                  (magit-dash-gh--run-process
+                   (list "api" "graphql"
+                         "-f" (format "query=query($owner:String! $name:String! $number:Int!){
   repository(owner:$owner name:$name){
     pullRequest(number:$number){
       %s
     }
   }
 }" (magit-dash-pr-status--pr-fields))
-                   "-f" (concat "owner=" (car parts))
-                   "-f" (concat "name=" (cadr parts))
-                   "-F" (format "number=%d" number))
-             dir
-             (lambda (out)
-               (let ((outcome
-                      (condition-case err
-                          (let* ((response (magit-dash-pr-status--parse-json out))
-                                 (node (map-nested-elt response '(data repository pullRequest))))
-                            (when-let* ((errors (map-elt response 'errors)))
-                              (user-error "GitHub GraphQL error: %s"
-                                          (mapconcat (lambda (e) (or (map-elt e 'message) "unknown"))
-                                                     errors "; ")))
-                            (unless node
-                              (user-error "PR %s#%s not found" slug number))
-                            (let* ((pr (magit-dash-pr-status--node-to-pr node))
-                                   (required (magit-dash-pr-status--required-approvals slug dir)))
-                              (cons 'ok
-                                    (list :ci (plist-get pr :ci)
-                                          :approvals (plist-get pr :approvals)
-                                          :required required
-                                          :requested (plist-get pr :requested)
-                                          :changes-requested (plist-get pr :changes-requested)
-                                          :threads-open (plist-get pr :threads-open)
-                                          :threads-outdated (plist-get pr :threads-outdated)
-                                          :failing (plist-get pr :failing)
-                                          :truncated (plist-get pr :truncated)
-                                          :bucket (magit-dash-pr-status--bucket pr required)))))
-                        (error (cons 'error (error-message-string err))))))
-                 (setq fired t)
-                 (if (eq (car outcome) 'ok)
-                     (funcall on-success (cdr outcome))
-                   (funcall on-error (cdr outcome)))))
-             (lambda (out code)
-               (setq fired t)
-               (funcall on-error
-                        (format "gh api graphql failed (%s): %s" code (string-trim out)))))))
+                         "-f" (concat "owner=" (car parts))
+                         "-f" (concat "name=" (cadr parts))
+                         "-F" (format "number=%d" number))
+                   dir
+                   (lambda (out)
+                     (let ((outcome
+                            (condition-case err
+                                (let* ((response (magit-dash-pr-status--parse-json out))
+                                       (node (map-nested-elt response '(data repository pullRequest))))
+                                  (when-let* ((errors (map-elt response 'errors)))
+                                    (user-error "GitHub GraphQL error: %s"
+                                                (mapconcat (lambda (e) (or (map-elt e 'message) "unknown"))
+                                                           errors "; ")))
+                                  (unless node
+                                    (user-error "PR %s#%s not found" slug number))
+                                  (let* ((pr (magit-dash-pr-status--node-to-pr node))
+                                         (required (magit-dash-pr-status--required-approvals slug dir)))
+                                    (cons 'ok
+                                          (list :ci (plist-get pr :ci)
+                                                :approvals (plist-get pr :approvals)
+                                                :required required
+                                                :requested (plist-get pr :requested)
+                                                :changes-requested (plist-get pr :changes-requested)
+                                                :threads-open (plist-get pr :threads-open)
+                                                :threads-outdated (plist-get pr :threads-outdated)
+                                                :failing (plist-get pr :failing)
+                                                :truncated (plist-get pr :truncated)
+                                                :bucket (magit-dash-pr-status--bucket pr required)))))
+                              (error (cons 'error (error-message-string err))))))
+                       (setq fired t)
+                       (when timer
+                         (cancel-timer timer))
+                       (if (eq (car outcome) 'ok)
+                           (funcall on-success (cdr outcome))
+                         (funcall on-error (cdr outcome)))))
+                   (lambda (out code)
+                     (setq fired t)
+                     (when timer
+                       (cancel-timer timer))
+                     (funcall on-error
+                              (format "gh api graphql failed (%s): %s" code (string-trim out))))
+                   nil
+                   (lambda () fired)
+                   handle))
+            (when (and (not fired) (numberp magit-dash-pr-status-fetch-one-timeout))
+              (setq timer
+                    (run-with-timer
+                     magit-dash-pr-status-fetch-one-timeout nil
+                     (lambda ()
+                       (unless fired
+                         (setq fired t)
+                         (when (process-live-p proc)
+                           (delete-process proc))
+                         (magit-dash-gh--handle-cancel handle)
+                         (funcall on-error
+                                  (format "gh api graphql timed out after %ss"
+                                          magit-dash-pr-status-fetch-one-timeout)))))))))
       (error
        (if fired
            (signal (car err) (cdr err))

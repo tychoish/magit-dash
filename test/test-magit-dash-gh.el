@@ -856,5 +856,140 @@ even when other real candidates exist."
       (should (equal '("/tmp/r" t) wts-cleaned))
       (should (equal '(("a" "b") "/tmp/r" t) branches-pruned)))))
 
+;;;; run-process hardening
+
+(defun magit-dash-gh-test--with-fake-gh (script fn)
+  "Call FN with a directory whose `gh' is the shell SCRIPT, PATH set to it."
+  (let ((dir (make-temp-file "fake-gh" t)))
+    (unwind-protect
+        (progn
+          (with-temp-file (expand-file-name "gh" dir)
+            (insert "#!/bin/sh\n" script "\n"))
+          (set-file-modes (expand-file-name "gh" dir) #o755)
+          (let ((exec-path (cons dir exec-path))
+                (process-environment (cons (concat "PATH=" dir ":" (getenv "PATH"))
+                                           process-environment)))
+            (cl-letf (((symbol-function 'magit-dash-gh--repo-account) #'ignore))
+              (funcall fn dir))))
+      (delete-directory dir t))))
+
+(defun magit-dash-gh-test--run (dir)
+  "Run the fake gh in DIR; return (:ok OUT) or (:err OUT CODE)."
+  (let (result)
+    (magit-dash-gh--run-process
+     '("x") dir
+     (lambda (out) (setq result (list :ok out)))
+     (lambda (out code) (setq result (list :err out code))))
+    (let ((tries 0))
+      (while (and (not result) (< tries 100))
+        (setq tries (1+ tries))
+        (accept-process-output nil 0.05)))
+    result))
+
+(defun magit-dash-gh-test--proc-buffers (before)
+  "Return process buffers created since the buffer list BEFORE."
+  (seq-filter (lambda (b)
+                (and (not (memq b before))
+                     (string-prefix-p " *magit-dash-proc" (buffer-name b))))
+              (buffer-list)))
+
+(ert-deftest magit-dash-gh/run-process-success-excludes-stderr ()
+  (magit-dash-gh-test--with-fake-gh
+   "echo 'warning: noise' >&2; echo '[1]'; echo 'late noise' >&2"
+   (lambda (dir)
+     (should (equal '(:ok "[1]\n") (magit-dash-gh-test--run dir))))))
+
+(ert-deftest magit-dash-gh/run-process-error-includes-stderr ()
+  (magit-dash-gh-test--with-fake-gh
+   "echo partial; echo 'HTTP 401 nope' >&2; exit 3"
+   (lambda (dir)
+     (let ((result (magit-dash-gh-test--run dir)))
+       (should (eq :err (car result)))
+       (should (string-match-p "HTTP 401 nope" (cadr result)))
+       (should (= 3 (nth 2 result)))))))
+
+(ert-deftest magit-dash-gh/run-process-leaves-no-buffers ()
+  (magit-dash-gh-test--with-fake-gh
+   "echo ok"
+   (lambda (dir)
+     (let ((before (buffer-list)))
+       (magit-dash-gh-test--run dir)
+       (should (null (magit-dash-gh-test--proc-buffers before)))))))
+
+(ert-deftest magit-dash-gh/run-process-make-process-failure-leaks-nothing ()
+  (let ((dir (make-temp-file "gh-nomake" t))
+        (before (buffer-list)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'make-process)
+                   (lambda (&rest _) (error "no fork")))
+                  ((symbol-function 'magit-dash-gh--repo-account) #'ignore))
+          (should-error (magit-dash-gh--run-process '("x") dir #'ignore))
+          (should (null (magit-dash-gh-test--proc-buffers before))))
+      (delete-directory dir t))))
+
+(ert-deftest magit-dash-gh/run-process-cancelled-runs-no-callbacks ()
+  (magit-dash-gh-test--with-fake-gh
+   "echo '[1]'"
+   (lambda (dir)
+     (let ((called nil))
+       (magit-dash-gh--run-process '("x") dir
+                                   (lambda (_) (setq called t))
+                                   (lambda (&rest _) (setq called t))
+                                   nil (lambda () t))
+       (accept-process-output nil 0.3)
+       (should-not called)))))
+
+(ert-deftest magit-dash-gh/run-process-waits-for-late-stderr-before-retry ()
+  "Stderr arriving after the stdout sentinel still triggers the 5xx retry."
+  (let ((counter (make-temp-file "gh-count")))
+    (unwind-protect
+        (magit-dash-gh-test--with-fake-gh
+         (format "n=$(cat %s 2>/dev/null); n=$((${n:-0}+1)); echo $n > %s
+if [ $n -eq 1 ]; then
+  (sleep 0.4; echo 'gh: HTTP 503' >&2) >/dev/null &
+  exit 1
+fi
+echo done" counter counter)
+         (lambda (dir)
+           (let ((magit-dash-gh-retry-delay 0)
+                 (magit-dash-gh-retry-attempts 3)
+                 (result nil)
+                 (tries 0))
+             (magit-dash-gh--run-process
+              '("x") dir
+              (lambda (out) (setq result (list :ok out)))
+              (lambda (out code) (setq result (list :err out code))))
+             (while (and (not result) (< tries 100))
+               (setq tries (1+ tries))
+               (accept-process-output nil 0.05))
+             (should (equal '(:ok "done\n") result)))))
+      (delete-file counter))))
+
+(ert-deftest magit-dash-gh/run-process-handle-tracks-retry-process ()
+  (let ((counter (make-temp-file "gh-count")))
+    (unwind-protect
+        (magit-dash-gh-test--with-fake-gh
+         (format "n=$(cat %s 2>/dev/null); n=$((${n:-0}+1)); echo $n > %s
+if [ $n -eq 1 ]; then echo 'HTTP 502' >&2; exit 1; fi
+sleep 30" counter counter)
+         (lambda (dir)
+           (let ((magit-dash-gh-retry-delay 0)
+                 (handle (list nil))
+                 (first nil)
+                 (tries 0))
+             (setq first (magit-dash-gh--run-process '("x") dir #'ignore #'ignore
+                                                     nil nil handle))
+             (should (eq first (car handle)))
+             (while (and (or (null (car handle)) (eq (car handle) first)) (< tries 100))
+               (setq tries (1+ tries))
+               (accept-process-output nil 0.05))
+             (should (process-live-p (car handle)))
+             (should-not (eq first (car handle)))
+             (magit-dash-gh--handle-cancel handle)
+             (accept-process-output nil 0.2)
+             (should-not (seq-find (lambda (p) (equal (process-name p) "magit-gh"))
+                                   (process-list))))))
+      (delete-file counter))))
+
 ;;; test-magit-dash-gh.el ends here
 

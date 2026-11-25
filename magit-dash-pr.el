@@ -739,10 +739,23 @@ cells from it; rows without an entry show blank cells.")
 (put 'magit-dash-pr-dashboard--statuses 'permanent-local t)
 (put 'magit-dash-pr-dashboard--status-cancel 'permanent-local t)
 
+(defun magit-dash-pr-dashboard--norm-key (repo number)
+  "Return the canonical (REPO . NUMBER) key with REPO downcased.
+GitHub repo names are case-insensitive but rows keep their original
+case (cache warm-start and live discovery may differ), so the status
+table, marks, row matching and status fills all go through this one
+helper at their boundary and a row keeps its status and mark when a live
+row replaces a warm-start one."
+  (cons (if (stringp repo)
+            (downcase repo)
+          repo)
+        number))
+
 (defun magit-dash-pr-dashboard--status (repo number)
   "Return the status plist held for REPO and NUMBER in this buffer, or nil."
   (when magit-dash-pr-dashboard--statuses
-    (map-elt magit-dash-pr-dashboard--statuses (cons repo number))))
+    (map-elt magit-dash-pr-dashboard--statuses
+             (magit-dash-pr-dashboard--norm-key repo number))))
 
 (defun magit-dash-pr-dashboard--cancel-status-collection ()
   "Cancel this buffer's in-flight status collection, if any."
@@ -756,7 +769,9 @@ cells from it; rows without an entry show blank cells.")
   "Hold STATUS for REPO and NUMBER in this buffer's status table."
   (unless magit-dash-pr-dashboard--statuses
     (setq magit-dash-pr-dashboard--statuses (make-hash-table :test #'equal)))
-  (setf (map-elt magit-dash-pr-dashboard--statuses (cons repo number)) status))
+  (setf (map-elt magit-dash-pr-dashboard--statuses
+                 (magit-dash-pr-dashboard--norm-key repo number))
+        status))
 
 (defun magit-dash-pr-dashboard--valid-status-p (status)
   "Return non-nil when STATUS is a plist with correctly typed display fields."
@@ -891,8 +906,9 @@ LIMIT defaults to `magit-dash-pr-fetch-limit'."
   "Maximum display width for PR title column.")
 
 (defun magit-dash-pr-dashboard--entry-key (entry)
-  "Return unique key `(REPO . NUMBER)' for PR ENTRY plist."
-  (cons (plist-get entry :repo) (plist-get entry :number)))
+  "Return unique, case-normalized key `(REPO . NUMBER)' for PR ENTRY plist.
+See `magit-dash-pr-dashboard--norm-key'."
+  (magit-dash-pr-dashboard--norm-key (plist-get entry :repo) (plist-get entry :number)))
 
 (defun magit-dash-pr-dashboard--entry-marked-p (entry)
   "Return non-nil if PR ENTRY is marked in the current dashboard."
@@ -958,12 +974,40 @@ row ids, which defeats `tabulated-list-print's `equal' matching."
       (seq-remove #'magit-dash-pr-dashboard--failing-entry-p entries)
     entries))
 
+(defun magit-dash-pr-dashboard--string-or-empty (value)
+  "Return VALUE when it is a string, else the empty string."
+  (if (stringp value)
+      value
+    ""))
+
+(defun magit-dash-pr-dashboard--sanitize-pr (pr)
+  "Return PR with `:null' turned into nil and malformed fields neutralized.
+A string `number' becomes an integer and a non-alist `author' becomes nil.
+Signals `wrong-type-argument' when PR has no usable number."
+  (let* ((pr (magit-dash-pr-cache--null-to-nil pr))
+         (number (map-elt pr 'number)))
+    (when (stringp number)
+      (setq number (string-to-number number)))
+    (unless (integerp number)
+      (signal 'wrong-type-argument (list 'integerp number)))
+    (setq pr (cons (cons 'number number)
+                   (seq-remove (lambda (cell)
+                                 (eq (car-safe cell) 'number))
+                               pr)))
+    (if (consp (map-elt pr 'author))
+        pr
+      (cons (cons 'author nil)
+            (seq-remove (lambda (cell)
+                          (eq (car-safe cell) 'author))
+                        pr)))))
+
 (defun magit-dash-pr-dashboard--build-entry (pr repo-name &optional fetched-at)
   "Return a `tabulated-list-entries' entry for PR in REPO-NAME.
 Uses active columns.  FETCHED-AT is the cache timestamp of rows loaded
 from the PR cache; such rows are dimmed once stale.  A nil FETCHED-AT
 marks freshly fetched data and is never dimmed."
-  (let* ((number (map-elt pr 'number))
+  (let* ((pr (magit-dash-pr-dashboard--sanitize-pr pr))
+         (number (map-elt pr 'number))
          (entry-id (list :number number
                          :repo repo-name
                          :updated (map-elt pr 'updatedAt)
@@ -990,9 +1034,11 @@ marks freshly fetched data and is never dimmed."
                             (propertize short-repo 'face 'bold)
                           short-repo))
                        ('author
-                        (or (map-elt (map-elt pr 'author) 'login) ""))
+                        (magit-dash-pr-dashboard--string-or-empty
+                         (map-elt (map-elt pr 'author) 'login)))
                        ('base
-                        (or (map-elt pr 'baseRefName) ""))
+                        (magit-dash-pr-dashboard--string-or-empty
+                         (map-elt pr 'baseRefName)))
                        ('worktree
                         (cond
                          ((gethash (cons repo-name number) magit-dash-pr--pending-worktrees)
@@ -1007,7 +1053,8 @@ marks freshly fetched data and is never dimmed."
                             s)))
                        ('title
                         (let ((t-str (truncate-string-to-width
-                                      (or (map-elt pr 'title) "")
+                                      (magit-dash-pr-dashboard--string-or-empty
+                                       (map-elt pr 'title))
                                       magit-dash-pr-dashboard--title-width nil nil "…")))
                           (if is-marked
                               (propertize t-str 'face 'bold)
@@ -1041,52 +1088,96 @@ marks freshly fetched data and is never dimmed."
                  'vector)
               cells)))))
 
-(defun magit-dash-pr-dashboard--cache-row (pr repo-name)
+(defun magit-dash-pr-dashboard--cache-row (pr repo-name &optional search-p)
   "Write PR, an alist for REPO-NAME, to the PR cache.
-Fields of PR win; fields only in the cached payload are kept, so a
-sparse discovery result never discards richer cached data.  Known
-limitation: volatile fields (CI, review) absent from PR persist stale
-until the next full discovery."
-  (when-let* ((number (map-elt pr 'number)))
-    (let ((prior (magit-dash-pr-cache-get repo-name number)))
-      (magit-dash-pr-cache-put
-       repo-name number
-       (magit-dash-pr-cache-merge-payload pr (plist-get prior :payload))
-       nil prior))))
+SEARCH-P says PR came from cross-repo search (see `magit-dash-pr-cache-put').
+The cache merges PR over its cached payload, so a sparse discovery
+result never discards richer cached data; per-field timestamps keep the
+merged-in volatile fields (CI, review) looking as old as they are, and a
+PR older than the cached one is ignored.  A bad record or PR is skipped
+with a message and never signals."
+  (condition-case err
+      (when-let* ((number (map-elt pr 'number)))
+        (magit-dash-pr-cache-put repo-name number pr nil nil search-p))
+    (error
+     (message "magit-gh: could not cache %s: %s"
+              repo-name (error-message-string err))
+     nil)))
 
 (defun magit-dash-pr-dashboard--cached-entries (filters)
   "Return table entries built from the PR cache for FILTERS.
 Only the state, repo, org and a literal author filter apply; rows keep
-their cache timestamp so stale ones are dimmed, and a record without one
-counts as stale.  Known limitation: the `@me' author filter and closed
-PRs are not reproduced faithfully from the cache; discovery corrects
-them once it returns."
+their effective cache timestamp so stale ones are dimmed, and a record
+without one (or with a future one) counts as stale.  Ghost (`:gone')
+records are skipped only in open-state views, as is any record that
+cannot be turned into a row (with a message).  Known
+limitation: the `@me' author filter and closed PRs are not reproduced
+faithfully from the cache; discovery corrects them once it returns."
   (let* ((state (upcase (or (plist-get filters :state) "open")))
          (org (plist-get filters :org))
          (author (plist-get filters :author)))
     (thread-last
-      (magit-dash-pr-cache-list (plist-get filters :repo))
-      (seq-map #'magit-dash-pr-dashboard--hold-record-status)
-      (seq-filter
+      (magit-dash-pr-cache-list (plist-get filters :repo) org)
+      (seq-remove (lambda (record)
+                    (and (equal state "OPEN") (plist-get record :gone))))
+      (seq-keep
        (lambda (record)
-         (let ((pr (plist-get record :payload)))
-           (and (equal state (upcase (or (map-elt pr 'state) "OPEN")))
-                (or (null org)
-                    (string-prefix-p (concat org "/") (plist-get record :repo)))
-                (or (null author)
-                    (string-prefix-p "@" author)
-                    (equal author (map-elt (map-elt pr 'author) 'login)))))))
-      (seq-map
-       (lambda (record)
-         (magit-dash-pr-dashboard--build-entry
-          (plist-get record :payload)
-          (plist-get record :repo)
-          (or (plist-get record :fetched-at) 0))))
+         (condition-case err
+             (let* ((pr (magit-dash-pr-dashboard--sanitize-pr
+                         (plist-get record :payload)))
+                    (repo (plist-get record :repo)))
+               (when (and (equal state (upcase (let ((st (map-elt pr 'state)))
+                                                 (if (stringp st) st "OPEN"))))
+                          (or (null org)
+                              (string-prefix-p (concat (downcase org) "/") (downcase repo)))
+                          (or (null author)
+                              (string-prefix-p "@" author)
+                              (equal author (map-elt (map-elt pr 'author) 'login))))
+                 (magit-dash-pr-dashboard--hold-record-status record)
+                 (magit-dash-pr-dashboard--build-entry
+                  pr repo
+                  (if (magit-dash-pr-cache-future-p record)
+                      0
+                    (or (magit-dash-pr-cache-effective-fetched-at record) 0)))))
+           (error
+            (message "magit-gh: skipping unusable cached PR %s#%s: %s"
+                     (plist-get record :repo) (plist-get record :number)
+                     (error-message-string err))
+            nil))))
       (magit-dash-pr-dashboard--apply-ci-filter))))
+
+(defun magit-dash-pr-dashboard--evict-ghosts (filters entries)
+  "Mark cached PRs missing from a complete discovery of FILTERS as gone.
+ENTRIES are the rows the discovery returned.  Only an unfiltered
+per-repo discovery that returned fewer rows than the limit covers its
+repo completely; anything else (search across repos, author, conflicts or
+review filters, hide-failing, a possibly truncated result) evicts nothing.
+Only records of the covered state scope are marked."
+  (let ((repo (plist-get filters :repo))
+        (state (upcase (or (plist-get filters :state) "open"))))
+    (when (and repo
+               (not (plist-get filters :author))
+               (not (plist-get filters :conflicts))
+               (not (plist-get filters :review-requested))
+               (not magit-dash-pr-dashboard--hide-failing)
+               (< (length entries)
+                (or magit-dash-pr-dashboard--limit magit-dash-pr-fetch-limit)))
+      (let ((seen (seq-map (lambda (entry)
+                             (plist-get (car entry) :number))
+                           entries)))
+        (seq-do
+         (lambda (record)
+           (when (and (not (memql (plist-get record :number) seen))
+                      (or (equal state "ALL")
+                          (equal state (upcase (let ((st (map-elt (plist-get record :payload) 'state)))
+                                                 (if (stringp st) st "OPEN"))))))
+             (magit-dash-pr-cache-mark-gone repo (plist-get record :number))))
+         (magit-dash-pr-cache-list repo))))))
 
 (defun magit-dash-pr-dashboard--parse-output (output filters)
   "Parse gh JSON OUTPUT into tabulated list entries using FILTERS for context.
-Returns nil when OUTPUT is not a JSON array."
+Returns nil when OUTPUT is not a JSON array.  A row that cannot be built
+is skipped with a message and never aborts the rest."
   (let ((trimmed (string-trim output)))
     (when (string-prefix-p "[" trimmed)
       (when-let* ((prs (json-parse-string trimmed :array-type 'list :object-type 'alist)))
@@ -1098,14 +1189,19 @@ Returns nil when OUTPUT is not a JSON array."
                                         (string-equal (or (map-elt pr 'mergeStateStatus) "") "DIRTY")))
                                   prs)))
           (magit-dash-pr-dashboard--apply-ci-filter
-           (seq-map (lambda (pr)
-                      (magit-dash-pr-dashboard--build-entry
-                       pr
-                       (if per-repo-p
-                           (plist-get filters :repo)
-                         (or (map-elt (map-elt pr 'repository) 'nameWithOwner)
-                             "unknown"))))
-                    prs)))))))
+           (seq-keep (lambda (pr)
+                       (condition-case err
+                           (magit-dash-pr-dashboard--build-entry
+                            pr
+                            (if per-repo-p
+                                (plist-get filters :repo)
+                              (or (map-elt (map-elt pr 'repository) 'nameWithOwner)
+                                  "unknown")))
+                         (error
+                          (message "magit-gh: skipping unusable PR %S: %s"
+                                   (map-elt pr 'number) (error-message-string err))
+                          nil)))
+                     prs)))))))
 
 (defun magit-dash-pr-dashboard--merge-ci (buf repo output)
   "Merge statusCheckRollup, headRefName, state, and mergedAt from OUTPUT into rows.
@@ -1116,8 +1212,9 @@ OUTPUT is `gh pr list' JSON."
       (when (string-prefix-p "[" trimmed)
         (when-let* ((items (json-parse-string trimmed :array-type 'list :object-type 'alist))
                     (table (make-hash-table :test #'eql)))
-          (dolist (item items)
-            (puthash (map-elt item 'number) item table))
+          (seq-do (lambda (item)
+                    (setf (map-elt table (map-elt item 'number)) item))
+                  items)
           (with-current-buffer buf
             (let* ((filters magit-dash-pr-dashboard--filters)
                    (conflicts-p (plist-get filters :conflicts))
@@ -1125,7 +1222,7 @@ OUTPUT is `gh pr list' JSON."
                     (seq-map (lambda (entry)
                                (let* ((id (car entry))
                                       (match (and (equal (plist-get id :repo) repo)
-                                                  (gethash (plist-get id :number) table))))
+                                                  (map-elt table (plist-get id :number)))))
                                  (if match
                                      (let* ((rollup (map-elt match 'statusCheckRollup))
                                             (head-ref (map-elt match 'headRefName))
@@ -1194,13 +1291,14 @@ working directory for `gh'."
            repos
            :concurrency limit
            :delay (or (bound-and-true-p magit-dash-queue-yield-delay) 0.0))
-        (dolist (repo repos)
-          (magit-dash-gh--run-process
-           (list "pr" "list" "-R" repo "--state" gh-state
-                 "--json" "number,state,mergedAt,statusCheckRollup,headRefName,baseRefName,mergeable,mergeStateStatus" "--limit" fetch-limit)
-           dir
-           (lambda (output) (magit-dash-pr-dashboard--merge-ci buf repo output))
-           (lambda (_output _code) nil)))))))
+        (seq-do (lambda (repo)
+                  (magit-dash-gh--run-process
+                   (list "pr" "list" "-R" repo "--state" gh-state
+                         "--json" "number,state,mergedAt,statusCheckRollup,headRefName,baseRefName,mergeable,mergeStateStatus" "--limit" fetch-limit)
+                   dir
+                   (lambda (output) (magit-dash-pr-dashboard--merge-ci buf repo output))
+                   (lambda (_output _code) nil)))
+                repos)))))
 
 (defconst magit-dash-pr-dashboard--view-fields
   "number,title,state,mergedAt,author,createdAt,updatedAt,comments,reviewDecision,statusCheckRollup,isDraft,url,headRefName,headRefOid,baseRefName,mergeable,mergeStateStatus"
@@ -1231,7 +1329,7 @@ a PR that is no longer open is dropped, as a full refresh would."
                     (let ((merged (magit-dash-pr-cache-merge-payload
                              fresh (plist-get (car entry) :pr)))
                           (repo (plist-get (car entry) :repo)))
-                      (magit-dash-pr-dashboard--cache-row merged repo)
+                      (magit-dash-pr-dashboard--cache-row fresh repo)
                       (unless gone-p
                         (magit-dash-pr-dashboard--build-entry merged repo)))))
                 tabulated-list-entries)))
@@ -1295,7 +1393,8 @@ match are left blank."
                             '(hash-table :test equal)))
             (changed nil))
         (seq-do (lambda (pr)
-                  (let ((key (cons (plist-get pr :repo) (plist-get pr :number))))
+                  (let ((key (magit-dash-pr-dashboard--norm-key
+                              (plist-get pr :repo) (plist-get pr :number))))
                     (when (and (map-contains-key rows key)
                                (magit-dash-pr-dashboard--store-status
                                 (car key) (cdr key)
@@ -1412,8 +1511,10 @@ other buffers."
              (seq-do (lambda (entry)
                        (magit-dash-pr-dashboard--cache-row
                         (plist-get (car entry) :pr)
-                        (plist-get (car entry) :repo)))
+                        (plist-get (car entry) :repo)
+                        (not (plist-get filters :repo))))
                      tabulated-list-entries)
+             (magit-dash-pr-dashboard--evict-ghosts filters tabulated-list-entries)
              (setq tabulated-list-format
                    (magit-dash-pr-dashboard--build-format
                     (window-width (get-buffer-window buf t))
@@ -1560,7 +1661,10 @@ cannot be loaded."
 
 ;;;###autoload
 (defun magit-dash-pr-dashboard-diff-review (&optional entry)
-  "Open a native-buffer `diff-review' session for the pull request at point (or ENTRY)."
+  "Open a native-buffer `diff-review' session for the pull request at point (or ENTRY).
+Deprecation note: `c r' used to open `code-review' and now opens
+`diff-review' like `c v'; `code-review' stays on `c b' when installed.
+`c r' remains bound for now but will be removed in a future release."
   (interactive)
   (require 'magit-dash-review)
   (let* ((ent (or entry (magit-dash-pr-dashboard--entry-at-point)))

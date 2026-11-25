@@ -810,59 +810,135 @@ Return (EXIT-CODE . OUTPUT)."
 (defvar magit-dash-gh-retry-delay 3
   "Seconds before the first async retry; doubles on each further retry.")
 
-(defun magit-dash-gh--run-process (args dir on-success &optional on-error attempt)
+(defvar magit-dash-gh-stderr-grace 2
+  "Seconds to wait for a failed `gh' call's stderr to finish arriving.
+Only a fallback: normally the stderr process's own sentinel ends the wait.")
+
+(defun magit-dash-gh--run-process (args dir on-success &optional on-error attempt cancelled-p handle)
   "Run `gh' with ARGS in DIR asynchronously.
 Transient HTTP 502/503/504 failures are retried up to
 `magit-dash-gh-retry-attempts' times with exponential backoff; ATTEMPT is
 the internal 1-based attempt counter.
-ON-SUCCESS is called with the output string when the process exits 0.
-ON-ERROR is called with the output string and exit code otherwise;
-when nil, a `message' is emitted instead.
+ON-SUCCESS is called with the stdout string when the process exits 0;
+stderr never reaches it, so warnings cannot corrupt JSON.
+ON-ERROR is called with stdout followed by stderr, and the exit code,
+otherwise; when nil, a `message' is emitted instead.  After a nonzero
+exit the decision waits for the stderr pipe to close (its own sentinel;
+`magit-dash-gh-stderr-grace' bounds the wait), so late stderr is never
+lost and no `accept-process-output' runs inside a sentinel.
+CANCELLED-P, a function of no arguments, is consulted when the process
+exits and before a retry; when it returns non-nil no callback runs and
+no retry starts.
+HANDLE, when a cons cell, tracks the live work: its car is the current
+process and its cdr the pending retry timer, updated across retries, so a
+caller can stop whichever is live (see `magit-dash-gh--handle-cancel').
 When DIR no longer exists on disk (for example a worktree removed outside
 magit-dash), ON-ERROR is called directly instead of letting `make-process'
-signal."
-  (if (not (file-directory-p dir))
-      (let ((msg (format "no such directory: %s" dir)))
-        (if on-error
-            (funcall on-error msg 1)
-          (message "magit-gh: gh %s failed: %s" (car args) msg)))
+signal.  A `make-process' failure kills its buffers and re-signals.
+Return the process, or nil."
+  (cond
+   ((and cancelled-p (funcall cancelled-p))
+    nil)
+   ((not (file-directory-p dir))
+    (let ((msg (format "no such directory: %s" dir)))
+      (if on-error
+          (funcall on-error msg 1)
+        (message "magit-gh: gh %s failed: %s" (car args) msg))
+      nil))
+   (t
     (with-magit-gh-account (magit-dash-gh--repo-account dir)
       (let* ((default-directory dir)
              (buf (generate-new-buffer " *magit-dash-proc*"))
-             (proc (make-process
-                    :name "magit-gh"
-                    :buffer buf
-                    :command (cons "gh" args)
-                    :connection-type 'pipe
-                    :noquery t
-                    :sentinel
-                    (lambda (proc _event)
-                      (when (memq (process-status proc) '(exit signal))
-                        (let ((output (with-current-buffer (process-buffer proc)
-                                        (buffer-string)))
-                              (code (process-exit-status proc)))
-                          (kill-buffer (process-buffer proc))
-                          (cond
-                           ((= code 0)
-                            (funcall on-success output))
-                           ((and (< (or attempt 1) magit-dash-gh-retry-attempts)
-                                 (string-match-p "HTTP 50[234]" output))
-                            (let ((delay (* magit-dash-gh-retry-delay
-                                            (expt 2 (1- (or attempt 1))))))
-                              (message "magit-gh: gh %s hit a gateway error, retrying in %ss"
-                                       (car args) delay)
-                              (run-with-timer delay nil #'magit-dash-gh--run-process
-                                              args dir on-success on-error
-                                              (1+ (or attempt 1)))))
-                           (on-error
-                            (funcall on-error output code))
-                           (t
-                            (message "magit-gh: gh %s exited %d: %s"
-                                     (car args) code
-                                     (string-trim output))))))))))
+             (errbuf (generate-new-buffer " *magit-dash-proc-err*"))
+             (code nil)
+             (err-done nil)
+             (done nil)
+             (grace nil)
+             (finish
+              (lambda ()
+                (unless done
+                  (setq done t)
+                  (when (timerp grace)
+                    (cancel-timer grace))
+                  (let* ((stdout (with-current-buffer buf (buffer-string)))
+                         (output (if (= code 0)
+                                     stdout
+                                   (concat stdout
+                                           (with-current-buffer errbuf
+                                             (buffer-string))))))
+                    (kill-buffer buf)
+                    (kill-buffer errbuf)
+                    (when (consp handle)
+                      (setcar handle nil))
+                    (cond
+                     ((and cancelled-p (funcall cancelled-p))
+                      nil)
+                     ((= code 0)
+                      (funcall on-success output))
+                     ((and (< (or attempt 1) magit-dash-gh-retry-attempts)
+                           (string-match-p "HTTP 50[234]" output))
+                      (let ((delay (* magit-dash-gh-retry-delay
+                                      (expt 2 (1- (or attempt 1))))))
+                        (message "magit-gh: gh %s hit a gateway error, retrying in %ss"
+                                 (car args) delay)
+                        (let ((timer (run-with-timer delay nil #'magit-dash-gh--run-process
+                                                     args dir on-success on-error
+                                                     (1+ (or attempt 1)) cancelled-p handle)))
+                          (when (consp handle)
+                            (setcdr handle timer)))))
+                     (on-error
+                      (funcall on-error output code))
+                     (t
+                      (message "magit-gh: gh %s exited %d: %s"
+                               (car args) code
+                               (string-trim output))))))))
+             (proc (condition-case err
+                       (make-process
+                        :name "magit-gh"
+                        :buffer buf
+                        :stderr errbuf
+                        :command (cons "gh" args)
+                        :connection-type 'pipe
+                        :noquery t
+                        :sentinel
+                        (lambda (proc _event)
+                          (when (memq (process-status proc) '(exit signal))
+                            (setq code (process-exit-status proc))
+                            (cond
+                             ((or (= code 0) err-done)
+                              (funcall finish))
+                             (t
+                              (setq grace (run-with-timer magit-dash-gh-stderr-grace
+                                                          nil finish)))))))
+                     (error
+                      (kill-buffer buf)
+                      (kill-buffer errbuf)
+                      (signal (car err) (cdr err))))))
         (with-current-buffer buf
           (setq default-directory dir))
-        proc))))
+        (if-let* ((errproc (get-buffer-process errbuf)))
+            (set-process-sentinel
+             errproc
+             (lambda (p _event)
+               (unless (process-live-p p)
+                 (setq err-done t)
+                 (when (and code (not done))
+                   (funcall finish)))))
+          (setq err-done t))
+        (when (consp handle)
+          (setcar handle proc)
+          (setcdr handle nil))
+        proc)))))
+
+(defun magit-dash-gh--handle-cancel (handle)
+  "Kill the process and cancel the retry timer tracked by HANDLE, if live."
+  (when (consp handle)
+    (when (process-live-p (car handle))
+      (delete-process (car handle)))
+    (when (timerp (cdr handle))
+      (cancel-timer (cdr handle)))
+    (setcar handle nil)
+    (setcdr handle nil)))
 
 (defun magit-dash-gh--owner-repo-from-url (url)
   "Extract (OWNER . REPO) pair from URL or slug string if possible."

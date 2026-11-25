@@ -876,7 +876,8 @@ When A2-FAIL, o/a#2 has a failing check run."
 
 (cl-defun magit-dash-pr-status-test/fetch-one-with-fake-gh
     (failures &key body (stderr "gh: HTTP 504") (slug magit-dash-pr-status-test/slug)
-              (number 9921) on-success on-error (attempts 3) (wait 40))
+              (number 9921) on-success on-error (attempts 3) (wait 40)
+              warn (sleep 0))
   "Run `fetch-one' for fixture PR 9921 against a fake `gh'.
 The fake exits with STDERR FAILURES times, then prints BODY (default: the
 fixture node).  ON-SUCCESS and ON-ERROR are extra callbacks called after
@@ -894,8 +895,11 @@ recording.  Return a plist of :result :error :calls :successes :errors."
             (insert (format "#!/bin/sh
 n=$(cat %s 2>/dev/null || echo 0); n=$((n+1)); echo $n > %s
 if [ $n -le %d ]; then echo '%s' >&2; exit 1; fi
+[ -n '%s' ] && echo '%s' >&2
+sleep %s
 cat %s
-" counter counter failures stderr (expand-file-name "body.json" dir))))
+" counter counter failures stderr (or warn "") (or warn "") sleep
+                         (expand-file-name "body.json" dir))))
           (set-file-modes (expand-file-name "gh" dir) #o755)
           (let ((exec-path (cons dir exec-path))
                 (process-environment (cons (concat "PATH=" dir ":" (getenv "PATH"))
@@ -996,6 +1000,84 @@ cat %s
     (should-not (plist-get out :result))
     (should (= 1 (length (plist-get out :errors))))
     (should (string-match-p "JSON\\|pars" (plist-get out :error)))))
+
+;; Hardening
+
+(ert-deftest magit-dash-pr-status/fetch-one-ignores-stderr-noise ()
+  (let ((out (magit-dash-pr-status-test/fetch-one-with-fake-gh
+              0 :warn "warning: new gh release available")))
+    (should (plist-get out :result))
+    (should-not (plist-get out :error))))
+
+(ert-deftest magit-dash-pr-status/parse-json-skips-leading-noise-and-bad-utf8 ()
+  (should (equal '((a . 1))
+                 (magit-dash-pr-status--parse-json "warn: x\n{\"a\":1}")))
+  (should-error (magit-dash-pr-status--parse-json "just noise")
+                :type 'user-error)
+  (should-error (magit-dash-pr-status--parse-json (string-to-multibyte "{\"a\":\"\x80\"}"))
+                :type 'user-error)
+  (cl-letf (((symbol-function 'json-parse-string)
+             (lambda (&rest _) (signal 'json-utf8-decode-error '("bad")))))
+    (should-error (magit-dash-pr-status--parse-json "{}") :type 'user-error)))
+
+(ert-deftest magit-dash-pr-status/fetch-one-times-out-once ()
+  (let* ((magit-dash-pr-status-fetch-one-timeout 0.3)
+         (out (magit-dash-pr-status-test/fetch-one-with-fake-gh 0 :sleep 5 :wait 60)))
+    (should-not (plist-get out :result))
+    (should (= 1 (length (plist-get out :errors))))
+    (should (string-match-p "timed out" (plist-get out :error)))
+    (should-not (plist-get out :successes))))
+
+(ert-deftest magit-dash-pr-status/fetch-one-timeout-cancels-process ()
+  "The timeout kills the process and flips the CANCELLED-P it handed over."
+  (let ((magit-dash-pr-status-fetch-one-timeout 0.2)
+        (cancelled-p nil)
+        (errors nil))
+    (cl-letf (((symbol-function 'magit-dash-gh--run-process)
+               (lambda (_args _dir _ok &optional _err _attempt cancelled _handle)
+                 (setq cancelled-p cancelled)
+                 (make-process :name "fo-hung" :command '("sleep" "30")
+                               :noquery t))))
+      (magit-dash-pr-status-fetch-one
+       magit-dash-pr-status-test/slug 1 default-directory #'ignore
+       (lambda (e) (push e errors)))
+      (should-not (funcall cancelled-p))
+      (let ((tries 0))
+        (while (and (not errors) (< tries 60))
+          (setq tries (1+ tries))
+          (accept-process-output nil 0.05)))
+      (accept-process-output nil 0.1)
+      (should (funcall cancelled-p))
+      (should (= 1 (length errors)))
+      (should (null (seq-find (lambda (p) (equal (process-name p) "fo-hung"))
+                              (process-list)))))))
+
+(ert-deftest magit-dash-pr-status/fetch-one-real-timeout-kills-gh ()
+  (let ((magit-dash-pr-status-fetch-one-timeout 0.3))
+    (magit-dash-pr-status-test/fetch-one-with-fake-gh 0 :sleep 30 :wait 20)
+    (accept-process-output nil 0.2)
+    (should-not (seq-find (lambda (p) (equal (process-name p) "magit-gh"))
+                          (process-list)))))
+
+(ert-deftest magit-dash-pr-status/fetch-one-timeout-kills-retried-process ()
+  "A retry already running when the timeout fires is killed too."
+  (let* ((magit-dash-pr-status-fetch-one-timeout 0.8)
+         (out (magit-dash-pr-status-test/fetch-one-with-fake-gh
+               1 :sleep 30 :wait 40)))
+    (should (= 1 (length (plist-get out :errors))))
+    (should (string-match-p "timed out" (plist-get out :error)))
+    (should (= 2 (plist-get out :calls)))
+    (accept-process-output nil 0.2)
+    (should-not (seq-find (lambda (p) (equal (process-name p) "magit-gh"))
+                          (process-list)))))
+
+(ert-deftest magit-dash-pr-status/null-thread-nodes-not-counted ()
+  (let* ((node (copy-tree (car (map-nested-elt (magit-dash-pr-status-test/response)
+                                               '(data search nodes)))))
+         (base (plist-get (magit-dash-pr-status--node-to-pr node) :threads-open)))
+    (setf (alist-get 'nodes (alist-get 'reviewThreads node))
+          (append (list nil :null) (alist-get 'nodes (alist-get 'reviewThreads node))))
+    (should (= base (plist-get (magit-dash-pr-status--node-to-pr node) :threads-open)))))
 
 (ert-deftest magit-dash-pr-status/fetch-one-truncated-flag ()
   (let* ((node (copy-tree (car (map-nested-elt (magit-dash-pr-status-test/response)

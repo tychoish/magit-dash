@@ -12,12 +12,59 @@
 ;;; Commentary:
 
 ;; Stores one plist per pull request at
-;; <state>/magit-dash-pr/<owner>/<repo>/<number>.eld, where <state> comes
-;; from `sprite-state-path'.  Writes are atomic (temp file, then rename)
-;; and touch exactly one file.  Records older than
-;; `magit-dash-pr-cache-stale-minutes' are considered stale: callers dim
-;; them with `magit-dash-stale' but never expire them.  An unreadable or
-;; unwritable file is skipped with a logged message and never signals.
+;; <state>/magit-dash-pr/<owner>/<repo>/<number>.eld (owner and repo
+;; lowercased in the path only; records keep the original-case `:repo'),
+;; where <state> comes from `sprite-state-path'.  Writes are
+;; atomic (temp file, then rename), touch exactly one file, and are
+;; skipped when nothing but the timestamp would change and the record is
+;; still young.  Records older than `magit-dash-pr-cache-stale-minutes'
+;; are stale: callers dim them with `magit-dash-stale' but never expire
+;; them.  An unreadable, malformed or unwritable record is skipped with a
+;; logged message and never signals.
+;;
+;; Record keys: :version :repo :number :url :fetched-at :field-times
+;; :updated-at :head-sha :payload :status and :gone.
+;;
+;; Freshness.  `:fetched-at' is the time of the last write.  Because a
+;; sparse discovery payload is merged over the cached one, old values of
+;; the volatile fields (statusCheckRollup, reviewDecision, mergeable,
+;; headRefOid) can survive a write; `:field-times' records, per volatile
+;; field, when it was last supplied by a fetch.  `magit-dash-pr-cache-
+;; effective-fetched-at' is the oldest of `:fetched-at' and those times,
+;; and `magit-dash-pr-cache-stale-p' uses it, so a merged old CI value
+;; never looks fresh.  A `:fetched-at' more than five minutes in the
+;; future (clock skew) counts as stale, checked on `:fetched-at' itself so
+;; an older field time cannot hide it.  A write from cross-repo (search)
+;; discovery, which never supplies those fields, records no field time for
+;; the ones it merely keeps (their old times are dropped), so a PR first
+;; cached from a per-repo view is not dimmed forever by search refreshes;
+;; the trade-off is that its kept CI/review values then look as fresh as
+;; the row.
+;;
+;; Ordering.  A payload whose `updatedAt' is older than the cached one is
+;; never merged in (no rollback); only the status may be refreshed.  A
+;; newer payload lacking `headRefOid' clears the cached head sha.
+;;
+;; Ghosts.  `magit-dash-pr-cache-mark-gone' flags records that a complete
+;; discovery no longer returns; open-state listings skip them and any later
+;; write of the PR revives it, even one whose `updatedAt' is older (the
+;; payload is then not merged, only the flag cleared).
+;;
+;; Case and migration.  Repo names are case-insensitive: records are filed
+;; under lowercase directories, and legacy mixed-case directories are
+;; migrated (renamed, or merged keeping the newest `:fetched-at') on first
+;; access; listings also dedupe by (lowercase repo, number).
+;;
+;; Known limitations: records are validated by shape, not against GitHub;
+;; the `:url' is checked only for a matching pull request number, since a
+;; renamed or transferred repo legitimately has another name in it;
+;; cross-repo (search) discovery, filtered discovery, truncated discovery
+;; and `hide failing' never mark ghosts, so such PRs linger until a
+;; per-repo unfiltered discovery sees them missing; dimming granularity
+;; is the whole row; the skip-rewrite optimisation lets a re-fetch of
+;; identical data refresh `:fetched-at' only once per third of the stale
+;; threshold; concurrent Emacs instances sharing a state dir race
+;; last-writer-wins.
 
 ;;; Code:
 
@@ -61,14 +108,39 @@ Values below 10 are clamped to 10."
                  magit-dash-pr-cache-stale-minutes
                30))))
 
+(defconst magit-dash-pr-cache--volatile-keys
+  '(statusCheckRollup reviewDecision mergeable headRefOid)
+  "Payload keys that go stale quickly and are timestamped individually.")
+
+(defconst magit-dash-pr-cache--future-skew 300
+  "Seconds a `:fetched-at' may lie in the future before it counts as stale.")
+
+(defun magit-dash-pr-cache-effective-fetched-at (record)
+  "Return the oldest freshness time of RECORD, or nil when it has none.
+That is the minimum of `:fetched-at' and every `:field-times' entry."
+  (let ((fetched (plist-get record :fetched-at)))
+    (when (numberp fetched)
+      (apply #'min fetched
+             (seq-filter #'numberp
+                         (seq-map #'cdr (plist-get record :field-times)))))))
+
+(defun magit-dash-pr-cache-future-p (record &optional now)
+  "Return non-nil when RECORD's `:fetched-at' lies beyond the clock skew at NOW."
+  (let ((fetched (plist-get record :fetched-at)))
+    (and (numberp fetched)
+         (> fetched (+ (or now (float-time)) magit-dash-pr-cache--future-skew)))))
+
 (defun magit-dash-pr-cache-stale-p (record &optional now)
   "Return non-nil when RECORD is older than the stale threshold at NOW.
-NOW defaults to the current `float-time'.  A record without
-`:fetched-at' is stale."
-  (let ((fetched (plist-get record :fetched-at)))
-    (or (not (numberp fetched))
-        (> (- (or now (float-time)) fetched)
-           (magit-dash-pr-cache-stale-seconds)))))
+NOW defaults to the current `float-time'.  Age is that of the oldest
+volatile field (see `magit-dash-pr-cache-effective-fetched-at').  A
+record without `:fetched-at', or with one stamped in the future (checked
+on `:fetched-at' alone, not the minimum), is stale."
+  (let ((fetched (magit-dash-pr-cache-effective-fetched-at record))
+        (now (or now (float-time))))
+    (or (not fetched)
+        (magit-dash-pr-cache-future-p record now)
+        (> (- now fetched) (magit-dash-pr-cache-stale-seconds)))))
 
 (defun magit-dash-pr-cache--root ()
   "Return the cache root directory."
@@ -77,32 +149,179 @@ NOW defaults to the current `float-time'.  A record without
 (defun magit-dash-pr-cache--repo-dir (repo)
   "Return the directory holding REPO's records, or nil when REPO is malformed.
 REPO must be OWNER/NAME of letters, digits, underscore, dot and dash,
-with no \".\" or \"..\" component."
+with no \".\" or \"..\" component.  Case is folded."
   (when (and (stringp repo)
              (string-match-p "\\`[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\\'" repo)
              (not (seq-some (lambda (part) (member part '("." "..")))
                             (split-string repo "/"))))
-    (file-name-as-directory (expand-file-name repo (magit-dash-pr-cache--root)))))
+    (file-name-as-directory
+     (expand-file-name (downcase repo) (magit-dash-pr-cache--root)))))
+
+(defun magit-dash-pr-cache--case-subdirs (dir name)
+  "Return the subdirectories of DIR whose name equals NAME ignoring case."
+  (seq-filter (lambda (sub)
+                (equal (downcase (file-name-nondirectory sub)) (downcase name)))
+              (magit-dash-pr-cache--subdirs dir)))
+
+(defun magit-dash-pr-cache--legacy-dirs (repo)
+  "Return existing mixed-case directories of REPO other than the lowercase one."
+  (when-let* ((canon (magit-dash-pr-cache--repo-dir repo)))
+    (let ((parts (split-string repo "/")))
+      (seq-remove
+       (lambda (dir)
+         (or (equal (file-name-as-directory dir) canon)
+             (file-equal-p dir canon)))
+       (seq-mapcat (lambda (owner-dir)
+                     (magit-dash-pr-cache--case-subdirs owner-dir (cadr parts)))
+                   (magit-dash-pr-cache--case-subdirs
+                    (magit-dash-pr-cache--root) (car parts)))))))
+
+(defun magit-dash-pr-cache--migrate-legacy (repo)
+  "Move records of mixed-case directories of REPO into the lowercase one.
+When no lowercase directory exists the legacy one is renamed; otherwise
+each record is merged in, the newest `:fetched-at' winning.  Failures are
+logged and never signal."
+  (seq-do
+   (lambda (legacy)
+     (condition-case err
+         (progn
+           (let ((canon (magit-dash-pr-cache--repo-dir repo)))
+             (if (not (file-directory-p canon))
+		 (progn
+                   (make-directory (file-name-directory (directory-file-name canon)) t)
+                   (rename-file (directory-file-name legacy) (directory-file-name canon)))
+               (seq-do
+		(lambda (src)
+                  (let* ((dest (expand-file-name (file-name-nondirectory src) canon))
+			 (theirs (magit-dash-pr-cache--read-file src))
+			 (ours (and (file-exists-p dest)
+                                    (magit-dash-pr-cache--read-file dest))))
+                    (cond
+                     ((null theirs) nil)
+                     ((or (null ours)
+                          (> (or (plist-get theirs :fetched-at) 0)
+                             (or (plist-get ours :fetched-at) 0)))
+                      (rename-file src dest t))
+                     (t (delete-file src)))))
+		(directory-files legacy t "\\.eld\\'"))
+               (ignore-errors (delete-directory legacy))))
+           (ignore-errors (delete-directory
+                           (file-name-directory (directory-file-name legacy)))))
+       (error
+        (message "magit-dash-pr-cache: could not migrate %s: %s"
+                 legacy (error-message-string err)))))
+   (magit-dash-pr-cache--legacy-dirs repo)))
+
+(defun magit-dash-pr-cache--migrate-scope (org)
+  "Migrate every mixed-case repo directory, limited to ORG (any case) if non-nil."
+  (seq-do
+   (lambda (owner-dir)
+     (let ((owner (file-name-nondirectory owner-dir)))
+       (seq-do
+        (lambda (repo-dir)
+          (let ((name (file-name-nondirectory repo-dir)))
+            (when (or (not (equal owner (downcase owner)))
+                      (not (equal name (downcase name))))
+              (magit-dash-pr-cache--migrate-legacy (concat owner "/" name)))))
+        (magit-dash-pr-cache--subdirs owner-dir))))
+   (if org
+       (magit-dash-pr-cache--case-subdirs (magit-dash-pr-cache--root) org)
+     (magit-dash-pr-cache--subdirs (magit-dash-pr-cache--root)))))
 
 (defun magit-dash-pr-cache--file (repo number)
-  "Return the file for REPO and NUMBER, or nil when either is malformed."
+  "Return the file for REPO and NUMBER, or nil when either is malformed.
+Migrates legacy mixed-case directories of REPO first."
   (when-let* (((integerp number))
               (dir (magit-dash-pr-cache--repo-dir repo)))
+    (magit-dash-pr-cache--migrate-legacy repo)
     (expand-file-name (format "%s.eld" number) dir)))
 
+(defun magit-dash-pr-cache--null-to-nil (value)
+  "Return VALUE with every `:null' replaced by nil.
+Recurses on the car only and iterates along lists, so a very long list
+\(a large `statusCheckRollup') cannot exhaust the Lisp stack."
+  (cond
+   ((eq value :null) nil)
+   ((consp value)
+    (let ((out nil)
+          (tail value))
+      (while (consp tail)
+        (push (magit-dash-pr-cache--null-to-nil (car tail)) out)
+        (setq tail (cdr tail)))
+      (nconc (nreverse out) (magit-dash-pr-cache--null-to-nil tail))))
+   (t value)))
+
+(defun magit-dash-pr-cache--url-repo (url)
+  "Return the lowercase OWNER/NAME of the GitHub pull request URL, or nil."
+  (when (and (stringp url)
+             (string-match "\\`https?://[^/]+/\\([^/]+/[^/]+\\)/pull/[0-9]+" url))
+    (downcase (match-string 1 url))))
+
+(defun magit-dash-pr-cache--url-number (url)
+  "Return the pull request number in the GitHub pull request URL, or nil."
+  (when (and (stringp url)
+             (string-match "\\`https?://[^/]+/[^/]+/[^/]+/pull/\\([0-9]+\\)" url))
+    (string-to-number (match-string 1 url))))
+
+(defvar magit-dash-pr-cache--renames-logged nil
+  "Hash table of lowercase repos whose url/record name mismatch was logged.")
+
+(defun magit-dash-pr-cache--note-rename (repo url)
+  "Log once per REPO that URL names a different repo (rename or transfer)."
+  (when-let* ((url-repo (magit-dash-pr-cache--url-repo url))
+              ((not (equal url-repo (downcase repo)))))
+    (unless magit-dash-pr-cache--renames-logged
+      (setq magit-dash-pr-cache--renames-logged (make-hash-table :test #'equal)))
+    (unless (map-elt magit-dash-pr-cache--renames-logged (downcase repo))
+      (setf (map-elt magit-dash-pr-cache--renames-logged (downcase repo)) t)
+      (message "magit-dash-pr-cache: %s is cached with a url naming %s (renamed?)"
+               repo url-repo))))
+
+(defun magit-dash-pr-cache--problem (record)
+  "Return a string describing why RECORD is invalid, or nil when it is sound."
+  (let ((payload (plist-get record :payload))
+        (fetched (plist-get record :fetched-at))
+        (version (or (plist-get record :version) 1))
+        (url-number (magit-dash-pr-cache--url-number (plist-get record :url))))
+    (cond
+     ((not (and (proper-list-p record) (plistp record))) "not a plist")
+     ((not (eql version magit-dash-pr-cache-version))
+      (format "unknown version %S" version))
+     ((not (magit-dash-pr-cache--repo-dir (plist-get record :repo))) "bad :repo")
+     ((not (integerp (plist-get record :number))) "bad :number")
+     ((not (or (null payload)
+               (and (proper-list-p payload) (seq-every-p #'consp payload))))
+      "bad :payload")
+     ((not (or (null fetched) (numberp fetched))) "bad :fetched-at")
+     ((not (let ((times (plist-get record :field-times)))
+             (and (proper-list-p times)
+                  (seq-every-p (lambda (cell)
+                                 (and (consp cell) (symbolp (car cell))
+                                      (numberp (cdr cell))))
+                               times))))
+      "bad :field-times")
+     ((and url-number (not (eql url-number (plist-get record :number))))
+      (format "url number %s differs from record" url-number)))))
+
 (defun magit-dash-pr-cache--read-file (file)
-  "Return the record stored in FILE, or nil with a message when unreadable."
+  "Return the validated record stored in FILE, or nil with a message.
+A malformed `:status' is dropped (with a message) but keeps the record."
   (condition-case err
       (let ((record (with-temp-buffer
-                      (insert-file-contents file)
+                      (let ((coding-system-for-read 'utf-8-unix))
+                        (insert-file-contents file))
                       (let ((read-eval nil))
                         (read (current-buffer))))))
         (cond
-         ((and (listp record) (plist-get record :number) (plist-get record :repo))
-          record)
-         (t
-          (message "magit-dash-pr-cache: skipping malformed %s" file)
-          nil)))
+         ((magit-dash-pr-cache--problem record)
+          (message "magit-dash-pr-cache: skipping %s: %s"
+                   file (magit-dash-pr-cache--problem record))
+          nil)
+         ((let ((status (plist-get record :status)))
+            (not (or (null status) (and (proper-list-p status) (plistp status)))))
+          (message "magit-dash-pr-cache: dropping malformed :status in %s" file)
+          (plist-put record :status nil))
+         (t record)))
     (error
      (message "magit-dash-pr-cache: skipping unreadable %s: %s"
               file (error-message-string err))
@@ -114,22 +333,79 @@ with no \".\" or \"..\" component."
               ((file-readable-p file)))
     (magit-dash-pr-cache--read-file file)))
 
-(defun magit-dash-pr-cache-list (&optional repo)
-  "Return the cached records for REPO, or for every repo when REPO is nil.
-Never signals; an unscannable directory yields nil."
-  (let ((files (condition-case err
-                   (if repo
-                       (when-let* ((dir (magit-dash-pr-cache--repo-dir repo))
-                                   ((file-directory-p dir)))
-                         (directory-files dir t "\\.eld\\'"))
-                     (when (file-directory-p (magit-dash-pr-cache--root))
-                       (directory-files-recursively
-                        (magit-dash-pr-cache--root) "\\.eld\\'")))
-                 (error
-                  (message "magit-dash-pr-cache: could not scan cache: %s"
-                           (error-message-string err))
-                  nil))))
-    (seq-keep #'magit-dash-pr-cache--read-file files)))
+(defun magit-dash-pr-cache--subdirs (dir)
+  "Return the subdirectories of DIR, or nil when DIR does not exist."
+  (when (file-directory-p dir)
+    (seq-filter #'file-directory-p (directory-files dir t "\\`[^.]"))))
+
+(defun magit-dash-pr-cache--sweep-orphans (dir)
+  "Delete leftover temp files in DIR older than a day."
+  (seq-do (lambda (tmp)
+            (when-let* ((attrs (file-attributes tmp))
+                        ((> (- (float-time) (float-time (file-attribute-modification-time attrs)))
+                            86400)))
+              (ignore-errors (delete-file tmp))))
+          (directory-files dir t "\\`\\.pr-.*\\.tmp\\'")))
+
+(defun magit-dash-pr-cache--dedupe (records)
+  "Return RECORDS with one per (lowercase repo, number), the newest `:fetched-at'."
+  (let ((best (make-hash-table :test #'equal))
+        (order nil))
+    (seq-do (lambda (record)
+              (let* ((key (cons (downcase (plist-get record :repo))
+                                (plist-get record :number)))
+                     (kept (map-elt best key)))
+                (cond
+                 ((null kept)
+                  (push key order)
+                  (setf (map-elt best key) record))
+                 ((> (or (plist-get record :fetched-at) 0)
+                     (or (plist-get kept :fetched-at) 0))
+                  (setf (map-elt best key) record)))))
+            records)
+    (seq-map (lambda (key)
+               (map-elt best key))
+             (nreverse order))))
+
+(defun magit-dash-pr-cache-list (&optional repo org)
+  "Return the cached records for REPO, ORG's repos, or every repo.
+Only the directories of the requested scope are read.  Never signals; an
+unscannable directory yields nil."
+  (let ((dirs (condition-case err
+                  (cond
+                   (repo
+                    (magit-dash-pr-cache--migrate-legacy repo)
+                    (when-let* ((dir (magit-dash-pr-cache--repo-dir repo))
+                                ((file-directory-p dir)))
+                      (list dir)))
+                   ((and (stringp org)
+                         (string-match-p "\\`[A-Za-z0-9_.-]+\\'" org)
+                         (not (member org '("." ".."))))
+                    (magit-dash-pr-cache--migrate-scope org)
+                    (magit-dash-pr-cache--subdirs
+                     (expand-file-name (downcase org) (magit-dash-pr-cache--root))))
+                   (org nil)
+                   (t
+                    (magit-dash-pr-cache--migrate-scope nil)
+                    (seq-mapcat #'magit-dash-pr-cache--subdirs
+                                (magit-dash-pr-cache--subdirs
+                                 (magit-dash-pr-cache--root)))))
+                (error
+                 (message "magit-dash-pr-cache: could not scan cache: %s"
+                          (error-message-string err))
+                 nil))))
+    (magit-dash-pr-cache--dedupe
+     (seq-keep #'magit-dash-pr-cache--read-file
+              (seq-mapcat (lambda (dir)
+                            (condition-case err
+                                (progn
+                                  (magit-dash-pr-cache--sweep-orphans dir)
+                                  (directory-files dir t "\\.eld\\'"))
+                              (error
+                               (message "magit-dash-pr-cache: could not scan %s: %s"
+                                        dir (error-message-string err))
+                               nil)))
+                          dirs)))))
 
 (defun magit-dash-pr-cache--write (file record)
   "Atomically write RECORD to FILE."
@@ -140,7 +416,8 @@ Never signals; an unscannable directory yields nil."
           (progn
             (let ((print-length nil)
                   (print-level nil)
-                  (print-circle nil))
+                  (print-circle nil)
+                  (coding-system-for-write 'utf-8-unix))
               (with-temp-file tmp
                 (prin1 record (current-buffer))
                 (insert "\n")))
@@ -158,26 +435,100 @@ repeated merges never grow the alist."
             (seq-uniq (seq-remove (lambda (cell) (assoc (car cell) unique)) old)
                       (lambda (a b) (equal (car a) (car b)))))))
 
-(defun magit-dash-pr-cache-put (repo number payload &optional status prior)
+(defun magit-dash-pr-cache--newer-p (a b)
+  "Return non-nil when timestamp string A is later than string B."
+  (and (stringp a) (stringp b) (string> a b)))
+
+(defun magit-dash-pr-cache--skippable-p (new prior)
+  "Return non-nil when writing NEW over PRIOR would only bump the timestamp.
+That requires identical content and a PRIOR younger than a third of the
+stale threshold."
+  (and prior
+       (equal (plist-get new :payload) (plist-get prior :payload))
+       (equal (plist-get new :status) (plist-get prior :status))
+       (equal (plist-get new :url) (plist-get prior :url))
+       (eq (plist-get new :gone) (plist-get prior :gone))
+       (when-let* ((fetched (magit-dash-pr-cache-effective-fetched-at prior)))
+         (< 0 (- (float-time) fetched) (/ (magit-dash-pr-cache-stale-seconds) 3)))))
+
+(defun magit-dash-pr-cache-put (repo number payload &optional status prior search-p)
   "Store PAYLOAD (a `gh pr view' alist) for REPO and NUMBER.
-Keep the existing `:status' when STATUS is nil.  PRIOR, when non-nil, is
-the already-read previous record and saves a second read from disk.
-Touch exactly one file.  Return the record, or nil when it could not be
-written."
+PAYLOAD is merged over the cached payload (fresh keys win).  Keep the
+existing `:status' when STATUS is nil.  PRIOR, when non-nil, is the
+already-read previous record and saves a second read from disk.  REPO's
+case is kept in the record.  SEARCH-P non-nil says PAYLOAD comes from
+cross-repo search, which never supplies the volatile fields: those that
+are merely kept get no field time (see Commentary).
+
+A PAYLOAD whose `updatedAt' is older than the cached one is dropped (no
+rollback; STATUS alone is applied, and a `:gone' flag is cleared).  A
+payload whose `url' names another pull request number is refused; a
+different repo name in it (rename, transfer) is accepted and logged once
+per repo.  Touch exactly one file.  Return the record, or nil when it
+could not be written."
   (condition-case err
-      (when-let* ((file (magit-dash-pr-cache--file repo number)))
-        (let ((record (list :version magit-dash-pr-cache-version
-                            :repo repo
-                            :number number
-                            :fetched-at (float-time)
-                            :updated-at (map-elt payload 'updatedAt)
-                            :head-sha (map-elt payload 'headRefOid)
-                            :payload payload
-                            :status (or status
-                                        (plist-get (or prior (magit-dash-pr-cache-get repo number))
-                                                   :status)))))
-          (magit-dash-pr-cache--write file record)
-          record))
+      (let ((file (magit-dash-pr-cache--file repo number)))
+        (cond
+         ((not file)
+          (message "magit-dash-pr-cache: not caching %S#%S: malformed repo or number"
+                   repo number)
+          nil)
+         ((let ((url-number (magit-dash-pr-cache--url-number (map-elt payload 'url))))
+            (and url-number (not (eql url-number number))))
+          (message "magit-dash-pr-cache: not caching %s#%s: url names #%s"
+                   repo number (magit-dash-pr-cache--url-number (map-elt payload 'url)))
+          nil)
+         (t
+          (magit-dash-pr-cache--note-rename repo (map-elt payload 'url))
+          (let* ((prior (or prior (magit-dash-pr-cache-get repo number)))
+                 (fresh (magit-dash-pr-cache--null-to-nil payload))
+                 (old (plist-get prior :payload))
+                 (stale-write (magit-dash-pr-cache--newer-p
+                               (map-elt old 'updatedAt) (map-elt fresh 'updatedAt))))
+            (if stale-write
+                (cond
+                 ((plist-get prior :gone)
+                  (let ((revived (plist-put (copy-sequence prior) :gone nil)))
+                    (when status
+                      (setq revived (plist-put revived :status status)))
+                    (magit-dash-pr-cache--write file revived)
+                    revived))
+                 (status
+                  (magit-dash-pr-cache-put-status repo number status old prior)))
+              (let* ((now (float-time))
+                     (newer (magit-dash-pr-cache--newer-p
+                             (map-elt fresh 'updatedAt) (map-elt old 'updatedAt)))
+                     (merged (magit-dash-pr-cache-merge-payload
+                              fresh
+                              (if (and newer (not (assq 'headRefOid fresh)))
+                                  (assq-delete-all 'headRefOid (copy-sequence old))
+                                old)))
+                     (old-times (plist-get prior :field-times))
+                     (record (list :version magit-dash-pr-cache-version
+                                   :repo repo
+                                   :number number
+                                   :url (map-elt merged 'url)
+                                   :fetched-at now
+                                   :field-times
+                                   (seq-keep
+                                    (lambda (key)
+                                      (cond
+                                       ((assq key fresh) (cons key now))
+                                       ((and (assq key merged) (not search-p))
+                                        (when-let* ((ts (or (alist-get key old-times)
+                                                            (plist-get prior :fetched-at))))
+                                          (cons key ts)))))
+                                    magit-dash-pr-cache--volatile-keys)
+                                   :updated-at (map-elt merged 'updatedAt)
+                                   :head-sha (map-elt merged 'headRefOid)
+                                   :payload merged
+                                   :status (or status (plist-get prior :status)))))
+                (cond
+                 ((magit-dash-pr-cache--skippable-p record prior)
+                  prior)
+                 (t
+                  (magit-dash-pr-cache--write file record)
+                  record))))))))
     (error
      (message "magit-dash-pr-cache: could not write %s#%s: %s"
               repo number (error-message-string err))
@@ -186,10 +537,10 @@ written."
 (defun magit-dash-pr-cache-put-status (repo number status payload &optional prior)
   "Store STATUS for REPO and NUMBER without refreshing the record's age.
 When a previous record exists (PRIOR, or read from disk) only its
-`:status' is replaced; `:fetched-at', `:payload', `:updated-at' and
-`:head-sha' are preserved so stale rows stay stale.  Without one, write
-PAYLOAD with a fresh stamp.  Return the record, or nil when it could not
-be written."
+`:status' is replaced; `:fetched-at', `:field-times', `:payload',
+`:updated-at' and `:head-sha' are preserved so stale rows stay stale.
+Without one, write PAYLOAD with a fresh stamp.  Return the record, or
+nil when it could not be written."
   (condition-case err
       (when-let* ((file (magit-dash-pr-cache--file repo number)))
         (if-let* ((old (or prior (magit-dash-pr-cache-get repo number))))
@@ -199,6 +550,34 @@ be written."
           (magit-dash-pr-cache-put repo number payload status)))
     (error
      (message "magit-dash-pr-cache: could not write %s#%s: %s"
+              repo number (error-message-string err))
+     nil)))
+
+(defun magit-dash-pr-cache-delete (repo number)
+  "Delete the cached record for REPO and NUMBER; return non-nil if one existed."
+  (condition-case err
+      (when-let* ((file (magit-dash-pr-cache--file repo number))
+                  ((file-exists-p file)))
+        (delete-file file)
+        t)
+    (error
+     (message "magit-dash-pr-cache: could not delete %s#%s: %s"
+              repo number (error-message-string err))
+     nil)))
+
+(defun magit-dash-pr-cache-mark-gone (repo number)
+  "Flag the record for REPO and NUMBER `:gone'; return the record or nil.
+Nothing is written when there is no record or it is already flagged."
+  (condition-case err
+      (when-let* ((file (magit-dash-pr-cache--file repo number))
+                  (record (magit-dash-pr-cache-get repo number)))
+        (if (plist-get record :gone)
+            record
+          (let ((gone (plist-put (copy-sequence record) :gone t)))
+            (magit-dash-pr-cache--write file gone)
+            gone)))
+    (error
+     (message "magit-dash-pr-cache: could not mark %s#%s gone: %s"
               repo number (error-message-string err))
      nil)))
 
