@@ -100,8 +100,12 @@ FILE is the loaded file passed by `after-load-functions'."
 
 (defcustom magit-dash-global-managed-settings
   '((vc-follow-symlinks . t)
-    (version-control . t))
-  "Alist of (SYMBOL . VALUE) settings managed globally by `magit-dash-global-mode'."
+    (version-control . t)
+    (code-review-worktree-resolver . magit-dash-review-worktree-resolver))
+  "Alist of (SYMBOL . VALUE) settings managed globally by `magit-dash-global-mode'.
+The `code-review-worktree-resolver' entry makes code-review reuse the
+review worktrees magit-dash creates, falling back to its own when the
+resolver finds none.  Remove the entry to keep code-review's own worktrees."
   :type '(alist :key-type symbol :value-type sexp)
   :group 'magit-dash)
 

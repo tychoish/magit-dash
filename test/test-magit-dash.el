@@ -3134,6 +3134,25 @@ A conflict (e.g. \"b\" and \"bp\" coexisting) causes transient to raise
             (should (memq 'magit-dash--ephemeral-tags savehist-additional-variables)))
         (magit-dash-global-mode -1)))))
 
+(defvar code-review-worktree-resolver)
+
+(ert-deftest magit-dash/global-managed-settings-set-worktree-resolver ()
+  "The global mode points code-review at the magit-dash worktree resolver and restores it."
+  (let ((magit-dash-global--saved-settings nil)
+        (magit-dash-global-managed-settings
+         '((code-review-worktree-resolver . magit-dash-review-worktree-resolver)))
+        (code-review-worktree-resolver 'sentinel))
+    (magit-dash-global--apply-settings)
+    (should (eq code-review-worktree-resolver 'magit-dash-review-worktree-resolver))
+    (magit-dash-global--revert-settings)
+    (should (eq code-review-worktree-resolver 'sentinel))))
+
+(ert-deftest magit-dash/global-default-settings-include-worktree-resolver ()
+  "The shipped default managed settings include the worktree resolver."
+  (should (eq (map-elt (default-value 'magit-dash-global-managed-settings)
+                       'code-review-worktree-resolver)
+              'magit-dash-review-worktree-resolver)))
+
 (ert-deftest magit-dash/tag-keys-agree-between-map-and-transient ()
   "Tag and dispatch commands are reachable from the same keys in the map and the menu."
   (let ((suffixes (test-magit-dash--all-transient-suffixes 'magit-dash-menu)))
