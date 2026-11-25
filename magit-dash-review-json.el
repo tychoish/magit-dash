@@ -27,6 +27,7 @@
 
 (declare-function magit-dash-review-file "magit-dash-review" (root pr-number &optional repo))
 (declare-function magit-dash-worktree-main-dir "magit-dash-worktree" (&optional directory))
+(declare-function diff-review-refresh "diff-review" ())
 
 (defgroup magit-dash-review-json nil
   "diff-review/1 JSON adapter for code-review."
@@ -62,7 +63,7 @@ Called with (REPO . NUMBER)."
 
 (defconst magit-dash-review-json--remote-keys
   '("gh_thread_id" "gh_comment_id" "gh_resolved" "origin" "path" "lines"
-    "blob" "author" "at" "body" "outdated")
+    "blob" "author" "at" "body" "outdated" "diff_side")
   "Comment keys that GitHub owns: a merge overwrites them with remote values.
 Every other key keeps its local value when the local thread has one.")
 
@@ -111,34 +112,117 @@ repo is not (car PR-KEY)."
                        :null-object nil
                        :false-object :false)))
 
+(defcustom magit-dash-review-json-modified-buffer-action 'skip
+  "What writers do when the buffer visiting the review file has unsaved edits.
+`skip' (the default) leaves the buffer alone: the file on disk is still
+updated, but the buffer is neither reverted nor refreshed (a message says
+so), so unsaved edits are never discarded.  `save' saves the buffer before
+the file is read, so its edits are part of what is rewritten."
+  :type '(choice (const :tag "Skip refreshing a modified buffer" skip)
+                 (const :tag "Save a modified buffer first" save))
+  :group 'magit-dash-review-json)
+
+(defvar magit-dash-review-json-last-read-fallback nil
+  "Backup file the last `magit-dash-review-json-read-file' fell back to, or nil.
+Non-nil means the review file itself was corrupt and the returned data is
+the (older) backup.")
+
+(defun magit-dash-review-json--parseable-p (file)
+  "Return non-nil when FILE exists and parses as a JSON object."
+  (and (file-readable-p file)
+       (condition-case nil
+           (hash-table-p (magit-dash-review-json--parse-file file))
+         (error nil))))
+
 (defun magit-dash-review-json-read-file (review-file)
   "Parse REVIEW-FILE as a diff-review/1 JSON hash table.
 When REVIEW-FILE is unparsable and the REVIEW-FILE.bak left by
-`magit-dash-review-json-write-file' parses, message and return the backup."
+`magit-dash-review-json-write-file' parses, message and return the backup,
+and set `magit-dash-review-json-last-read-fallback' to it so writers can
+refuse to build on older data (see `magit-dash-review-json-read-for-write')."
   (unless (and review-file (file-readable-p review-file))
     (error "Review file not readable: %s" review-file))
-  (let ((backup (concat review-file ".bak")))
+  (setq magit-dash-review-json-last-read-fallback nil)
+  (let ((backup (concat (file-truename review-file) ".bak")))
     (condition-case err
         (magit-dash-review-json--parse-file review-file)
       (error
-       (cond
-        ((file-readable-p backup)
-         (message "magit-dash-review-json: %s is corrupt (%s); falling back to %s"
-                  review-file (error-message-string err) backup)
-         (magit-dash-review-json--parse-file backup))
-        (t (signal (car err) (cdr err))))))))
+       (if (magit-dash-review-json--parseable-p backup)
+           (progn
+             (message "magit-dash-review-json: WARNING %s is corrupt (%s); using older backup %s"
+                      review-file (error-message-string err) backup)
+             (setq magit-dash-review-json-last-read-fallback backup)
+             (magit-dash-review-json--parse-file backup))
+         (signal (car err) (cdr err)))))))
+
+(defun magit-dash-review-json-save-visiting-buffer (file)
+  "Save the buffer visiting FILE when it is modified and the action is `save'."
+  (when-let* ((buf (find-buffer-visiting file))
+              ((buffer-modified-p buf))
+              ((eq magit-dash-review-json-modified-buffer-action 'save)))
+    (with-current-buffer buf
+      (save-buffer))))
+
+(defun magit-dash-review-json-read-for-write (review-file)
+  "Read REVIEW-FILE to be modified and written back; return its table.
+A modified visiting buffer is saved first when
+`magit-dash-review-json-modified-buffer-action' is `save'.  When the file was
+corrupt and the backup was read instead, ask for confirmation and signal a
+`user-error' unless it is given: writing would replace newer data."
+  (magit-dash-review-json-save-visiting-buffer review-file)
+  (let ((data (magit-dash-review-json-read-file review-file)))
+    (when (and magit-dash-review-json-last-read-fallback
+               (not (yes-or-no-p
+                     (format "%s is corrupt; build on the older backup %s? "
+                             review-file magit-dash-review-json-last-read-fallback))))
+      (user-error "Refusing to write %s from its backup" review-file))
+    data))
+
+(defun magit-dash-review-json-refresh-visiting-buffer (file)
+  "Refresh the buffer visiting FILE after FILE changed on disk.
+Return non-nil when there is no such buffer or it was refreshed.  A modified
+buffer is never reverted or refreshed: message and return nil, so unsaved
+edits survive (saving it later asks about the newer file on disk)."
+  (let ((buf (find-buffer-visiting file)))
+    (cond
+     ((not (buffer-live-p buf)) t)
+     ((buffer-modified-p buf)
+      (message "magit-dash-review: %s has unsaved edits and was not refreshed; %s changed on disk"
+               (buffer-name buf) file)
+      nil)
+     (t
+      (with-current-buffer buf
+        (cond
+         ((and (derived-mode-p 'diff-review-mode) (fboundp 'diff-review-refresh))
+          (diff-review-refresh))
+         (t (revert-buffer t t t))))
+      t))))
+
+(defun magit-dash-review-json--clean-stale-temp-files (file)
+  "Delete leftover FILE.tmp-* files in FILE's directory older than a day."
+  (seq-do (lambda (stale)
+            (when (time-less-p (file-attribute-modification-time (file-attributes stale))
+                               (time-subtract nil (* 24 3600)))
+              (ignore-errors (delete-file stale))))
+          (directory-files (file-name-directory file) t
+                           (concat "\\`" (regexp-quote (file-name-nondirectory file)) "\\.tmp-"))))
 
 (defun magit-dash-review-json-write-file (review-file data)
   "Serialize DATA hash table to REVIEW-FILE as pretty-printed UTF-8 JSON.
 The write is atomic: the JSON goes to a temporary file in the same
 directory which is renamed over REVIEW-FILE, so a failure leaves the old
-file intact.  The previous file is first copied to REVIEW-FILE.bak."
-  (let* ((file (expand-file-name review-file))
+file intact.  A symlinked REVIEW-FILE is resolved first, so the link stays a
+link and its target is replaced; the file modes of the old file are kept (a
+new file is 0600).  The previous file is copied to REVIEW-FILE.bak only when
+it parses as JSON, so the backup is always the last good file.  Stale
+REVIEW-FILE.tmp-* leftovers older than a day are removed."
+  (let* ((file (file-truename (expand-file-name review-file)))
          (temp nil)
          (json (decode-coding-string
                 (json-serialize data :null-object nil :false-object :false)
                 'utf-8)))
     (make-directory (file-name-directory file) t)
+    (magit-dash-review-json--clean-stale-temp-files file)
     (unwind-protect
         (progn
           (setq temp (make-temp-file (concat file ".tmp-")))
@@ -148,7 +232,8 @@ file intact.  The previous file is first copied to REVIEW-FILE.bak."
             (insert "\n")
             (let ((coding-system-for-write 'utf-8-unix))
               (write-region (point-min) (point-max) temp nil 'silent)))
-          (when (file-exists-p file)
+          (set-file-modes temp (or (and (file-exists-p file) (file-modes file)) #o600))
+          (when (magit-dash-review-json--parseable-p file)
             (copy-file file (concat file ".bak") t))
           (rename-file temp file t)
           (setq temp nil))
@@ -180,7 +265,7 @@ files are left alone.  Return the number of files rewritten."
        (seq-filter
         (lambda (file)
           (condition-case err
-              (let* ((table (magit-dash-review-json-read-file file))
+              (let* ((table (magit-dash-review-json-read-for-write file))
                      (md (map-elt table "magit_dash"))
                      (hit nil))
                 (when (funcall same (map-elt table "root"))
@@ -190,12 +275,13 @@ files are left alone.  Return the number of files rewritten."
                   (setf (map-elt md "worktree") new)
                   (setq hit t))
                 (when hit
-                  (magit-dash-review-json-write-file file table))
+                  (magit-dash-review-json-write-file file table)
+                  (magit-dash-review-json-refresh-visiting-buffer file))
                 hit)
             (error (message "magit-dash-review-json: cannot relocate %s: %s"
                             file (error-message-string err))
                    nil)))
-        (directory-files review-dir t "\\.json\\'"))))))
+        (directory-files review-dir t "\\`[^.].*\\.json\\'"))))))
 
 (defun magit-dash-review-json-deep-copy (value)
   "Return a deep copy of VALUE.
@@ -376,6 +462,7 @@ HEAD-SHA and BASE-SHA are the commit SHAs for resolving blob hashes."
               t
             :false))
     (setf (map-elt comment-ht "origin") "github")
+    (setf (map-elt comment-ht "diff_side") diff-side)
     (unless (string-empty-p path)
       (setf (map-elt comment-ht "path") path))
     (when lines
@@ -407,8 +494,12 @@ Keys in `magit-dash-review-json--remote-keys' take the remote value, and are
 removed when REMOTE omits them (a thread that stops being outdated clears).
 Every other key keeps the local value (id, cr_id, remote_id, status and
 unknown keys), falling back to the remote one when local has none.  Resolved
-is sticky: once either side says resolved it stays resolved, so a thread
-re-opened on GitHub stays resolved locally until the local file is edited.
+is sticky: once either side says resolved it stays resolved.  Intent to
+resolve on GitHub is tracked apart from it: a thread whose last known
+GitHub state was resolved and which GitHub now reports open is flagged
+`gh_reopened' (and loses `local_resolved'), so submit does not re-resolve
+it; GitHub resolving it again clears both.  `gh_missing' is cleared on a
+match.
 Replies are all remote replies, then unpublished local ones (no
 gh_comment_id), then published local replies the remote list lacks, kept
 with gh_missing t because the remote fetch may be truncated.  The result
@@ -428,6 +519,14 @@ shares nothing with LOCAL or REMOTE."
                   (eq (map-elt local "resolved") t))
               t
             :false))
+    (map-delete merged "gh_missing")
+    (cond
+     ((eq (map-elt remote "gh_resolved") t)
+      (map-delete merged "local_resolved")
+      (map-delete merged "gh_reopened"))
+     ((eq (map-elt local "gh_resolved") t)
+      (map-delete merged "local_resolved")
+      (setf (map-elt merged "gh_reopened") t)))
     (let* ((remote-ids (seq-map (lambda (reply) (map-elt reply "gh_comment_id"))
                                 (map-elt remote "replies")))
            (local-replies (append (map-elt local "replies") nil))
@@ -458,6 +557,9 @@ threads are matched to local ones with `magit-dash-review-json-find-match',
 each local thread at most once; unmatched remote threads are added and
 unmatched local threads are kept whole.  Local order is preserved (a merged
 thread keeps its position) and new remote threads are appended.  When
+Local threads with a gh_thread_id that no remote thread matched get
+`gh_missing' t when REMOTE-METADATA has a non-nil `:threads-complete' (the
+caller's fetch was not truncated); submit skips such threads.  When
 EXISTING-HT belongs to a different repo than REMOTE-METADATA, it is ignored
 \(message) and a fresh table is built.  The result is fully independent
 of EXISTING-HT and REMOTE-THREADS: mutating it changes neither."
@@ -514,6 +616,13 @@ of EXISTING-HT and REMOTE-THREADS: mutating it changes neither."
     (unless (hash-table-p (map-elt result "viewed"))
       (setf (map-elt result "viewed") (make-hash-table :test #'equal)))
     (let ((pairs (nreverse (car state))))
+      (when (or (map-elt remote-metadata :threads-complete)
+                (map-elt remote-metadata 'threads-complete))
+        (seq-do (lambda (local-c)
+                  (when (and (not (magit-dash-review-json--empty-p (map-elt local-c "gh_thread_id")))
+                             (not (seq-find (lambda (pair) (eq (car pair) local-c)) pairs)))
+                    (setf (map-elt local-c "gh_missing") t)))
+                (magit-dash-review-json--comments result)))
       (setf (map-elt result "comments")
             (vconcat (seq-map (lambda (local-c)
                                 (or (cdr (seq-find (lambda (pair) (eq (car pair) local-c)) pairs))

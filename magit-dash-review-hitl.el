@@ -246,7 +246,7 @@ Returns the normalized target plist when `:review-file' is valid, or nil."
   "Apply accumulated `magit-dash-review-hitl--batch-json-updates' to disk."
   (pcase-dolist (`(,review-file . ,updates) (nreverse magit-dash-review-hitl--batch-json-updates))
     (let* ((data (if (file-exists-p review-file)
-                     (magit-dash-review--read-json-file review-file)
+                     (magit-dash-review--read-for-write review-file)
                    (let ((ht (make-hash-table :test #'equal)))
                      (setf (map-elt ht "format") "diff-review/1")
                      (setf (map-elt ht "viewed") (make-hash-table :test #'equal))
@@ -267,9 +267,7 @@ Returns the normalized target plist when `:review-file' is valid, or nil."
            (setf (map-elt data "verdict") (plist-get upd :verdict)))))
       (setf (map-elt data "comments") (vconcat comments))
       (magit-dash-review--write-json-file review-file data)
-      (when-let* ((live-buf (find-buffer-visiting review-file)))
-        (with-current-buffer live-buf
-          (revert-buffer t t t))))))
+      (magit-dash-review--refresh-visiting-buffer review-file))))
 
 (defun magit-dash-review-hitl--dispatch-findings (plan findings)
   "Dispatch approved FINDINGS from PLAN to the target worktree's agent session."

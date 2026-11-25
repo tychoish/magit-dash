@@ -226,5 +226,30 @@
           (should draft-c)
           (should (equal (map-elt draft-c "status") "draft")))))))
 
+(ert-deftest magit-dash-review-hitl/flush-skips-refresh-of-modified-buffer ()
+  "MED-2: the batch flush writes the file but leaves a modified buffer alone."
+  (magit-dash-review-hitl-test/with-temp-dir
+    (let* ((review-file (expand-file-name "review/pr-77.json" default-directory))
+           (data (make-hash-table :test #'equal)))
+      (setf (map-elt data "format") "diff-review/1")
+      (setf (map-elt data "comments") [])
+      (magit-dash-review--write-json-file review-file data)
+      (let ((buf (find-file-noselect review-file))
+            (magit-dash-review-hitl--batch-json-updates nil)
+            (c (make-hash-table :test #'equal)))
+        (unwind-protect
+            (progn
+              (setf (map-elt c "id") "f1")
+              (setf (map-elt c "body") "flushed")
+              (with-current-buffer buf (goto-char (point-max)) (insert "unsaved edit"))
+              (magit-dash-review-hitl--queue-json-update review-file (list :type 'comment :comment c))
+              (magit-dash-review-hitl--flush-json-updates)
+              (with-current-buffer buf
+                (should (buffer-modified-p))
+                (should (string-suffix-p "unsaved edit" (buffer-string))))
+              (should (= 1 (length (map-elt (magit-dash-review--read-json-file review-file) "comments")))))
+          (with-current-buffer buf (set-buffer-modified-p nil))
+          (kill-buffer buf))))))
+
 (provide 'test-magit-dash-review-hitl)
 ;;; test-magit-dash-review-hitl.el ends here

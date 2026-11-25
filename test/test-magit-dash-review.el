@@ -479,8 +479,11 @@
       (cl-letf (((symbol-function 'magit-dash-gh--call-process)
                  (lambda (args _dir)
                    (push args gh-calls)
-                   (let ((joined (string-join args " ")))
+                   (let* ((req (magit-dash-review-test/gh-request args))
+                          (joined (format "%S" req)))
                      (cond
+                      ((member "view" args)
+                       (cons 0 "{\"headRefOid\":\"H1\"}"))
                       ((string-match-p "addPullRequestReview(" joined)
                        ;; Ensure draft thread was excluded from payload
                        (should-not (string-match-p "Unpromoted AI draft" joined))
@@ -507,7 +510,7 @@
                                                         (isResolved . t)))))))))))
                       (t (error "Unexpected gh call: %S" args)))))))
         (magit-dash-review-submit review-file "LGTM overall")
-        (should (= (length gh-calls) 3))
+        (should (= (length gh-calls) 4))
         (let* ((reloaded (magit-dash-review--read-json-file review-file))
                (comments (append (map-elt reloaded "comments") nil))
                (rem (seq-find (lambda (c) (equal (map-elt c "id") "c-rem")) comments))
@@ -523,6 +526,455 @@
           (should (eq (map-elt rem "gh_resolved") t))
           (should (equal (map-elt (aref (map-elt rem "replies") 0) "gh_comment_id")
                          "PRRC_REPLY_1")))))))
+
+;;; Submit test helpers (all gh traffic is stubbed)
+
+(defun magit-dash-review-test/gh-request (args)
+  "Return the JSON request body gh ARGS would send via --input, or nil."
+  (when-let* ((pos (member "--input" args)))
+    (with-temp-buffer
+      (insert-file-contents (cadr pos))
+      (json-parse-string (buffer-string) :object-type 'alist :array-type 'list))))
+
+(defun magit-dash-review-test/c (&rest kv)
+  "Return a comment table from the key/value list KV."
+  (let ((h (make-hash-table :test #'equal)))
+    (seq-do (lambda (pair) (setf (map-elt h (car pair)) (cadr pair)))
+            (seq-partition kv 2))
+    h))
+
+(defvar magit-dash-review-test/gh-log nil "Requests seen by the fake gh, newest first.")
+
+(defmacro magit-dash-review-test/with-gh (handler &rest body)
+  "Run BODY with gh replaced by HANDLER called as (KIND ARGS REQUEST).
+KIND is one of view, review, reply, resolve, unresolve, node-id.  HANDLER
+returns an alist response, or (CODE . OUTPUT) for a failure."
+  (declare (indent 1))
+  `(let ((magit-dash-review-test/gh-log nil))
+     (cl-letf (((symbol-function 'magit-dash-gh--call-process)
+                (lambda (args _dir)
+                  (let* ((req (magit-dash-review-test/gh-request args))
+                         (q (or (map-elt req 'query) ""))
+                         (kind (cond
+                                ((member "view" args) 'view)
+                                ((string-match-p "addPullRequestReview(" q) 'review)
+                                ((string-match-p "addPullRequestReviewThreadReply" q) 'reply)
+                                ((string-match-p "unresolveReviewThread" q) 'unresolve)
+                                ((string-match-p "resolveReviewThread" q) 'resolve)
+                                (t 'node-id)))
+                         (res (funcall ,handler kind args req)))
+                    (push (list kind args req) magit-dash-review-test/gh-log)
+                    (if (and (consp res) (integerp (car res)))
+                        res
+                      (cons 0 (json-serialize res)))))))
+       ,@body)))
+
+(defun magit-dash-review-test/review-response (threads)
+  "Return the addPullRequestReview response echoing request THREADS."
+  (let ((nodes (vconcat
+                (seq-map (lambda (th)
+                           `((id . ,(concat "C-" (map-elt th 'body)))
+                             (path . ,(map-elt th 'path))
+                             (body . ,(map-elt th 'body))
+                             (line . ,(map-elt th 'line))
+                             (pullRequestReviewThread . ((id . ,(concat "T-" (map-elt th 'body)))))))
+                         threads))))
+    `((data . ((addPullRequestReview
+                . ((pullRequestReview
+                    . ((id . "PRR")
+                       (state . "COMMENTED")
+                       (comments . ((nodes . ,nodes))))))))))))
+
+(defun magit-dash-review-test/gh-default (head)
+  "Return a handler that succeeds, echoing posted threads; PR head is HEAD."
+  (lambda (kind _args req)
+    (pcase kind
+      ('view `((headRefOid . ,head)))
+      ('review (magit-dash-review-test/review-response
+                (map-nested-elt req '(variables input threads))))
+      ('reply `((data . ((addPullRequestReviewThreadReply
+                          . ((comment . ((id . ,(concat "R-" (map-nested-elt req '(variables body)))))))))))) 
+      (_ '((data . ((resolveReviewThread . ((thread . ((id . "x"))))))))))))
+
+(defun magit-dash-review-test/submit-file (comments &optional verdict head)
+  "Write a review file holding COMMENTS (and VERDICT) for owner/repo#99; return it."
+  (let ((file (expand-file-name "review/pr-99.json" default-directory))
+        (data (make-hash-table :test #'equal)))
+    (setf (map-elt data "format") "diff-review/1")
+    (setf (map-elt data "root") default-directory)
+    (setf (map-elt data "magit_dash")
+          (magit-dash-review-test/c "repo" "owner/repo" "number" 99 "pr_node_id" "PR_1"
+                                    "head_oid" (or head "H1")))
+    (when verdict (setf (map-elt data "verdict") verdict))
+    (setf (map-elt data "viewed") (make-hash-table :test #'equal))
+    (setf (map-elt data "comments") (vconcat comments))
+    (magit-dash-review--write-json-file file data)
+    file))
+
+(defun magit-dash-review-test/gh-thread (id &rest replies)
+  "An existing GitHub thread ID with unposted REPLIES (body strings)."
+  (magit-dash-review-test/c
+   "id" id "gh_thread_id" (concat "T-" id) "gh_comment_id" (concat "C-" id)
+   "gh_resolved" :false "resolved" :false "path" "f.el" "lines" [1 1] "body" id
+   "replies" (vconcat (seq-map (lambda (b) (magit-dash-review-test/c "id" (concat "r-" b) "body" b))
+                               replies))))
+
+(defun magit-dash-review-test/kinds ()
+  "Kinds of the gh calls made so far, oldest first."
+  (nreverse (seq-map #'car magit-dash-review-test/gh-log)))
+
+(defun magit-dash-review-test/read-comments (file)
+  "Comments of FILE as a list."
+  (append (map-elt (magit-dash-review--read-json-file file) "comments") nil))
+
+;;; Submit tests
+
+(ert-deftest magit-dash-review/submit-never-sends-text-through-F ()
+  "HIGH-3: bodies like @file, 123 and null reach gh as literal strings, never via -F."
+  (magit-dash-review-test/with-temp-dir
+    (let* ((file (magit-dash-review-test/submit-file
+                  (list (magit-dash-review-test/gh-thread "a" "@/etc/hostname" "123" "null")
+                        (magit-dash-review-test/c "id" "n" "path" "n.el" "lines" [2 2]
+                                                  "body" "@/etc/hostname"))))
+           (magit-dash-review--submit-chunk-size 40))
+      (magit-dash-review-test/with-gh (magit-dash-review-test/gh-default "H1")
+        (magit-dash-review-submit file "true")
+        (should magit-dash-review-test/gh-log)
+        (seq-do (lambda (call)
+                  (should-not (member "-F" (nth 1 call)))
+                  (should-not (seq-some (lambda (a) (string-match-p "@/etc/hostname" a)) (nth 1 call))))
+                magit-dash-review-test/gh-log)
+        (let ((bodies (seq-map (lambda (call) (map-nested-elt (nth 2 call) '(variables body)))
+                               (seq-filter (lambda (call) (eq (car call) 'reply))
+                                           magit-dash-review-test/gh-log))))
+          (should (equal (sort (copy-sequence bodies) #'string<) '("123" "@/etc/hostname" "null"))))
+        (let ((review (seq-find (lambda (call) (eq (car call) 'review)) magit-dash-review-test/gh-log)))
+          (should (equal "@/etc/hostname"
+                         (map-elt (car (map-nested-elt (nth 2 review) '(variables input threads))) 'body)))
+          (should (equal "true" (map-nested-elt (nth 2 review) '(variables input body)))))))))
+
+(ert-deftest magit-dash-review/submit-partial-failure-persists-and-resubmit-posts-remainder ()
+  "HIGH-1: phase 1 and reply 1 are stamped when reply 2 fails; resubmit posts only reply 2."
+  (magit-dash-review-test/with-temp-dir
+    (let* ((file (magit-dash-review-test/submit-file
+                  (list (magit-dash-review-test/gh-thread "a" "one" "two")
+                        (magit-dash-review-test/c "id" "n" "path" "n.el" "lines" [2 2] "body" "new"))))
+           (ok (magit-dash-review-test/gh-default "H1")))
+      (magit-dash-review-test/with-gh
+          (lambda (kind args req)
+            (if (and (eq kind 'reply) (equal "two" (map-nested-elt req '(variables body))))
+                (cons 1 "boom")
+              (funcall ok kind args req)))
+        (should-error (magit-dash-review-submit file) :type 'error))
+      (let* ((comments (magit-dash-review-test/read-comments file))
+             (new (seq-find (lambda (c) (equal (map-elt c "id") "n")) comments))
+             (replies (map-elt (seq-find (lambda (c) (equal (map-elt c "id") "a")) comments) "replies")))
+        (should (equal "T-new" (map-elt new "gh_thread_id")))
+        (should (equal "R-one" (map-elt (aref replies 0) "gh_comment_id")))
+        (should-not (map-elt (aref replies 1) "gh_comment_id")))
+      (magit-dash-review-test/with-gh ok
+        (magit-dash-review-submit file)
+        (should (equal '(reply) (magit-dash-review-test/kinds)))
+        (should (equal "two" (map-nested-elt (nth 2 (car magit-dash-review-test/gh-log))
+                                             '(variables body)))))
+      (magit-dash-review-test/with-gh ok
+        (magit-dash-review-submit file)
+        (should-not magit-dash-review-test/gh-log)))))
+
+(ert-deftest magit-dash-review/submit-matches-returned-nodes-by-content-not-index ()
+  (magit-dash-review-test/with-temp-dir
+    (let* ((file (magit-dash-review-test/submit-file
+                  (list (magit-dash-review-test/c "id" "A" "path" "a.el" "lines" [5 5] "body" "first")
+                        (magit-dash-review-test/c "id" "B" "path" "b.el" "lines" [7 7] "body" "second"))))
+           (ok (magit-dash-review-test/gh-default "H1")))
+      (magit-dash-review-test/with-gh
+          (lambda (kind args req)
+            (let ((res (funcall ok kind args req)))
+              (if (eq kind 'review)
+                  ;; Return the nodes in reverse order.
+                  (let ((nodes (map-nested-elt res '(data addPullRequestReview pullRequestReview comments nodes))))
+                    `((data . ((addPullRequestReview
+                                . ((pullRequestReview
+                                    . ((comments . ((nodes . ,(vconcat (reverse (append nodes nil))))))))))))))
+                  res)))
+        (magit-dash-review-submit file))
+      (let ((comments (magit-dash-review-test/read-comments file)))
+        (should (equal "T-first" (map-elt (car comments) "gh_thread_id")))
+        (should (equal "T-second" (map-elt (cadr comments) "gh_thread_id")))))))
+
+(ert-deftest magit-dash-review/submit-chunks-many-threads-and-resumes ()
+  "HIGH-1: more than 50 threads go in chunks, stamped after each; resubmit sends the rest."
+  (magit-dash-review-test/with-temp-dir
+    (let* ((threads (seq-map (lambda (i)
+                               (magit-dash-review-test/c "id" (format "n%d" i) "path" "p.el"
+                                                         "lines" (vector i i) "body" (format "b%d" i)))
+                             (number-sequence 1 95)))
+           (file (magit-dash-review-test/submit-file threads))
+           (ok (magit-dash-review-test/gh-default "H1"))
+           (reviews 0))
+      (magit-dash-review-test/with-gh
+          (lambda (kind args req)
+            (when (eq kind 'review)
+              (setq reviews (1+ reviews))
+              (when (= reviews 3)
+                (error "third chunk fails")))
+            (funcall ok kind args req))
+        (should-error (magit-dash-review-submit file)))
+      (should (= 80 (seq-count (lambda (c) (map-elt c "gh_thread_id"))
+                               (magit-dash-review-test/read-comments file))))
+      (magit-dash-review-test/with-gh ok
+        (magit-dash-review-submit file)
+        (should (equal '(view review) (magit-dash-review-test/kinds)))
+        (should (= 15 (length (map-nested-elt (nth 2 (car magit-dash-review-test/gh-log))
+                                              '(variables input threads))))))
+      (should (= 95 (seq-count (lambda (c) (map-elt c "gh_thread_id"))
+                               (magit-dash-review-test/read-comments file)))))))
+
+(ert-deftest magit-dash-review/submit-error-on-one-thread-does-not-abort-others ()
+  (magit-dash-review-test/with-temp-dir
+    (let* ((file (magit-dash-review-test/submit-file
+                  (list (magit-dash-review-test/gh-thread "a" "bad")
+                        (magit-dash-review-test/gh-thread "b" "good"))))
+           (ok (magit-dash-review-test/gh-default "H1")))
+      (magit-dash-review-test/with-gh
+          (lambda (kind args req)
+            (if (and (eq kind 'reply) (equal "bad" (map-nested-elt req '(variables body))))
+                (cons 1 "boom")
+              (funcall ok kind args req)))
+        (let ((err (should-error (magit-dash-review-submit file))))
+          (should (string-match-p "T-a" (error-message-string err)))))
+      (let ((b (cadr (magit-dash-review-test/read-comments file))))
+        (should (equal "R-good" (map-elt (aref (map-elt b "replies") 0) "gh_comment_id")))))))
+
+(ert-deftest magit-dash-review/submit-skips-gh-missing-threads ()
+  "MED-4: replies and resolution on a thread gone from GitHub are skipped, others go on."
+  (magit-dash-review-test/with-temp-dir
+    (let* ((gone (magit-dash-review-test/gh-thread "a" "lost"))
+           (file (progn
+                   (setf (map-elt gone "gh_missing") t)
+                   (setf (map-elt gone "resolved") t)
+                   (magit-dash-review-test/submit-file
+                    (list gone (magit-dash-review-test/gh-thread "b" "kept"))))))
+      (magit-dash-review-test/with-gh (magit-dash-review-test/gh-default "H1")
+        (magit-dash-review-submit file)
+        (should (equal '(reply) (magit-dash-review-test/kinds)))))))
+
+(ert-deftest magit-dash-review/merge-flags-gh-missing-only-for-complete-fetch ()
+  (let* ((local (magit-dash-review-test/gh-thread "a"))
+         (existing (magit-dash-review-test/c "comments" (vector local)
+                                             "magit_dash" (magit-dash-review-test/c "repo" "o/r"))))
+    (let ((merged (magit-dash-review--merge-json (magit-dash-review-json-deep-copy existing)
+                                                 '(:repo "o/r") nil)))
+      (should-not (map-elt (aref (map-elt merged "comments") 0) "gh_missing")))
+    (let ((merged (magit-dash-review--merge-json (magit-dash-review-json-deep-copy existing)
+                                                 '(:repo "o/r" :threads-complete t) nil)))
+      (should (eq t (map-elt (aref (map-elt merged "comments") 0) "gh_missing"))))
+    (let* ((node (magit-dash-review-test/make-thread-node "T-a" "f.el" 1))
+           (merged (magit-dash-review--merge-json
+                    (magit-dash-review--merge-json (magit-dash-review-json-deep-copy existing)
+                                                   '(:repo "o/r" :threads-complete t) nil)
+                    '(:repo "o/r" :threads-complete t)
+                    (list (magit-dash-review--transcode-thread node nil nil nil)))))
+      (should-not (map-elt (aref (map-elt merged "comments") 0) "gh_missing")))))
+
+(ert-deftest magit-dash-review/submit-verdict-stamped-and-not-resent ()
+  "HIGH-2: verdict is sent once with commitOID, stamped, and re-sent only when changed."
+  (magit-dash-review-test/with-temp-dir
+    (let* ((verdict (magit-dash-review-test/c "state" "approved" "by" "me"))
+           (file (magit-dash-review-test/submit-file nil verdict))
+           (ok (magit-dash-review-test/gh-default "H1")))
+      (magit-dash-review-test/with-gh ok
+        (magit-dash-review-submit file)
+        (should (equal '(view review) (magit-dash-review-test/kinds)))
+        (let ((input (map-nested-elt (nth 2 (car magit-dash-review-test/gh-log)) '(variables input))))
+          (should (equal "APPROVE" (map-elt input 'event)))
+          (should (equal "H1" (map-elt input 'commitOID)))))
+      (let ((v (map-elt (magit-dash-review--read-json-file file) "verdict")))
+        (should (equal "H1" (map-elt v "submitted_head")))
+        (should (equal "approved" (map-elt v "submitted_state")))
+        (should (map-elt v "submitted_at")))
+      (magit-dash-review-test/with-gh ok
+        (magit-dash-review-submit file)
+        (should-not magit-dash-review-test/gh-log))
+      (let ((data (magit-dash-review--read-json-file file)))
+        (setf (map-elt (map-elt data "verdict") "state") "changes")
+        (magit-dash-review--write-json-file file data))
+      (magit-dash-review-test/with-gh ok
+        (magit-dash-review-submit file)
+        (should (equal "REQUEST_CHANGES"
+                       (map-nested-elt (nth 2 (car magit-dash-review-test/gh-log))
+                                       '(variables input event))))))))
+
+(ert-deftest magit-dash-review/submit-refuses-approve-when-head-moved ()
+  (magit-dash-review-test/with-temp-dir
+    (let* ((file (magit-dash-review-test/submit-file
+                  (list (magit-dash-review-test/c "id" "n" "path" "n.el" "lines" [2 2] "body" "new"))
+                  (magit-dash-review-test/c "state" "approved"))))
+      (magit-dash-review-test/with-gh (magit-dash-review-test/gh-default "H2")
+        (should-error (magit-dash-review-submit file) :type 'user-error)
+        (should-not (memq 'review (magit-dash-review-test/kinds))))
+      (should-not (map-elt (car (magit-dash-review-test/read-comments file)) "gh_thread_id")))))
+
+(ert-deftest magit-dash-review/submit-unknown-verdict-state-posts-nothing ()
+  (magit-dash-review-test/with-temp-dir
+    (let ((file (magit-dash-review-test/submit-file nil (magit-dash-review-test/c "state" "bogus"))))
+      (magit-dash-review-test/with-gh (magit-dash-review-test/gh-default "H1")
+        (magit-dash-review-submit file)
+        (magit-dash-review-submit file)
+        (should-not magit-dash-review-test/gh-log)))))
+
+(ert-deftest magit-dash-review/submit-does-not-re-resolve-thread-reopened-on-github ()
+  "MED-1: a thread GitHub reopened after the local resolve is not resolved again."
+  (magit-dash-review-test/with-temp-dir
+    (let* ((local (magit-dash-review-test/gh-thread "a"))
+           (existing (magit-dash-review-test/c "comments" (vector local)
+                                               "magit_dash" (magit-dash-review-test/c "repo" "o/r"))))
+      (setf (map-elt local "resolved") t)
+      (setf (map-elt local "gh_resolved") t)
+      (let* ((node (magit-dash-review-test/make-thread-node "T-a" "f.el" 1))
+             (merged (magit-dash-review--merge-json
+                      existing '(:repo "o/r" :number 99) (list (magit-dash-review--transcode-thread node nil nil nil))))
+             (c (aref (map-elt merged "comments") 0)))
+        (should (eq t (map-elt c "gh_reopened")))
+        (should (eq :false (map-elt c "gh_resolved")))
+        (should (eq t (map-elt c "resolved")))
+        (setf (map-elt (map-elt merged "magit_dash") "pr_node_id") "PR_1")
+        (let ((file (expand-file-name "review/pr-99.json" default-directory)))
+          (magit-dash-review--write-json-file file merged)
+          (magit-dash-review-test/with-gh (magit-dash-review-test/gh-default "H1")
+            (magit-dash-review-submit file)
+            (should-not magit-dash-review-test/gh-log)))))))
+
+(ert-deftest magit-dash-review/submit-resolves-only-for-local-intent ()
+  (magit-dash-review-test/with-temp-dir
+    (let* ((file (magit-dash-review-test/submit-file
+                  (list (magit-dash-review-test/gh-thread "a")))))
+      (magit-dash-review-append-reply file "T-a" "me" "done" t)
+      (let ((c (car (magit-dash-review-test/read-comments file))))
+        (should (eq t (map-elt c "local_resolved"))))
+      (magit-dash-review-test/with-gh (magit-dash-review-test/gh-default "H1")
+        (magit-dash-review-submit file)
+        (should (equal '(reply resolve) (magit-dash-review-test/kinds))))
+      (let ((c (car (magit-dash-review-test/read-comments file))))
+        (should (eq t (map-elt c "gh_resolved")))
+        (should-not (map-elt c "local_resolved"))))))
+
+(ert-deftest magit-dash-review/submit-sends-side-and-single-line ()
+  (magit-dash-review-test/with-temp-dir
+    (let* ((file (magit-dash-review-test/submit-file
+                  (list (magit-dash-review-test/c "id" "one" "path" "a.el" "lines" [4] "body" "one"
+                                                  "diff_side" "LEFT")
+                        (magit-dash-review-test/c "id" "rng" "path" "b.el" "lines" [3 6] "body" "rng"
+                                                  "diff_side" "RIGHT")))))
+      (magit-dash-review-test/with-gh (magit-dash-review-test/gh-default "H1")
+        (magit-dash-review-submit file)
+        (let* ((review (seq-find (lambda (call) (eq (car call) 'review)) magit-dash-review-test/gh-log))
+               (threads (map-nested-elt (nth 2 review) '(variables input threads)))
+               (one (car threads))
+               (rng (cadr threads)))
+          (should (= 4 (map-elt one 'line)))
+          (should (equal "LEFT" (map-elt one 'side)))
+          (should-not (map-elt one 'startLine))
+          (should (= 6 (map-elt rng 'line)))
+          (should (= 3 (map-elt rng 'startLine)))
+          (should (equal "RIGHT" (map-elt rng 'startSide))))))))
+
+(ert-deftest magit-dash-review/submit-refuses-corrupt-file-fallback-without-confirmation ()
+  "MED-3: a submit built on the .bak fallback needs the user's confirmation."
+  (magit-dash-review-test/with-temp-dir
+    (let ((file (magit-dash-review-test/submit-file
+                 (list (magit-dash-review-test/gh-thread "a" "one")))))
+      (magit-dash-review--write-json-file file (magit-dash-review--read-json-file file))
+      (with-temp-file file (insert "{\"trunc"))
+      (magit-dash-review-test/with-gh (magit-dash-review-test/gh-default "H1")
+        (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) nil)))
+          (should-error (magit-dash-review-submit file) :type 'user-error))
+        (should-not magit-dash-review-test/gh-log)
+        (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
+          (magit-dash-review-submit file)
+          (should (equal '(reply) (magit-dash-review-test/kinds))))))))
+
+;;; Shared buffer refresh helper
+
+(ert-deftest magit-dash-review/append-reply-skips-modified-visiting-buffer ()
+  "MED-2: a modified buffer visiting the file is neither reverted nor refreshed."
+  (magit-dash-review-test/with-temp-dir
+    (let* ((file (magit-dash-review-test/submit-file (list (magit-dash-review-test/gh-thread "a"))))
+           (buf (find-file-noselect file)))
+      (unwind-protect
+          (progn
+            (with-current-buffer buf (goto-char (point-max)) (insert "unsaved edit"))
+            (magit-dash-review-append-reply file "a" "me" "hello")
+            (with-current-buffer buf
+              (should (buffer-modified-p))
+              (should (string-suffix-p "unsaved edit" (buffer-string))))
+            (should (= 1 (length (map-elt (car (magit-dash-review-test/read-comments file)) "replies")))))
+        (with-current-buffer buf (set-buffer-modified-p nil))
+        (kill-buffer buf)))))
+
+(ert-deftest magit-dash-review/append-reply-refreshes-clean-visiting-buffer ()
+  (magit-dash-review-test/with-temp-dir
+    (let* ((file (magit-dash-review-test/submit-file (list (magit-dash-review-test/gh-thread "a"))))
+           (buf (find-file-noselect file)))
+      (unwind-protect
+          (progn
+            (magit-dash-review-append-reply file "a" "me" "hello-world")
+            (with-current-buffer buf
+              (should-not (buffer-modified-p))
+              (should (string-match-p "hello-world" (buffer-string)))))
+        (kill-buffer buf)))))
+
+(ert-deftest magit-dash-review/promote-skips-modified-visiting-buffer ()
+  (magit-dash-review-test/with-temp-dir
+    (let* ((file (magit-dash-review-test/submit-file
+                  (list (magit-dash-review-test/c "id" "d" "status" "draft" "body" "x"))))
+           (buf (find-file-noselect file)))
+      (unwind-protect
+          (progn
+            (with-current-buffer buf (goto-char (point-max)) (insert "unsaved edit"))
+            (cl-letf (((symbol-function 'magit-dash-review-current-hunk) (lambda () nil)))
+              (magit-dash-review-promote-draft file "d"))
+            (with-current-buffer buf (should (buffer-modified-p)))
+            (should (equal "accepted" (map-elt (car (magit-dash-review-test/read-comments file)) "status"))))
+        (with-current-buffer buf (set-buffer-modified-p nil))
+        (kill-buffer buf)))))
+
+(ert-deftest magit-dash-review/save-action-saves-modified-buffer-before-writing ()
+  (magit-dash-review-test/with-temp-dir
+    (let* ((file (magit-dash-review-test/submit-file (list (magit-dash-review-test/gh-thread "a"))))
+           (buf (find-file-noselect file))
+           (magit-dash-review-json-modified-buffer-action 'save))
+      (unwind-protect
+          (progn
+            (with-current-buffer buf (goto-char (point-max)) (insert "\n"))
+            (magit-dash-review-append-reply file "a" "me" "hello")
+            (with-current-buffer buf (should-not (buffer-modified-p))))
+        (kill-buffer buf)))))
+
+(ert-deftest magit-dash-review/reply-ids-differ-within-one-second ()
+  (magit-dash-review-test/with-temp-dir
+    (let ((file (magit-dash-review-test/submit-file (list (magit-dash-review-test/gh-thread "a")))))
+      (cl-letf (((symbol-function 'format-time-string) (lambda (&rest _) "2026-01-01T00:00:00+00:00")))
+        (magit-dash-review-append-reply file "a" "me" "same")
+        (magit-dash-review-append-reply file "a" "me" "same"))
+      (let ((replies (map-elt (car (magit-dash-review-test/read-comments file)) "replies")))
+        (should-not (equal (map-elt (aref replies 0) "id") (map-elt (aref replies 1) "id")))))))
+
+(ert-deftest magit-dash-review/legacy-file-without-repo-is-not-adopted ()
+  (magit-dash-review-test/with-temp-dir
+    (call-process "git" nil nil nil "init" "-q" ".")
+    (let ((legacy (magit-dash-review-file default-directory 7)))
+      (magit-dash-review--write-json-file legacy (magit-dash-review-test/c "comments" []))
+      (should-not (equal legacy (magit-dash-review-file default-directory 7 "o/r")))
+      (magit-dash-review--write-json-file
+       legacy (magit-dash-review-test/c "magit_dash" (magit-dash-review-test/c "repo" "o/r")))
+      (should (equal legacy (magit-dash-review-file default-directory 7 "o/r"))))))
+
+(ert-deftest magit-dash-review/transcode-stores-diff-side ()
+  (let* ((node (magit-dash-review-test/make-thread-node "T" "f.el" 3))
+         (left (cons '(diffSide . "LEFT") (assq-delete-all 'diffSide (copy-sequence node)))))
+    (should (equal "RIGHT" (map-elt (magit-dash-review--transcode-thread node nil nil nil) "diff_side")))
+    (should (equal "LEFT" (map-elt (magit-dash-review--transcode-thread left nil nil nil) "diff_side")))))
 
 (ert-deftest magit-dash-review/send-to-agent-and-enqueue-asq ()
   "magit-dash-review-send-to-agent and magit-dash-review-enqueue-asq group and dispatch findings."

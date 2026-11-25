@@ -400,29 +400,148 @@
         (should-not (string-match-p "\\\\[0-9][0-9][0-9]" raw))
         (should (string-match-p (regexp-quote (encode-coding-string "é日😀" 'utf-8)) raw))))))
 
+(defun magit-dash-review-json-test/slurp (file)
+  "Return the contents of FILE."
+  (with-temp-buffer (insert-file-contents file) (buffer-string)))
+
 (ert-deftest magit-dash-review-json/write-file-failure-leaves-original-intact ()
+  "A real failure (unwritable directory) leaves the original and no temp file."
+  (skip-unless (not (zerop (user-uid))))
   (magit-dash-review-json-test/with-temp-dir
     (let ((file (expand-file-name "pr-1.json" dir)))
       (magit-dash-review-json-write-file file (magit-dash-review-json-test/table))
-      (let ((before (with-temp-buffer (insert-file-contents file) (buffer-string))))
+      (let ((before (magit-dash-review-json-test/slurp file)))
+        (unwind-protect
+            (progn
+              (set-file-modes dir #o500)
+              (should-error (magit-dash-review-json-write-file
+                             file (magit-dash-review-json-test/unicode-table))))
+          (set-file-modes dir #o700))
+        (should (equal before (magit-dash-review-json-test/slurp file)))
+        (should (equal '("pr-1.json") (directory-files dir nil "\\`[^.]")))))))
+
+(ert-deftest magit-dash-review-json/write-file-rename-failure-cleans-temp ()
+  (magit-dash-review-json-test/with-temp-dir
+    (let ((file (expand-file-name "pr-1.json" dir)))
+      (magit-dash-review-json-write-file file (magit-dash-review-json-test/table))
+      (let ((before (magit-dash-review-json-test/slurp file)))
         (cl-letf (((symbol-function 'rename-file)
                    (lambda (&rest _) (error "disk full"))))
           (should-error (magit-dash-review-json-write-file
                          file (magit-dash-review-json-test/unicode-table))))
-        (should (equal before (with-temp-buffer (insert-file-contents file) (buffer-string))))
-        (should (equal '("pr-1.json" "pr-1.json.bak")
-                       (directory-files dir nil "\\`[^.]")))))))
+        (should (equal before (magit-dash-review-json-test/slurp file)))
+        (should (equal '("pr-1.json" "pr-1.json.bak") (directory-files dir nil "\\`[^.]")))))))
 
 (ert-deftest magit-dash-review-json/read-file-falls-back-to-backup ()
   (magit-dash-review-json-test/with-temp-dir
     (let ((file (expand-file-name "pr-1.json" dir)))
       (magit-dash-review-json-write-file file (magit-dash-review-json-test/table))
       (magit-dash-review-json-write-file file (magit-dash-review-json-test/unicode-table))
-      (with-temp-file file (insert "{\"truncat"))
-      (let ((table (magit-dash-review-json-read-file file)))
-        (should (hash-table-p table)))
+      (let ((good (magit-dash-review-json-test/plain (magit-dash-review-json-read-file file))))
+        (should-not magit-dash-review-json-last-read-fallback)
+        (magit-dash-review-json-write-file file (magit-dash-review-json-test/unicode-table))
+        (with-temp-file file (insert "{\"truncat"))
+        (let ((table (magit-dash-review-json-read-file file)))
+          (should (equal good (magit-dash-review-json-test/plain table)))
+          (should (equal (concat file ".bak") magit-dash-review-json-last-read-fallback))))
       (delete-file (concat file ".bak"))
       (should-error (magit-dash-review-json-read-file file)))))
+
+(ert-deftest magit-dash-review-json/read-file-errors-when-backup-is-corrupt-too ()
+  (magit-dash-review-json-test/with-temp-dir
+    (let ((file (expand-file-name "pr-1.json" dir)))
+      (with-temp-file file (insert "{\"truncat"))
+      (with-temp-file (concat file ".bak") (insert "{\"also bad"))
+      (should-error (magit-dash-review-json-read-file file)))))
+
+(ert-deftest magit-dash-review-json/backup-keeps-last-good-file ()
+  "MED-3: a corrupt file is never copied over a good backup."
+  (magit-dash-review-json-test/with-temp-dir
+    (let ((file (expand-file-name "pr-1.json" dir)))
+      (magit-dash-review-json-write-file file (magit-dash-review-json-test/table))
+      (magit-dash-review-json-write-file file (magit-dash-review-json-test/unicode-table))
+      (let ((good-bak (magit-dash-review-json-test/slurp (concat file ".bak"))))
+        (with-temp-file file (insert "{\"truncat"))
+        (magit-dash-review-json-write-file file (magit-dash-review-json-test/table))
+        (should (equal good-bak (magit-dash-review-json-test/slurp (concat file ".bak"))))
+        (should (hash-table-p (magit-dash-review-json-read-file file)))))))
+
+(ert-deftest magit-dash-review-json/read-for-write-needs-confirmation-on-fallback ()
+  (magit-dash-review-json-test/with-temp-dir
+    (let ((file (expand-file-name "pr-1.json" dir)))
+      (magit-dash-review-json-write-file file (magit-dash-review-json-test/table))
+      (magit-dash-review-json-write-file file (magit-dash-review-json-test/table))
+      (with-temp-file file (insert "{\"truncat"))
+      (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) nil)))
+        (should-error (magit-dash-review-json-read-for-write file) :type 'user-error))
+      (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
+        (should (hash-table-p (magit-dash-review-json-read-for-write file)))))))
+
+(ert-deftest magit-dash-review-json/write-file-keeps-symlink-and-modes ()
+  (magit-dash-review-json-test/with-temp-dir
+    (let* ((target (expand-file-name "real.json" dir))
+           (link (expand-file-name "link.json" dir)))
+      (magit-dash-review-json-write-file target (magit-dash-review-json-test/table))
+      (set-file-modes target #o640)
+      (make-symbolic-link target link)
+      (magit-dash-review-json-write-file link (magit-dash-review-json-test/unicode-table))
+      (should (file-symlink-p link))
+      (should (= #o640 (file-modes target)))
+      (should (equal "é日😀" (map-elt (aref (map-elt (magit-dash-review-json-read-file target) "comments") 0)
+                                      "body")))
+      (should-not (file-exists-p (concat link ".bak")))
+      (should (file-exists-p (concat target ".bak")))
+      (let ((fresh (expand-file-name "new.json" dir)))
+        (magit-dash-review-json-write-file fresh (magit-dash-review-json-test/table))
+        (should (= #o600 (file-modes fresh)))))))
+
+(ert-deftest magit-dash-review-json/write-file-removes-only-stale-own-temp-files ()
+  (magit-dash-review-json-test/with-temp-dir
+    (let* ((file (expand-file-name "pr-1.json" dir))
+           (old (concat file ".tmp-old"))
+           (fresh (concat file ".tmp-fresh"))
+           (other (expand-file-name "pr-2.json.tmp-old" dir)))
+      (seq-do (lambda (f) (with-temp-file f (insert "x"))) (list old fresh other))
+      (set-file-times old (time-subtract nil (* 3 24 3600)))
+      (set-file-times other (time-subtract nil (* 3 24 3600)))
+      (magit-dash-review-json-write-file file (magit-dash-review-json-test/table))
+      (should-not (file-exists-p old))
+      (should (file-exists-p fresh))
+      (should (file-exists-p other)))))
+
+(ert-deftest magit-dash-review-json/refresh-helper-skips-modified-buffer ()
+  (magit-dash-review-json-test/with-temp-dir
+    (let* ((file (expand-file-name "pr-1.json" dir))
+           (buf (progn (magit-dash-review-json-write-file file (magit-dash-review-json-test/table))
+                       (find-file-noselect file))))
+      (unwind-protect
+          (progn
+            (should (magit-dash-review-json-refresh-visiting-buffer file))
+            (with-current-buffer buf (insert " "))
+            (should-not (magit-dash-review-json-refresh-visiting-buffer file))
+            (with-current-buffer buf (should (buffer-modified-p))))
+        (with-current-buffer buf (set-buffer-modified-p nil))
+        (kill-buffer buf))
+      (should (magit-dash-review-json-refresh-visiting-buffer (expand-file-name "none.json" dir))))))
+
+(ert-deftest magit-dash-review-json/relocate-skips-refresh-of-modified-buffer ()
+  (magit-dash-review-json-test/with-temp-dir
+    (let ((default-directory (file-name-as-directory dir)))
+      (call-process "git" nil nil nil "init" "-q" ".")
+      (let* ((review-dir (expand-file-name ".git/review" dir))
+             (file (expand-file-name "pr-1.json" review-dir))
+             (table (magit-dash-review-json-test/table)))
+        (setf (map-elt table "root") "/old/wt/")
+        (magit-dash-review-json-write-file file table)
+        (let ((buf (find-file-noselect file)))
+          (unwind-protect
+              (progn
+                (with-current-buffer buf (goto-char (point-max)) (insert " "))
+                (should (= 1 (magit-dash-review-json-relocate-worktree dir "/old/wt/" "/new/wt/")))
+                (with-current-buffer buf (should (buffer-modified-p)))
+                (should (equal "/new/wt/" (map-elt (magit-dash-review-json-read-file file) "root"))))
+            (with-current-buffer buf (set-buffer-modified-p nil))
+            (kill-buffer buf)))))))
 
 (ert-deftest magit-dash-review-json/merge-ignores-other-repo-with-same-number ()
   (let* ((existing (magit-dash-review-json-test/table
@@ -517,10 +636,36 @@
         (should-not (equal a b))
         (should (equal a (magit-dash-review-file dir 5 "a/proj")))
         (let ((table (magit-dash-review-json-test/table)))
+          (setf (map-elt table "magit_dash") (make-hash-table :test #'equal))
+          (magit-dash-review-json-write-file legacy table))
+        (should-not (equal legacy (magit-dash-review-file dir 5 "a/proj")))
+        (let ((table (magit-dash-review-json-test/table)))
           (setf (map-elt (map-elt table "magit_dash") "repo") "a/proj")
           (magit-dash-review-json-write-file legacy table))
         (should (equal legacy (magit-dash-review-file dir 5 "a/proj")))
         (should (equal b (magit-dash-review-file dir 5 "b/proj")))))))
+
+(ert-deftest magit-dash-review-json/merge-clears-resolve-intent-when-github-reopens ()
+  (let* ((local (magit-dash-review-json-test/comment nil "t"))
+         (remote (magit-dash-review-json-test/comment nil "t")))
+    (setf (map-elt local "gh_thread_id") "T1")
+    (setf (map-elt remote "gh_thread_id") "T1")
+    (setf (map-elt local "gh_resolved") t)
+    (setf (map-elt local "resolved") t)
+    (setf (map-elt local "local_resolved") t)
+    (setf (map-elt remote "gh_resolved") :false)
+    (setf (map-elt remote "resolved") :false)
+    (let ((merged (magit-dash-review-json-merge-thread local remote)))
+      (should (eq t (map-elt merged "gh_reopened")))
+      (should-not (map-elt merged "local_resolved"))
+      (should (eq t (map-elt merged "resolved"))))
+    (setf (map-elt remote "gh_resolved") t)
+    (let ((merged (magit-dash-review-json-merge-thread
+                   (let ((l (magit-dash-review-json-deep-copy local)))
+                     (setf (map-elt l "gh_reopened") t)
+                     l)
+                   remote)))
+      (should-not (map-elt merged "gh_reopened")))))
 
 (provide 'test-magit-dash-review-json)
 ;;; test-magit-dash-review-json.el ends here
