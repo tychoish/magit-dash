@@ -1828,6 +1828,103 @@ Signals `user-error' when no GitHub repository can be determined."
 Checked for REPO-DIR."
   (magit-dash-gh--git-worktrees repo-dir))
 
+(defvar magit-dash-pr--account-logins (make-hash-table :test #'equal)
+  "Cache of gh account login by (USER . HOST), or (:default . HOST).
+A value is a login string, or a (:pending . TIME) / (:failed . TIME) marker
+for a lookup in flight or recently failed.")
+
+(defvar magit-dash-pr--repo-hosts (make-hash-table :test #'equal)
+  "Cache of the git remote host by repository directory.")
+
+(defconst magit-dash-pr--login-retry-seconds 300
+  "Seconds a pending or failed default-login lookup suppresses a new one.")
+
+(defun magit-dash-pr-reset-account-logins ()
+  "Forget all cached gh logins and remote hosts.
+Call this after switching the active `gh auth' account or changing a
+repository's configured account, since the default login is cached per host."
+  (interactive)
+  (clrhash magit-dash-pr--account-logins)
+  (clrhash magit-dash-pr--repo-hosts))
+
+(defun magit-dash-pr--repo-host (repo)
+  "Return the host of REPO's origin remote, or \"github.com\"."
+  (if (not (and (stringp repo) (file-directory-p repo)))
+      "github.com"
+    (or (map-elt magit-dash-pr--repo-hosts repo)
+        (setf (map-elt magit-dash-pr--repo-hosts repo)
+              (or (when-let* ((url (ignore-errors
+                                    (with-temp-buffer
+                                      (let ((default-directory repo))
+                                        (when (zerop (call-process
+                                                      "git" nil (list (current-buffer) nil) nil
+                                                      "config" "--get" "remote.origin.url"))
+                                          (string-trim (buffer-string)))))))
+                              ((string-match
+                                "\\`\\(?:[[:alpha:]+]+://\\)?\\(?:[^@/]+@\\)?\\([^:/]+\\)[:/]"
+                                url)))
+                    (match-string 1 url))
+                  "github.com")))))
+
+(defun magit-dash-pr--account-login (repo)
+  "Return the gh login in use for REPO, or nil when not known yet.
+Never blocks: a configured account supplies its own login, otherwise the
+cached login for the default account on REPO's host is used.  When that is
+not cached and REPO is an existing directory, one asynchronous lookup primes
+the cache; a pending or failed lookup is not retried for
+`magit-dash-pr--login-retry-seconds'."
+  (let* ((account (magit-dash-gh--repo-account repo))
+         (host (or (plist-get account :host) (magit-dash-pr--repo-host repo)))
+         (key (if account
+                  (cons (plist-get account :user) host)
+                (cons :default host)))
+         (cached (map-elt magit-dash-pr--account-logins key)))
+    (cond
+     ((stringp cached)
+      cached)
+     (account
+      (setf (map-elt magit-dash-pr--account-logins key)
+            (plist-get account :user)))
+     ((and (stringp repo) (file-directory-p repo)
+           (or (null cached)
+               (> (float-time (time-since (cdr cached)))
+                  magit-dash-pr--login-retry-seconds)))
+      (setf (map-elt magit-dash-pr--account-logins key)
+            (cons :pending (current-time)))
+      (magit-dash-gh--run-process
+       (list "api" "user" "--hostname" host "--jq" ".login") repo
+       (lambda (output)
+         (let ((login (string-trim output)))
+           (setf (map-elt magit-dash-pr--account-logins key)
+                 (if (string-empty-p login)
+                     (cons :failed (current-time))
+                   login))))
+       (lambda (&rest _)
+         (setf (map-elt magit-dash-pr--account-logins key)
+               (cons :failed (current-time)))))
+      nil))))
+
+(defun magit-dash-pr-own-p (author-login repo)
+  "Return non-nil when AUTHOR-LOGIN is the gh account login in use for REPO.
+An unknown AUTHOR-LOGIN or account login counts as not own."
+  (when-let* (((stringp author-login))
+              ((not (string-empty-p author-login)))
+              (login (magit-dash-pr--account-login repo)))
+    (string-equal-ignore-case author-login login)))
+
+(defun magit-dash-pr-worktree-name (number own-p)
+  "Return the worktree directory name for PR NUMBER: pr-N when OWN-P, else cr-N."
+  (format (if own-p "pr-%d" "cr-%d") number))
+
+(defun magit-dash-pr--entry-worktree-name (entry repo-dir)
+  "Return the worktree name for PR ENTRY in REPO-DIR, by author ownership."
+  (magit-dash-pr-worktree-name
+   (plist-get entry :number)
+   (magit-dash-pr-own-p
+    (or (map-nested-elt (plist-get entry :pr) '(author login))
+        (plist-get entry :author))
+    repo-dir)))
+
 (defun magit-dash-pr--compute-worktree-path (repo-dir name &optional entry)
   "Compute projected worktree path for NAME under REPO-DIR.
 Uses `magit-dash-pr-worktree-path-format'."
@@ -1850,41 +1947,68 @@ Uses `magit-dash-pr-worktree-path-format'."
      (t
       (expand-file-name (format "%s-%s" repo-base name) parent)))))
 
-(defun magit-dash-pr--find-existing-worktree (repo-dir pr-num &optional branch-name)
-  "Find existing worktree directory for PR-NUM and BRANCH-NAME under REPO-DIR."
+(defun magit-dash-pr--find-existing-worktree (repo-dir pr-num &optional branch-name preferred-name)
+  "Find existing worktree directory for PR-NUM and BRANCH-NAME under REPO-DIR.
+Either the pr-N or cr-N name is accepted.  When both exist, the one named
+PREFERRED-NAME wins, otherwise pr-N before cr-N."
   (when repo-dir
     (let* ((repo-dir (expand-file-name repo-dir))
            (repo-base (file-name-nondirectory (directory-file-name repo-dir)))
-           (pr-name (format "pr-%d" pr-num))
-           (git-wts (ignore-errors (magit-dash-pr--git-worktrees repo-dir))))
-      ;; 1. Check git worktrees by branch or path
+           (parent (file-name-directory (directory-file-name repo-dir)))
+           (pr-names (let ((names (list (format "pr-%d" pr-num) (format "cr-%d" pr-num))))
+                       (if (member preferred-name names)
+                           (cons preferred-name (remove preferred-name names))
+                         names)))
+           (git-wts (seq-filter
+                     (lambda (wt)
+                       (when-let* ((path (alist-get 'path wt)))
+                         (file-directory-p path)))
+                     (ignore-errors (magit-dash-pr--git-worktrees repo-dir)))))
       (or
+       ;; 1. Git worktrees named for the PR, in preference order
        (seq-some
-        (lambda (wt)
-          (let ((path (alist-get 'path wt))
-                (br (alist-get 'branch wt)))
-            (when (and path (file-directory-p path))
-              (when (or (and br (or (string= br pr-name)
-                                    (and branch-name (string= br branch-name))
-                                    (and branch-name (string= br (concat "wt/" branch-name)))
-                                    (string= br (concat "wt/" pr-name))))
-                        (string-suffix-p (concat "/.wt/" pr-name) path)
-                        (string-suffix-p (concat "/" repo-base "-" pr-name) path)
-                        (and branch-name (string-suffix-p (concat "/.wt/" branch-name) path))
-                        (and branch-name (string-suffix-p (concat "/" repo-base "-" branch-name) path)))
-                path))))
-        git-wts)
-       ;; 2. Check candidate directories on disk
+        (lambda (n)
+          (seq-some
+           (lambda (wt)
+             (let ((path (alist-get 'path wt))
+                   (br (alist-get 'branch wt)))
+               (when (or (member br (list n (concat "wt/" n)))
+                         (string-suffix-p (concat "/.wt/" n) path)
+                         (string-suffix-p (concat "/" repo-base "-" n) path))
+                 path)))
+           git-wts))
+        pr-names)
+       ;; 2. Git worktrees by head branch name
+       (when branch-name
+         (seq-some
+          (lambda (wt)
+            (let ((path (alist-get 'path wt))
+                  (br (alist-get 'branch wt)))
+              (when (or (member br (list branch-name (concat "wt/" branch-name)))
+                        (string-suffix-p (concat "/.wt/" branch-name) path)
+                        (string-suffix-p (concat "/" repo-base "-" branch-name) path))
+                path)))
+          git-wts))
+       ;; 3. Candidate directories on disk
        (seq-some
         (lambda (dir)
           (and dir (file-directory-p dir) dir))
-        (list
-         (expand-file-name (concat ".wt/" pr-name) repo-dir)
-         (expand-file-name (format "%s-%s" repo-base pr-name)
-                           (file-name-directory (directory-file-name repo-dir)))
-         (and branch-name (expand-file-name (concat ".wt/" branch-name) repo-dir))
-         (and branch-name (expand-file-name (format "%s-%s" repo-base branch-name)
-                                            (file-name-directory (directory-file-name repo-dir))))))))))
+        (append
+         (seq-map (lambda (n) (expand-file-name (concat ".wt/" n) repo-dir)) pr-names)
+         (seq-map (lambda (n) (expand-file-name (format "%s-%s" repo-base n) parent)) pr-names)
+         (when branch-name
+           (list (expand-file-name (concat ".wt/" branch-name) repo-dir)
+                 (expand-file-name (format "%s-%s" repo-base branch-name) parent)))))))))
+
+(defun magit-dash-pr--worktree-acceptable-p (repo-dir path pr-num)
+  "Return non-nil when PATH is the pr-N or cr-N worktree location for PR-NUM."
+  (seq-some
+   (lambda (own-p)
+     (magit-dash-pr--path-equal-p
+      path
+      (magit-dash-pr--compute-worktree-path
+       repo-dir (magit-dash-pr-worktree-name pr-num own-p))))
+   '(t nil)))
 
 (defun magit-dash-pr-dashboard--find-local-path (repo-slug)
   "Return a local checkout path for REPO-SLUG (owner/name), or nil.
@@ -1939,9 +2063,9 @@ or checkout directory name), falling back to current repo if it matches."
          (local-path (magit-dash-pr-dashboard--find-local-path repo)))
     (when local-path
       (let* ((repo-dir (expand-file-name local-path))
-             (existing (magit-dash-pr--find-existing-worktree repo-dir pr-num branch-name)))
-        (or existing
-            (magit-dash-pr--compute-worktree-path repo-dir (format "pr-%d" pr-num) entry))))))
+             (name (magit-dash-pr--entry-worktree-name entry repo-dir)))
+        (or (magit-dash-pr--find-existing-worktree repo-dir pr-num branch-name name)
+            (magit-dash-pr--compute-worktree-path repo-dir name entry))))))
 
 (defun magit-dash-pr-dashboard--worktree-exists-p (entry)
   "Return non-nil if a local worktree directory exists for PR ENTRY."
@@ -2056,6 +2180,27 @@ An open PR wins; otherwise the first (most recent) PR on the branch."
                     candidates)
           (car candidates)))))
 
+(defconst magit-dash-pr--worktree-number-regexp
+  "\\(?:\\`\\|-\\)\\(?:pr\\|cr\\)-\\(?:[[:alnum:]]+-\\)*\\([0-9]+\\)\\'"
+  "Regexp extracting a PR number from a worktree directory name.")
+
+(defun magit-dash-pr--worktree-named-for-p (wt-name number)
+  "Return non-nil when WT-NAME is pr-NUMBER or cr-NUMBER, optionally prefixed."
+  (seq-some
+   (lambda (prefix)
+     (string-match-p (format "\\(?:\\`\\|-\\)%s-%d\\'" prefix number) wt-name))
+   '("pr" "cr")))
+
+(defun magit-dash-pr--worktree-corroborates-pr-p (wt pr number)
+  "Return non-nil when worktree WT is credibly the checkout of PR (NUMBER).
+A bare number in the directory name is not enough: the branch must be PR's
+head branch (or `wt/' of it), or the name must be exactly pr-N or cr-N."
+  (let ((branch (alist-get 'branch wt))
+        (head (map-elt pr 'headRefName))
+        (wt-name (file-name-nondirectory (directory-file-name (alist-get 'path wt)))))
+    (or (and head branch (member branch (list head (concat "wt/" head))) t)
+        (magit-dash-pr--worktree-named-for-p wt-name number))))
+
 (defun magit-dash-pr--match-worktree-to-pr (wt prs)
   "Match git worktree WT to a pull request in PRS alist list.
 Matches by branch name (headRefName, pr-NUM, wt/...) or worktree directory name.
@@ -2068,15 +2213,16 @@ Returns matching PR alist or nil."
          (lambda (pr)
            (let* ((num (map-elt pr 'number))
                   (head (map-elt pr 'headRefName))
-                  (pr-tag (when num (format "pr-%d" num))))
+                  (pr-tags (when num (list (format "pr-%d" num) (format "cr-%d" num)))))
              (when (or (and head (or (equal wt-branch head)
                                      (equal wt-branch (concat "wt/" head))
                                      (equal wt-name head)
                                      (string-suffix-p (concat "-" head) wt-name)))
-                       (and pr-tag (or (equal wt-branch pr-tag)
-                                       (equal wt-branch (concat "wt/" pr-tag))))
-                       (and pr-tag (string-suffix-p pr-tag wt-name))
-                       (and num (string-match-p (format "\\(?:^\\|[^0-9]\\)%d\\(?:$\\|[^0-9]\\)" num) wt-name)))
+                       (seq-some (lambda (tag)
+                                   (or (equal wt-branch tag)
+                                       (equal wt-branch (concat "wt/" tag))))
+                                 pr-tags)
+                       (and num (magit-dash-pr--worktree-named-for-p wt-name num)))
                pr)))
          prs)))))
 
@@ -2149,17 +2295,21 @@ When SWITCH is non-nil, switches to the worktree's magit status buffer."
          (repo-dir (expand-file-name local-path))
          (repo-base (file-name-nondirectory (directory-file-name repo-dir)))
          (branch-name (magit-dash-pr--resolve-remote-branch repo pr-num pr-data repo-dir))
-         (existing (magit-dash-pr--find-existing-worktree repo-dir pr-num branch-name))
-         (target-path (magit-dash-pr--compute-worktree-path repo-dir (format "pr-%d" pr-num) entry))
+         (target-name (magit-dash-pr--entry-worktree-name entry repo-dir))
+         (existing (magit-dash-pr--find-existing-worktree
+                    repo-dir pr-num branch-name target-name))
+         (target-path (magit-dash-pr--compute-worktree-path repo-dir target-name entry))
          (wt-dir (or existing target-path)))
-    ;; If existing worktree found at a non-matching path, offer to rename it
-    (when (and existing (not (magit-dash-pr--path-equal-p existing target-path)))
+    ;; A pr-N or cr-N checkout is accepted as is; only offer to rename
+    ;; worktrees whose name is not a PR name at all.
+    (when (and existing
+               (not (magit-dash-pr--worktree-acceptable-p repo-dir existing pr-num)))
       (if (y-or-n-p (format "Worktree '%s' does not match PR #%d format ('%s'). Rename it? "
                             (file-name-nondirectory (directory-file-name existing))
                             pr-num
                             (file-name-nondirectory (directory-file-name target-path))))
-          (let ((moved (magit-dash-pr--move-worktree repo-dir existing target-path)))
-            (when moved (setq wt-dir target-path)))
+          (when (magit-dash-pr--move-worktree repo-dir existing target-path)
+            (setq wt-dir target-path))
         (setq wt-dir existing)))
     (if (and wt-dir (file-directory-p wt-dir))
         (if switch
@@ -2275,7 +2425,7 @@ Returns a plist with :renamed, :deleted, :matching, and :skipped counts."
                     (magit-dash-pr--path-equal-p wt-path repo-dir)
                     (not (file-directory-p wt-path)))
           (let* ((wt-name (file-name-nondirectory (directory-file-name wt-path)))
-                 (number (when (string-match "\\(?:\\`\\|-\\)pr-\\(?:[[:alnum:]]+-\\)*\\([0-9]+\\)\\'" wt-name)
+                 (number (when (string-match magit-dash-pr--worktree-number-regexp wt-name)
                            (string-to-number (match-string 1 wt-name))))
                  (matched (or (magit-dash-pr--match-worktree-by-branch wt prs slug repo-dir)
                               (magit-dash-pr--match-worktree-to-pr
@@ -2285,8 +2435,10 @@ Returns a plist with :renamed, :deleted, :matching, and :skipped counts."
                                                        (string-equal (upcase state) "OPEN"))))
                                               prs))
                               (if number
-                                  (or (seq-find (lambda (pr) (equal (map-elt pr 'number) number)) prs)
-                                      (magit-dash-pr--fetch-pr slug number repo-dir)
+                                  (or (when-let* ((pr (or (seq-find (lambda (pr) (equal (map-elt pr 'number) number)) prs)
+                                                          (magit-dash-pr--fetch-pr slug number repo-dir)))
+                                                  ((magit-dash-pr--worktree-corroborates-pr-p wt pr number)))
+                                        pr)
                                       (progn
                                         (message "magit-gh: could not find PR #%d for worktree %s; skipping" number wt-name)
                                         (plist-put counts :skipped (1+ (plist-get counts :skipped)))
@@ -2320,8 +2472,11 @@ Returns a plist with :renamed, :deleted, :matching, and :skipped counts."
                  ;; Case 2: PR is open - check path match (skipped when merged-only)
                  ((and (not merged-only) (string= state "OPEN") pr-num)
                   (let ((target-path (magit-dash-pr--compute-worktree-path
-                                      repo-dir (format "pr-%d" pr-num))))
-                    (if (magit-dash-pr--path-equal-p wt-path target-path)
+                                      repo-dir
+                                      (magit-dash-pr--entry-worktree-name
+                                       (list :number pr-num :pr matched) repo-dir))))
+                    (if (or (magit-dash-pr--path-equal-p wt-path target-path)
+                            (magit-dash-pr--worktree-acceptable-p repo-dir wt-path pr-num))
                         (plist-put counts :matching (1+ (plist-get counts :matching)))
                       (if (or (not prompt-p)
                               (y-or-n-p (format "Worktree '%s' does not match PR #%d format ('%s'). Rename it to match? "
@@ -2455,7 +2610,7 @@ execute it there."
                     (key (cons repo number))
                     (dir (magit-dash-pr-dashboard--find-local-path repo))
                     (path (and dir (magit-dash-pr--compute-worktree-path
-                                    dir (format "pr-%d" number) entry))))
+                                    dir (magit-dash-pr--entry-worktree-name entry dir) entry))))
                (cl-labels ((finish (error-message)
                              (remhash key magit-dash-pr--pending-worktrees)
                              (if error-message

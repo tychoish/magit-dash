@@ -24,6 +24,7 @@
 (require 'subr-x)
 (require 'map)
 (require 'hitl-plan)
+(require 'magit-dash-pr)
 
 (declare-function hitl-plan-review "hitl-plan-ui")
 (declare-function magit-dash-worktree-main-dir "magit-dash-worktree")
@@ -37,6 +38,7 @@
 (declare-function magit-dash-pr--path-equal-p "magit-dash-pr")
 (declare-function magit-dash-pr--pr-merged-p "magit-dash-pr")
 (declare-function magit-dash-pr--find-existing-worktree "magit-dash-pr")
+(declare-function magit-dash-pr--worktree-corroborates-pr-p "magit-dash-pr")
 (declare-function magit-dash-pr-delete-worktree "magit-dash-pr")
 (declare-function magit-dash-pr-dashboard--current-repo-slug "magit-dash-pr")
 (declare-function magit-dash-pr-dashboard--find-local-path "magit-dash-pr")
@@ -54,7 +56,7 @@ When nil, a subdirectory of `hitl-plan-directory'."
   :group 'magit-dash-worktree-clean)
 
 (defconst magit-dash-worktree-clean--number-regexp
-  "\\(?:\\`\\|-\\)pr-\\(?:[[:alnum:]]+-\\)*\\([0-9]+\\)\\'"
+  "\\(?:\\`\\|-\\)\\(?:pr\\|cr\\)-\\(?:[[:alnum:]]+-\\)*\\([0-9]+\\)\\'"
   "Regexp extracting a PR number from a worktree directory name.")
 
 ;;;; Discovery
@@ -79,8 +81,10 @@ When nil, a subdirectory of `hitl-plan-directory'."
     (or (magit-dash-pr--match-worktree-by-branch wt prs slug repo-dir)
         (magit-dash-pr--match-worktree-to-pr wt open-prs)
         (when number
-          (or (seq-find (lambda (pr) (equal (map-elt pr 'number) number)) prs)
-              (magit-dash-pr--fetch-pr slug number repo-dir)))
+          (when-let* ((pr (or (seq-find (lambda (pr) (equal (map-elt pr 'number) number)) prs)
+                              (magit-dash-pr--fetch-pr slug number repo-dir)))
+                      ((magit-dash-pr--worktree-corroborates-pr-p wt pr number)))
+            pr))
         (magit-dash-pr--match-worktree-to-pr wt prs))))
 
 (defun magit-dash-worktree-clean--target (wt pr state slug repo-dir)

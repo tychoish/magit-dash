@@ -61,5 +61,24 @@
 (ert-deftest magit-dash-worktree-clean/empty-targets-make-no-plan ()
   (should-not (magit-dash-worktree-clean-plan-targets nil)))
 
+(defun magit-dash-worktree-clean-test--match (name branch pr)
+  "Match a worktree called NAME on BRANCH against merged PR, fetching PR."
+  (let* ((dir (make-temp-file "mdwc-wt-" t))
+         (path (expand-file-name name dir)))
+    (make-directory path)
+    (unwind-protect
+        (cl-letf (((symbol-function 'magit-dash-pr--fetch-prs-for-branch) #'ignore)
+                  ((symbol-function 'magit-dash-pr--fetch-pr) (lambda (&rest _) pr)))
+          (magit-dash-worktree-clean--match
+           `((path . ,path) (branch . ,branch)) nil "o/r" dir))
+      (delete-directory dir t))))
+
+(ert-deftest magit-dash-worktree-clean/number-only-match-needs-corroboration ()
+  (let ((pr '((number . 5) (headRefName . "feat") (state . "MERGED"))))
+    (should-not (magit-dash-worktree-clean-test--match "cr-ticket-5" "my-work" pr))
+    (should-not (magit-dash-worktree-clean-test--match "xcr-5" "my-work" pr))
+    (should (magit-dash-worktree-clean-test--match "cr-5" "my-work" pr))
+    (should (magit-dash-worktree-clean-test--match "cr-ticket-5" "wt/feat" pr))))
+
 (provide 'test-magit-dash-worktree-clean)
 ;;; test-magit-dash-worktree-clean.el ends here

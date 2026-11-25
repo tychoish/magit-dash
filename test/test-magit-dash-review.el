@@ -652,5 +652,25 @@
           (magit-dash-review-select nil)
           (should (equal opened review-file)))))))
 
+(ert-deftest magit-dash-review/review-pr-uses-existing-worktree-without-prompts ()
+  "An existing worktree is used as is: no creation, rename, or directory prompt."
+  (magit-dash-review-test/with-temp-dir
+    (call-process "git" nil nil nil "init" ".")
+    (let ((wt-dir (expand-file-name ".wt/cr-12/" default-directory)))
+      (make-directory wt-dir t)
+      (cl-letf (((symbol-function 'diff-review-find-file) (lambda (&rest _) (current-buffer)))
+                ((symbol-function 'magit-dash-pr--find-existing-worktree) (lambda (&rest _) wt-dir))
+                ((symbol-function 'magit-dash-pr--create-worktree-for-entry)
+                 (lambda (&rest _) (ert-fail "create-worktree-for-entry called")))
+                ((symbol-function 'y-or-n-p) (lambda (&rest _) (ert-fail "y-or-n-p called")))
+                ((symbol-function 'read-directory-name)
+                 (lambda (&rest _) (ert-fail "read-directory-name called")))
+                ((symbol-function 'magit-dash-review--fetch-pr-metadata)
+                 (lambda (&rest _) '((number . 12) (headRefName . "feat"))))
+                ((symbol-function 'magit-dash-pr-fetch-threads-graphql) (lambda (&rest _) nil)))
+        (let* ((rf (magit-dash-review-pr "https://github.com/owner/repo/pull/12" default-directory))
+               (data (magit-dash-review--read-json-file rf)))
+          (should (equal (map-elt data "root") (file-name-as-directory wt-dir))))))))
+
 (provide 'test-magit-dash-review)
 ;;; test-magit-dash-review.el ends here
