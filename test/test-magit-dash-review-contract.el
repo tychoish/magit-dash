@@ -125,11 +125,13 @@
     (should (equal (map-elt (magit-dash-review-contract/comment merged "gh-t1") "cr_id") 101))
     (should (equal (map-elt (map-elt merged "magit_dash") "provider") "github"))))
 
-(ert-deftest magit-dash-review/contract-merge-current-drops-unknown-keys ()
-  "Characterise current behaviour: top-level unknown keys are dropped."
+;; Merge behaviour after the json-adapter task (docs/review-json.org, "Merge behaviour").
+
+(ert-deftest magit-dash-review/contract-merge-preserves-code-review-and-viewed ()
   (let* ((draft (magit-dash-review-contract/read "review-draft.json"))
          (merged (magit-dash-review--merge-json draft nil nil)))
-    (should-not (map-elt merged "code_review"))
+    (should (equal (magit-dash-review-contract/plain (map-elt merged "code_review"))
+                   (magit-dash-review-contract/plain (map-elt draft "code_review"))))
     (should (equal (magit-dash-review-contract/plain (map-elt merged "viewed"))
                    (magit-dash-review-contract/plain (map-elt draft "viewed"))))
     (should (equal (map-elt (map-elt merged "verdict") "state") "approved"))
@@ -137,44 +139,80 @@
     (should (equal (seq-map (lambda (c) (map-elt c "cr_id")) (map-elt merged "comments"))
                    '(7 8)))))
 
-(ert-deftest magit-dash-review/contract-merge-current-mixed ()
-  "Characterise current behaviour on a matched thread plus a local-only thread."
-  (let* ((merged (magit-dash-review--merge-json
-                  (magit-dash-review-contract/read "review-mixed.json")
-                  nil (list (magit-dash-review-contract/remote-thread))))
-         (matched (magit-dash-review-contract/comment merged "gh-t1"))
-         (local (magit-dash-review-contract/comment merged "l1")))
-    ;; Matched thread keeps the local id and is sticky-resolved.
-    (should (eq (map-elt matched "resolved") t))
-    ;; Local-only keys on the matched thread are dropped.
-    (should-not (map-elt matched "cr_id"))
-    (should-not (map-elt matched "remote_id"))
-    (should-not (map-elt matched "status"))
-    (should-not (map-elt matched "x_bar"))
-    ;; Remote reply plus the unpublished local reply.
-    (should (equal (seq-map (lambda (r) (map-elt r "body")) (map-elt matched "replies"))
-                   '("Order matters." "Unpublished local reply.")))
-    ;; Local-only thread is retained whole, unknown keys included.
-    (should (equal (map-elt local "x_bar") "kept"))
-    (should (equal (map-elt local "cr_id") 9))
-    ;; Viewed is preserved; unknown top-level keys are dropped.
-    (should (equal (map-elt (map-elt merged "viewed") "src/a.ts") "bbbb2222"))
-    (should-not (map-elt merged "x_foo"))
-    (should-not (map-elt merged "code_review"))))
+(defun magit-dash-review-contract/merge-mixed ()
+  "Merge the mixed fixture with the matching remote thread."
+  (magit-dash-review--merge-json
+   (magit-dash-review-contract/read "review-mixed.json")
+   nil (list (magit-dash-review-contract/remote-thread))))
 
-(ert-deftest magit-dash-review/contract-merge-target-preserves-unknown-keys ()
-  "Target contract: unknown keys and code_review survive a merge."
-  :expected-result :failed
-  ;; Expected to fail until the json-adapter task makes --merge-json
-  ;; preserve unknown keys (see docs/review-json.org, "Target").
-  (let* ((merged (magit-dash-review--merge-json
-                  (magit-dash-review-contract/read "review-mixed.json")
-                  nil (list (magit-dash-review-contract/remote-thread))))
-         (matched (magit-dash-review-contract/comment merged "gh-t1")))
-    (should (equal (map-elt merged "x_foo") "top-level unknown"))
-    (should (equal (map-elt (map-elt merged "code_review") "pullreq_id") "PR_kwDOabc123"))
-    (should (equal (map-elt matched "x_bar") "local-only key"))
-    (should (equal (map-elt matched "cr_id") 101))))
+(ert-deftest magit-dash-review/contract-merge-matched-sticky-resolved-and-replies ()
+  (let ((matched (magit-dash-review-contract/comment
+                  (magit-dash-review-contract/merge-mixed) "gh-t1")))
+    (should (eq (map-elt matched "resolved") t))
+    (should (equal (seq-map (lambda (r) (map-elt r "body")) (map-elt matched "replies"))
+                   '("Order matters." "Unpublished local reply.")))))
+
+(ert-deftest magit-dash-review/contract-merge-local-only-thread-kept-whole ()
+  (let ((local (magit-dash-review-contract/comment
+                (magit-dash-review-contract/merge-mixed) "l1")))
+    (should (equal (map-elt local "x_bar") "kept"))
+    (should (equal (map-elt local "cr_id") 9))))
+
+(ert-deftest magit-dash-review/contract-merge-preserves-top-level-unknown-key ()
+  (should (equal (map-elt (magit-dash-review-contract/merge-mixed) "x_foo")
+                 "top-level unknown")))
+
+(ert-deftest magit-dash-review/contract-merge-preserves-code-review-key ()
+  (should (equal (map-elt (map-elt (magit-dash-review-contract/merge-mixed) "code_review")
+                          "pullreq_id")
+                 "PR_kwDOabc123")))
+
+(ert-deftest magit-dash-review/contract-merge-matched-keeps-unknown-comment-key ()
+  (should (equal (map-elt (magit-dash-review-contract/comment
+                           (magit-dash-review-contract/merge-mixed) "gh-t1")
+                          "x_bar")
+                 "local-only key")))
+
+(ert-deftest magit-dash-review/contract-merge-matched-keeps-cr-id ()
+  (should (equal (map-elt (magit-dash-review-contract/comment
+                           (magit-dash-review-contract/merge-mixed) "gh-t1")
+                          "cr_id")
+                 101)))
+
+(ert-deftest magit-dash-review/contract-merge-matched-keeps-remote-id-and-status ()
+  (let ((matched (magit-dash-review-contract/comment
+                  (magit-dash-review-contract/merge-mixed) "gh-t1")))
+    (should (equal (map-elt matched "remote_id") "PRRC_kwDOnode1"))
+    (should (equal (map-elt matched "status") "sent"))))
+
+(ert-deftest magit-dash-review/contract-merge-matched-keeps-local-id ()
+  (should-not (magit-dash-review-contract/comment
+               (magit-dash-review-contract/merge-mixed) "gh-new")))
+
+(ert-deftest magit-dash-review/contract-merge-preserves-viewed ()
+  (should (equal (map-elt (map-elt (magit-dash-review-contract/merge-mixed) "viewed") "src/a.ts")
+                 "bbbb2222")))
+
+(ert-deftest magit-dash-review/contract-merge-matches-by-cr-id-then-hash ()
+  "A thread with no gh ids matches by cr_id, else by content hash.
+The hash tier only absorbs local-origin candidates for a local-origin comment."
+  (let* ((existing (magit-dash-review-contract/read "review-mixed.json"))
+         (by-cr (make-hash-table :test #'equal))
+         (by-hash (make-hash-table :test #'equal)))
+    (setf (map-elt by-cr "id") "r1")
+    (setf (map-elt by-cr "cr_id") 9)
+    (setf (map-elt by-cr "body") "Local-only thread, edited.")
+    (setf (map-elt by-hash "id") "r2")
+    (setf (map-elt by-hash "origin") "local")
+    (setf (map-elt by-hash "path") "src/c.ts")
+    (setf (map-elt by-hash "lines") [1 2])
+    (setf (map-elt by-hash "body") "Local-only thread.")
+    (should (equal "l1" (map-elt (magit-dash-review-json-find-match
+                                  by-cr (magit-dash-review-json--comments existing))
+                                 "id")))
+    (should (equal "l1" (map-elt (magit-dash-review-json-find-match
+                                  by-hash (magit-dash-review-json--comments existing))
+                                 "id")))))
 
 (provide 'test-magit-dash-review-contract)
 ;;; test-magit-dash-review-contract.el ends here

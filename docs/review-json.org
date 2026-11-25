@@ -33,7 +33,7 @@ Each comment is a thread:
 
 * magit-dash keys (already in use)
 
-Written by =magit-dash-review--transcode-thread= and =--merge-json=.
+Written by =magit-dash-review-json-transcode-thread= and =magit-dash-review-json-merge=.
 
 - Top level =magit_dash=: =provider= (="github"=), =repo=, =number=, =url=, =worktree=, =head_oid=, =base_oid=, =synced_at=. Rebuilt on every merge.
 - Per comment: =gh_thread_id=, =gh_comment_id=, =gh_resolved=, =origin=. =gh_comment_id= is a string and may be ="" when the first comment has no id; replies carry it once published.
@@ -59,21 +59,58 @@ Distinct from the core =resolved= flag, =gh_resolved= records GitHub's state and
 
 * Merge behaviour
 
-** Current (=magit-dash-review--merge-json=)
+** Implemented (=magit-dash-review-json-merge=, aliased as =magit-dash-review--merge-json=)
 
-- Matching: only by =gh_thread_id=. Comments without one never match.
-- The result is a freshly built table. Only =format=, =root=, =base=, =head=, =magit_dash= (rebuilt), =viewed=, =verdict= (if present) and =comments= are written. Unknown top-level keys and =code_review= from the existing file are dropped.
-- A matched thread is built by copying the /remote/ thread, then overriding =id= (local id kept), =resolved= and =replies=. Local-only keys on it (=cr_id=, =remote_id=, =status=, and any unknown key such as =x_bar=) are dropped unless the remote thread carries them.
-- Sticky-resolved: =resolved= becomes =true= if either the remote or the local thread is resolved, otherwise =false=. A thread resolved locally is never reopened by a sync.
-- Replies: all remote replies, followed by local replies that have no =gh_comment_id= (missing or empty), i.e. unpublished ones. Published local replies are replaced by their remote copies.
-- Unmatched remote threads are added as they are. Existing comments with no =gh_thread_id=, or =origin= of =local= or =agent=, or not seen during matching, are kept whole (unknown keys included).
+Implemented by the json-adapter task in =magit-dash-review-json.el=. =magit-dash-review.el= keeps the old function names as aliases.
 
-** Target (json-adapter task; not yet implemented)
+- Matching, first hit wins, each local thread used at most once: (1) GitHub node id (=remote_id= or =gh_comment_id= of either side), (2) =cr_id=, (3) =gh_thread_id=, (4) SHA-1 of path, first line and body (empty bodies never match). So a local thread that already carries the remote's =gh_thread_id= wins over an identical-looking one without it. A candidate whose =gh_thread_id= differs from the remote thread's is never matched, so two identical comments on different GitHub threads stay apart. The hash tier skips candidates with =origin= =local= or =agent= unless the comment being matched has that same origin, so locally authored comments stay whole.
+- The result starts as a copy of the existing file, so unknown top-level keys (=code_review=, =x_foo=), unknown =magit_dash= keys, =viewed= and =verdict= survive. =format=, =root=, =base=, =head= and =magit_dash= (provider, repo, number, url, refs, =synced_at=) are rewritten from the new metadata when given.
+- A matched thread starts as a copy of the /local/ thread. These GitHub-owned keys take the remote value: =gh_thread_id=, =gh_comment_id=, =gh_resolved=, =origin=, =path=, =lines=, =blob=, =author=, =at=, =body=, =outdated=. A key in that list that the remote thread omits (=outdated=, =blob=, =lines=, ...) is removed from the merged thread, so a thread that stops being outdated clears. Every other key (=id=, =cr_id=, =remote_id=, =status=, unknown keys such as =x_bar=) keeps the local value and falls back to the remote one only when local has none. The merge result shares no structure with its inputs (deep copies), so mutating it never changes the existing table or the remote threads.
+- Sticky-resolved: =resolved= is =true= if either side is resolved, so a sync never reopens a locally resolved thread.
+- Replies: all remote replies, then local replies without a =gh_comment_id= (unpublished). Published local replies are replaced by their remote copies.
+- Unmatched remote threads are added as they are; unmatched local threads are kept whole. A remote thread that arrives between two merges is matched by =gh_thread_id= on the next one and appears once.
 
-- Preserve unknown keys: top-level keys such as =code_review= and =x_foo=, and per-comment keys, survive a merge.
-- Matching order: =remote_id=, then =cr_id=, then a hash of path, line and body, falling back to =gh_thread_id= semantics where applicable.
-- Sticky-resolved and the reply rule above are unchanged.
+** Export and import
+
+- =magit-dash-review-json-export= =(REPO . NUMBER)= reads the review file (=magit-dash-review-json-source-function=), deep-copies it, and overlays code-review's =cr_id=, =remote_id= and =status= onto matching threads only where the file has none. Code-review comments with no match are appended with =origin= =code-review=. Missing =code_review= keys (=pullreq_id=, =account=, =analysis=) are filled from code-review. Replies, resolved state, verdict and viewed always come from the file.
+- =magit-dash-review-json-import= TABLE mirrors comments and the verdict into code-review and returns =(:added N :updated N :skipped N :verdict-failed N :assigned ALIST)=. Unchanged comments (same body, resolved state and reply content: author, time, body) are skipped, so a second import is a no-op; status is ignored because code-review assigns it. A write that signals (transport failure, or no supported API) counts as skipped and never touches TABLE, so drafts stay drafts. The verdict is read through the seam first and written only when it differs; a failed verdict write counts in =:verdict-failed=. TABLE needs =magit_dash.repo= and =number=.
+- =:assigned= is a list of =(INDEX . CR-ID)= for comments of TABLE that had no =cr_id= but are now stored under one. =magit-dash-review-json-apply-assigned= sets them on TABLE; the mirror (=magit-dash-review--maybe-mirror=) does that and rewrites the review file, so a later edit of an id-less draft updates the stored comment instead of adding a second copy. Import itself never mutates TABLE.
+- Export with no review file (nil source) fills =magit_dash.repo= and =number= from PR-KEY, so its result can be imported. The default source function returns nil, with a message, when the file's =magit_dash.repo= is not the PR-KEY repo, or when reading fails.
+- Seam values are JSON tables: hash tables, vectors, lists, strings, numbers, =t=, =nil=, =:false=. =magit-dash-review-json-deep-copy= accepts those shapes.
+- Round trip: export, import, export yields identical JSON for tables whose comments already carry =cr_id= (a comment code-review numbers on first write gets its =cr_id= on the next export, or at once in the file when mirrored).
+- Zero-based hunk-index key convention for =code_review.analysis.<path>= is unchanged and still unconfirmed by code, since nothing writes =analysis= yet.
+
+** Flag
+
+=magit-dash-review-use-code-review-adapter= (default nil) makes =magit-dash-review-pr= and =magit-dash-review-sync= import the merged table into code-review. =magit-dash-review-submit= still uses its GraphQL mutations; routing it through code-review is the route-submit task.
 
 * Encoding
 
 Parse with =:object-type 'hash-table :array-type 'array :null-object nil :false-object :false=; serialize with the matching =:null-object nil :false-object :false=. Empty =viewed= is ={}=, empty =replies= is =[]=.
+
+* code-review public API audit (json-adapter task)
+
+Audited only part of =~/src/code-review=: =code-review-db.el=, =code-review-db-reviewed.el=, =code-review-comment.el=, =code-review-github.el=, =code-review-actions.el=, =code-review-local.el= and =code-review-viewed.el=. Other files were not checked, so a gap below may have an answer there. Only non =--= functions count as public.
+
+Public and relevant:
+
+| Function | What it gives |
+|----------+---------------|
+| =code-review-db-search= OWNER REPO NUMBER | A closql =code-review-db-pullreq= object (saved, unfinished review). Comments are in its =raw-comments= slot, read only through =oref=, which is closql. |
+| =code-review-db-get-pullreq=, =-get-buffer=, =-get-comment= | Closql objects, resolved through the dynamic variable =code-review-db--pullreq-id=. |
+| =code-review-db-update= OBJ | Writes a closql object back. |
+| =code-review-db-delete-raw-comment= IDENTIFIER | Deletes one raw comment by =internal-id= or =databaseId=. The only public comment mutation. |
+| =code-review-db-all-unfinished=, =-cleanup=, =-local-pr-p= | Listing, cleanup, local-PR predicate. |
+| =code-review-submit-comments=, =-submit-request-changes=, =-submit-lgtm=, =-submit-only-replies=, =code-review-submit-approve= | Interactive send paths for the current review buffer: verdict maps to =COMMENT=, =REQUEST_CHANGES=, =APPROVE=. They need the live review buffer and dynamic db context. |
+| =code-review-send-review=, =-send-replies=, =-new-code-comment=, =-toggle-resolved=, =-update-comment= (generic methods) | Transport through ghub for a pullreq object and prepared submit objects. |
+| =code-review-comment-add=, =-comment-add-or-edit=, =-edit-remote-comment-at-point=, =-viewed-toggle= | Interactive, act at point in the review buffer. |
+
+Gaps (no supported data API, so the adapter cannot do these without reaching into closql or private functions):
+
+1. Reading comments as data. Raw comments sit in the =raw-comments= slot of a closql object; there is no accessor that is not =code-review-db--pullreq-raw-comments= (private). A possible but undocumented path exists: =code-review-db-search= returns the pullreq object, =oref= reads =raw-comments=, and =oset= followed by =code-review-db-update= writes it back. The stored format is undocumented, and there is no draft-comment upsert, so the caller would have to build and merge raw comment records itself.
+2. Writing or updating a local (draft) comment programmatically. Local comments are made by =code-review-comment-handler-commit= methods acting on a section object, and stored by private =code-review-db--pullreq-raw-comments-update=, =code-review-comment--save-draft=.
+3. Recording a verdict. There is no stored verdict; the event is an argument of the interactive submit commands.
+4. Reviewed (viewed) state. =code-review-db-reviewed.el= has only =code-review-db--reviewed-*= functions; the only public entry is the interactive =code-review-viewed-toggle=.
+5. =pullreq_id=, account and analysis (criteria, risk rank, test-impact tags) have no data-level accessor either.
+
+Decision: every call into code-review goes through =magit-dash-review-json-code-review-function= (a defcustom), with ops =comments=, =pullreq=, =write= and =verdict= documented in its docstring. The default implementation returns nothing for reads and signals for writes, so with it import skips everything and leaves comments as drafts, visibly (a message names the missing API). Closing the gap means either a small public data API in code-review (=code-review-comments=, =code-review-comment-upsert=, =code-review-verdict-set=), or a seam implementation here that wraps the interactive commands or the =code-review-db-search= plus =oref=/=oset= plus =code-review-db-update= path above. The choice is the user's and is not made; the default seam implements none of them.
