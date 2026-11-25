@@ -34,6 +34,9 @@
 (require 'magit-dash-gh)
 
 (declare-function magit-dash-chain-plan "magit-dash-chain")
+(declare-function magit-dash-worktree-clean-plan "magit-dash-worktree-clean")
+(declare-function magit-dash-worktree-clean-plan-targets "magit-dash-worktree-clean")
+(declare-function magit-dash-worktree-clean-entry-target "magit-dash-worktree-clean")
 (declare-function magit-dash-chain-resume "magit-dash-chain")
 (declare-function magit-dash-chain-open "magit-dash-chain")
 
@@ -589,14 +592,10 @@ Uses active columns.  WIDTH is available window width; when nil,
 (defun magit-dash-pr-dashboard--setup-code-review-keys ()
   "Bind or unbind review keys in `magit-dash-pr-dashboard-mode-map'."
   (when (boundp 'magit-dash-pr-dashboard-mode-map)
-    (keymap-set magit-dash-pr-dashboard-mode-map "V"   #'magit-dash-pr-dashboard-diff-review)
     (keymap-set magit-dash-pr-dashboard-mode-map "c v" #'magit-dash-pr-dashboard-diff-review)
     (keymap-set magit-dash-pr-dashboard-mode-map "v v" #'magit-dash-pr-dashboard-diff-review)
     (if (magit-dash-pr-code-review-available-p)
-        (progn
-          (keymap-set magit-dash-pr-dashboard-mode-map "R" #'magit-dash-pr-dashboard-code-review)
-          (keymap-set magit-dash-pr-dashboard-mode-map "c r" #'magit-dash-pr-dashboard-code-review))
-      (keymap-unset magit-dash-pr-dashboard-mode-map "R" t)
+        (keymap-set magit-dash-pr-dashboard-mode-map "c r" #'magit-dash-pr-dashboard-code-review)
       (keymap-unset magit-dash-pr-dashboard-mode-map "c r" t))))
 
 (defvar magit-dash-pr-dashboard-mode-map
@@ -604,9 +603,7 @@ Uses active columns.  WIDTH is available window width; when nil,
     (keymap-set m "RET" #'magit-dash-pr-dashboard-open-browser)
     (keymap-set m "b"   #'magit-dash-pr-dashboard-open-browser)
     (when (magit-dash-pr-code-review-available-p)
-      (keymap-set m "R"   #'magit-dash-pr-dashboard-code-review)
       (keymap-set m "c r" #'magit-dash-pr-dashboard-code-review))
-    (keymap-set m "V"   #'magit-dash-pr-dashboard-diff-review)
     (keymap-set m "c v" #'magit-dash-pr-dashboard-diff-review)
     (keymap-set m "w"   #'magit-dash-pr-dashboard-open-worktree)
     (keymap-set m "c w" #'magit-dash-pr-dashboard-create-worktree)
@@ -628,7 +625,7 @@ Uses active columns.  WIDTH is available window width; when nil,
     (keymap-set m "v s"   #'magit-dash-pr-dashboard-switch-view)
     (keymap-set m "v v"   #'magit-dash-pr-dashboard-diff-review)
     (keymap-set m "g"   #'magit-dash-pr-dashboard-refresh)
-    (keymap-set m "r"   #'magit-dash-pr-dashboard-refresh)
+    (keymap-set m "r"   #'magit-dash-pr-dashboard-refresh-entries)
     (keymap-set m "f"   (cons "filter" (make-sparse-keymap)))
     (keymap-set m "f f" #'magit-dash-pr-dashboard-set-filter)
     (keymap-set m "f c" #'magit-dash-pr-dashboard-clear-filters)
@@ -1020,6 +1017,65 @@ working directory for `gh'."
            dir
            (lambda (output) (magit-dash-pr-dashboard--merge-ci buf repo output))
            (lambda (_output _code) nil)))))))
+
+(defconst magit-dash-pr-dashboard--view-fields
+  "number,title,state,mergedAt,author,createdAt,updatedAt,comments,reviewDecision,statusCheckRollup,isDraft,url,headRefName,baseRefName,mergeable,mergeStateStatus"
+  "JSON fields requested when refreshing a single PR with `gh pr view'.")
+
+(defun magit-dash-pr-dashboard--view-args (key)
+  "Return `gh' args viewing the PR identified by KEY, a (REPO . NUMBER) cons."
+  (list "pr" "view" (number-to-string (cdr key)) "-R" (car key)
+        "--json" magit-dash-pr-dashboard--view-fields
+        "--jq" ". + {commentsCount: (.comments | length)} | del(.comments)"))
+
+(defun magit-dash-pr-dashboard--replace-row (buf key output)
+  "Replace the row for KEY in BUF using `gh pr view' JSON OUTPUT.
+Fields missing from OUTPUT keep their old values.  Under an open-PRs filter
+a PR that is no longer open is dropped, as a full refresh would."
+  (when (and (buffer-live-p buf)
+             (string-prefix-p "{" (string-trim output)))
+    (with-current-buffer buf
+      (let* ((fresh (json-parse-string (string-trim output) :object-type 'alist))
+             (gone-p (and (equal (plist-get magit-dash-pr-dashboard--filters :state) "open")
+                          (not (equal (upcase (or (map-elt fresh 'state) "OPEN")) "OPEN")))))
+        (setq tabulated-list-entries
+              (magit-dash-pr-dashboard--apply-ci-filter
+               (seq-keep
+                (lambda (entry)
+                  (cond
+                   ((not (equal key (magit-dash-pr-dashboard--entry-key (car entry))))
+                    entry)
+                   (gone-p nil)
+                   (t (magit-dash-pr-dashboard--build-entry
+                       (append fresh (plist-get (car entry) :pr))
+                       (plist-get (car entry) :repo)))))
+                tabulated-list-entries)))
+        (magit-dash-pr-dashboard--print)))))
+
+(defun magit-dash-pr-dashboard-refresh-entries (&optional entries)
+  "Refresh only ENTRIES (entry plists) from GitHub, one `gh pr view' each.
+Without ENTRIES, refresh the marked PRs, else the PR at point.  No PR
+discovery query runs and no other row changes."
+  (interactive)
+  (unless (derived-mode-p 'magit-dash-pr-dashboard-mode)
+    (user-error "Not in a PR dashboard buffer"))
+  (let* ((entries (or entries
+                      (magit-dash-pr-dashboard--marked-or-at-point-entries)
+                      (list (magit-dash-pr-dashboard--entry-at-point))))
+         (buf (current-buffer))
+         (dir (or (ignore-errors (magit-dash-gh--repo-dir))
+                  (expand-file-name "~"))))
+    (message "magit-gh: refreshing %d PR(s)..." (length entries))
+    (seq-do (lambda (entry)
+              (let ((key (magit-dash-pr-dashboard--entry-key entry)))
+                (magit-dash-gh--run-process
+                 (magit-dash-pr-dashboard--view-args key) dir
+                 (lambda (output)
+                   (magit-dash-pr-dashboard--replace-row buf key output))
+                 (lambda (output _code)
+                   (message "magit-gh: could not refresh %s#%s: %s"
+                            (car key) (cdr key) (string-trim output))))))
+            entries)))
 
 (defun magit-dash-pr-dashboard-refresh ()
   "Fetch PRs matching current filters and repopulate the PR table.
@@ -2044,39 +2100,20 @@ Signals `user-error' when not found."
   "Review worktrees for the pull request / repository at point in dashboard."
   (interactive)
   (magit-dash-pr-review-worktrees (magit-dash-pr-dashboard--repo-path-at-point) t)
-  (magit-dash-pr-dashboard-refresh))
+  (magit-dash-pr-dashboard--rebuild-entries))
 
 (defun magit-dash-pr-dashboard-clean-merged-worktrees ()
-  "Clean worktrees for marked PRs, the selected PR at point, or merged PRs in repo."
+  "Plan deleting worktrees of marked PRs, or of every merged PR in the repo.
+The plan opens in a `hitl-plan' review buffer; nothing is deleted until you
+execute it there."
   (interactive)
-  (let ((marked (and (derived-mode-p 'magit-dash-pr-dashboard-mode)
-                     (magit-dash-pr-dashboard--marked-or-at-point-entries))))
-    (cond
-     ;; 1. Marked PRs exist: clean worktrees for all marked PRs
-     (marked
-      (let ((deleted 0)
-            (skipped 0))
-        (dolist (m-entry marked)
-          (pcase (magit-dash-pr--clean-worktree-for-entry m-entry t)
-            (:deleted (setq deleted (1+ deleted)))
-            (:skipped (setq skipped (1+ skipped)))))
+  (if-let* ((marked (and (derived-mode-p 'magit-dash-pr-dashboard-mode)
+                         (magit-dash-pr-dashboard--marked-or-at-point-entries))))
+      (let ((targets (seq-keep #'magit-dash-worktree-clean-entry-target marked)))
         (setq magit-dash-pr-dashboard--marked-entries nil)
         (magit-dash-pr-dashboard--rebuild-entries)
-        (message "magit-gh: cleaned marked PR worktrees — %d deleted, %d skipped"
-                 deleted skipped)))
-     ;; 2. No marked PRs: check selected PR at point and also scan repo merged worktrees
-     (t
-      (let* ((entry (ignore-errors (magit-dash-pr-dashboard--entry-at-point)))
-             (repo-path (magit-dash-pr-dashboard--repo-path-at-point))
-             (pr-data (and entry (plist-get entry :pr))))
-        (if (and entry
-                 pr-data
-                 (magit-dash-pr-dashboard--worktree-exists-p entry)
-                 (or (magit-dash-pr--pr-merged-p pr-data (plist-get entry :repo) (plist-get entry :number) repo-path)
-                     (string-equal (upcase (or (map-elt pr-data 'state) "")) "CLOSED")))
-            (magit-dash-pr--clean-worktree-for-entry entry t)
-          (magit-dash-pr-clean-merged-worktrees repo-path t))
-        (magit-dash-pr-dashboard-refresh))))))
+        (magit-dash-worktree-clean-plan-targets targets "Delete worktrees of marked PRs"))
+    (magit-dash-worktree-clean-plan (magit-dash-pr-dashboard--repo-path-at-point))))
 
 (defun magit-dash-pr--run-git-async (dir args callback)
   "Run git ARGS in DIR and call CALLBACK with exit code and output."
@@ -2211,8 +2248,8 @@ Signals `user-error' when not found."
 Key groups mirror `magit-dash-menu': w worktree, c CI, f filter, m mark."
   [["Pull Request"
     ("b"   "Open in browser"          magit-dash-pr-dashboard-open-browser)
-    ("V"   "Open in diff-review"      magit-dash-pr-dashboard-diff-review)
-    ("R"   "Open in code-review"      magit-dash-pr-dashboard-code-review
+    ("cv"  "Open in diff-review"      magit-dash-pr-dashboard-diff-review)
+    ("cr"  "Open in code-review"      magit-dash-pr-dashboard-code-review
      :if magit-dash-pr-code-review-available-p)]
    ["Mark / Bulk"
     ("mt"  "Toggle mark"              magit-dash-pr-dashboard-toggle-mark)
@@ -2245,7 +2282,8 @@ Key groups mirror `magit-dash-menu': w worktree, c CI, f filter, m mark."
     ("fc"  "Clear all filters"        magit-dash-pr-dashboard-clear-filters)
     ("fm"  "Fetch more PRs"           magit-dash-pr-dashboard-fetch-more)]
    ["Dashboard"
-    ("g"   "Refresh"                  magit-dash-pr-dashboard-refresh)
+    ("r"   "Refresh PR(s) at point/marked" magit-dash-pr-dashboard-refresh-entries)
+    ("g"   "Refresh all (re-query)"   magit-dash-pr-dashboard-refresh)
     ("q"   "Quit"                     magit-dash-pr-dashboard-quit)]])
 
 (transient-define-prefix magit-dash-pr-views-menu ()

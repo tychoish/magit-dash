@@ -655,7 +655,7 @@
     (should (eq (lookup-key m (kbd "c a")) #'magit-dash-pr-dashboard-create-all-worktrees))
     (should (eq (lookup-key m (kbd "c i")) #'magit-dash-pr-dashboard-fetch-ci))
     (when (magit-dash-pr-code-review-available-p)
-      (should (eq (lookup-key m (kbd "R"))   #'magit-dash-pr-dashboard-code-review))
+      (should-not (eq (lookup-key m (kbd "R")) #'magit-dash-pr-dashboard-code-review))
       (should (eq (lookup-key m (kbd "c r")) #'magit-dash-pr-dashboard-code-review)))
     (should (eq (lookup-key m (kbd "b"))   #'magit-dash-pr-dashboard-open-browser))
     (should (eq (lookup-key m (kbd "m m")) #'magit-dash-pr-dashboard-menu))
@@ -712,8 +712,8 @@
 (ert-deftest magit-dash-pr/dashboard-diff-review-opens ()
   "magit-dash-pr-dashboard-diff-review dispatches entry to magit-dash-review-pr."
   (let ((called-entry nil))
-    (should (eq (lookup-key magit-dash-pr-dashboard-mode-map (kbd "V"))
-                #'magit-dash-pr-dashboard-diff-review))
+    (should-not (eq (lookup-key magit-dash-pr-dashboard-mode-map (kbd "V"))
+                    #'magit-dash-pr-dashboard-diff-review))
     (should (eq (lookup-key magit-dash-pr-dashboard-mode-map (kbd "c v"))
                 #'magit-dash-pr-dashboard-diff-review))
     (should (eq (lookup-key magit-dash-pr-dashboard-mode-map (kbd "v v"))
@@ -740,13 +740,10 @@
         ;; When unavailable
         (cl-letf (((symbol-function 'magit-dash-pr-code-review-available-p) (lambda () nil)))
           (magit-dash-pr-dashboard--setup-code-review-keys)
-          (should-not (lookup-key magit-dash-pr-dashboard-mode-map (kbd "R")))
           (should-not (lookup-key magit-dash-pr-dashboard-mode-map (kbd "c r"))))
         ;; When available
         (cl-letf (((symbol-function 'magit-dash-pr-code-review-available-p) (lambda () t)))
           (magit-dash-pr-dashboard--setup-code-review-keys)
-          (should (eq (lookup-key magit-dash-pr-dashboard-mode-map (kbd "R"))
-                      #'magit-dash-pr-dashboard-code-review))
           (should (eq (lookup-key magit-dash-pr-dashboard-mode-map (kbd "c r"))
                       #'magit-dash-pr-dashboard-code-review))))
     (magit-dash-pr-dashboard--setup-code-review-keys)))
@@ -1160,30 +1157,28 @@
                (lambda (_) "/tmp/myrepo"))
               ((symbol-function 'magit-dash-pr-review-worktrees)
                (lambda (path prompt) (setq reviewed (list path prompt))))
-              ((symbol-function 'magit-dash-pr-clean-merged-worktrees)
-               (lambda (path prompt) (setq cleaned (list path prompt))))
+              ((symbol-function 'magit-dash-worktree-clean-plan)
+               (lambda (path) (setq cleaned path)))
               ((symbol-function 'magit-dash-pr-dashboard-refresh) #'ignore))
       (magit-dash-pr-dashboard-review-worktrees)
       (should (equal (list "/tmp/myrepo" t) reviewed))
 
       (magit-dash-pr-dashboard-clean-merged-worktrees)
-      (should (equal (list "/tmp/myrepo" t) cleaned)))))
+      (should (equal "/tmp/myrepo" cleaned)))))
 
-(ert-deftest magit-dash-pr/dashboard-clean-selected-merged-pr ()
-  "When the selected PR at point is merged and has an existing worktree, clean-merged-worktrees cleans it directly."
-  (let ((cleaned-entry nil)
-        (entry '(:number 42 :repo "org/myrepo" :pr ((number . 42) (state . "MERGED")))))
+(ert-deftest magit-dash-pr/dashboard-clean-without-marks-plans-repo-scan ()
+  "With nothing marked, cleaning plans the whole repository instead of prompting."
+  (let ((planned nil))
     (cl-letf (((symbol-function 'magit-dash-pr-dashboard--entry-at-point)
-               (lambda () entry))
+               (lambda () '(:number 42 :repo "org/myrepo")))
               ((symbol-function 'magit-dash-pr-dashboard--find-local-path)
                (lambda (_) "/tmp/myrepo"))
-              ((symbol-function 'magit-dash-pr-dashboard--worktree-exists-p)
-               (lambda (_) t))
-              ((symbol-function 'magit-dash-pr--clean-worktree-for-entry)
-               (lambda (e prompt) (setq cleaned-entry (list e prompt)) :deleted))
-              ((symbol-function 'magit-dash-pr-dashboard-refresh) #'ignore))
+              ((symbol-function 'magit-dash-pr-dashboard--marked-or-at-point-entries)
+               (lambda () nil))
+              ((symbol-function 'magit-dash-worktree-clean-plan)
+               (lambda (path) (setq planned path))))
       (magit-dash-pr-dashboard-clean-merged-worktrees)
-      (should (equal (list entry t) cleaned-entry)))))
+      (should (equal "/tmp/myrepo" planned)))))
 
 (ert-deftest magit-dash-pr/mark-and-bulk-operations ()
   "Test marking, unmarking, mark-all, unmark-all, and bulk create/clean worktree operations."
@@ -1216,14 +1211,51 @@
           (should (null magit-dash-pr-dashboard--marked-entries))))
       ;; Mark all again and test bulk clean
       (magit-dash-pr-dashboard-mark-all)
-      (let ((cleaned-nums nil))
-        (cl-letf (((symbol-function 'magit-dash-pr--clean-worktree-for-entry)
-                   (lambda (entry &optional _)
-                     (push (plist-get entry :number) cleaned-nums)
-                     :deleted)))
+      (let ((planned nil))
+        (cl-letf (((symbol-function 'magit-dash-worktree-clean-entry-target)
+                   (lambda (entry) (list :number (plist-get entry :number))))
+                  ((symbol-function 'magit-dash-worktree-clean-plan-targets)
+                   (lambda (targets &optional _) (setq planned targets))))
           (magit-dash-pr-dashboard-clean-merged-worktrees)
-          (should (equal '(20 10) cleaned-nums))
+          (should (equal '(10 20) (sort (seq-map (lambda (tg) (plist-get tg :number)) planned) #'<)))
           (should (null magit-dash-pr-dashboard--marked-entries)))))))
+
+(defun magit-dash-pr-test/rows-fixture ()
+  "Fill the current dashboard buffer with rows for org/r #1 and #2."
+  (magit-dash-pr-dashboard-mode)
+  (setq tabulated-list-entries
+        (list (magit-dash-pr-dashboard--build-entry
+               '((number . 1) (title . "one") (state . "OPEN") (updatedAt . "")) "org/r")
+              (magit-dash-pr-dashboard--build-entry
+               '((number . 2) (title . "two") (state . "OPEN") (updatedAt . "")) "org/r")))
+  (tabulated-list-print t))
+
+(ert-deftest magit-dash-pr/refresh-entries-queries-only-the-given-pr ()
+  "Refreshing one row runs one `gh pr view' and no discovery query."
+  (with-temp-buffer
+    (magit-dash-pr-test/rows-fixture)
+    (let ((calls nil))
+      (cl-letf (((symbol-function 'magit-dash-gh--run-process)
+                 (lambda (args _dir on-success &optional _on-error _attempt)
+                   (push args calls)
+                   (funcall on-success "{\"number\":2,\"title\":\"two v2\",\"state\":\"OPEN\"}"))))
+        (magit-dash-pr-dashboard-refresh-entries
+         (list (car (cadr tabulated-list-entries))))
+        (should (= 1 (length calls)))
+        (should (equal '("pr" "view" "2" "-R" "org/r") (seq-take (car calls) 5)))
+        (should (equal '("one" "two v2")
+                       (seq-map (lambda (e) (map-elt (plist-get (car e) :pr) 'title))
+                                tabulated-list-entries)))))))
+
+(ert-deftest magit-dash-pr/refresh-entries-drops-pr-no-longer-open ()
+  "Under the open filter a PR that merged leaves the table, other rows stay."
+  (with-temp-buffer
+    (magit-dash-pr-test/rows-fixture)
+    (let ((key (magit-dash-pr-dashboard--entry-key (car (car tabulated-list-entries)))))
+      (magit-dash-pr-dashboard--replace-row
+       (current-buffer) key "{\"number\":1,\"state\":\"MERGED\"}")
+      (should (equal '(2) (seq-map (lambda (e) (plist-get (car e) :number))
+                                   tabulated-list-entries))))))
 
 (ert-deftest magit-dash-pr/tracking-cache-roundtrip ()
   (let ((magit-dash-pr--tracking-cache (make-hash-table :test #'equal))

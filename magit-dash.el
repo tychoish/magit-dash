@@ -54,6 +54,7 @@
 (require 'magit-dash-open)
 (require 'magit-dash-submodules)
 (require 'magit-dash-worktree)
+(require 'magit-dash-worktree-clean)
 (require 'magit-dash-status)
 (require 'magit-dash-review)
 (require 'magit-dash-review-hitl)
