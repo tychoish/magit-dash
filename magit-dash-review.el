@@ -59,6 +59,12 @@
 (declare-function magit-dash-review-stage-hitl "magit-dash-review-hitl" (&optional review-file op-name))
 (declare-function code-review-agents-shell-prompt "code-review-agents-shell" (criterion worktree))
 (declare-function code-review-start "code-review" (url))
+(declare-function code-review-api-submit "code-review-api-send" (repo number &rest args))
+(declare-function code-review-api-reconcile "code-review-api-send" (repo number &rest args))
+(declare-function code-review-api-set-verdict "code-review-api" (repo number state &optional head-oid &rest args))
+(defvar code-review-api-send-timeout)
+(defvar code-review-api-send-max-retries)
+(defvar code-review-api-send-max-wait)
 
 (defgroup magit-dash-review nil
   "Diff-review and code-review integration for magit-dash."
@@ -69,6 +75,35 @@
 When nil (the default), agent replies are appended leaving the thread open
 for human verification and sign-off."
   :type 'boolean
+  :group 'magit-dash-review)
+
+(defcustom magit-dash-review-submit-via-code-review nil
+  "When non-nil, `magit-dash-review-submit' sends through code-review.
+The review JSON is exported and handed to `code-review-api-submit'
+\(ghub, `code-review-auth' accounts) instead of the `gh api graphql'
+mutations.  The call blocks Emacs while requests are in flight; see the
+\"Submit through code-review\" commentary.  The old GraphQL path stays for one
+release, then goes, so this defaults to nil."
+  :type 'boolean
+  :group 'magit-dash-review)
+
+(defcustom magit-dash-review-sync-viewed t
+  "When non-nil, sync viewed marks on submit and on open (code-review path).
+Only effective while `magit-dash-review-submit-via-code-review' is non-nil.
+On submit, diff-review's blob-keyed marks are mirrored into code-review and
+pushed to GitHub (markFileAsViewed, unmarkFileAsViewed through `gh'); on
+open, GitHub's viewed files are imported into the review file.  Marks are
+used only where the blobs agree.  Best effort: a failure messages and never
+blocks the submit."
+  :type 'boolean
+  :group 'magit-dash-review)
+
+(defcustom magit-dash-review-submit-time-limit 600
+  "Seconds the whole send through code-review may take before it is abandoned.
+It covers the lookups before and after the send too, so the no-quit region
+cannot outlast it.  Abandoning leaves the items in `submit_pending', which
+blocks every later submit until `magit-dash-review-clear-submit-pending'."
+  :type 'number
   :group 'magit-dash-review)
 
 (defcustom magit-dash-review-use-code-review-adapter nil
@@ -568,7 +603,8 @@ PR metadata and GraphQL reviewThreads, performs a three-way merge into
                      remote-meta transcoded)))
         (magit-dash-review--write-json-file review-file merged)
         (magit-dash-review--maybe-mirror merged review-file)
-        (magit-dash-review--refresh-visiting-buffer review-file))))
+        (magit-dash-review--refresh-visiting-buffer review-file)
+        (magit-dash-review--maybe-import-viewed review-file slug pr-num dir))))
     (magit-dash-review--open-front-end review-file)))
 
 ;;;###autoload
@@ -650,10 +686,11 @@ so `diff-review' compares the live working tree against BASE-REF (default
           (magit-dash-review--write-json-file file merged)
           (magit-dash-review--maybe-mirror merged file)
           (magit-dash-review--refresh-visiting-buffer file)
+          (magit-dash-review--maybe-import-viewed file slug pr-num wt-dir)
           file))))))
 
 ;;; GraphQL Delta Submission
-;; Legacy path, kept until submit is routed through code-review.  Every
+;; Legacy path, used unless `magit-dash-review-submit-via-code-review' is set (removed later).  Every
 ;; request goes through `magit-dash-review--gh-graphql': the query and its
 ;; variables travel as one JSON body in a temporary file (`gh api --input'),
 ;; never as `-F key=value' fields, because `-F' reads `@file' values from
@@ -908,7 +945,13 @@ verdict is sent once (stamped `submitted_state', `submitted_head',
 `submitted_at') and again only when it changes; APPROVE and REQUEST_CHANGES
 are refused when the PR head moved past the reviewed head.  Replies and
 resolutions skip threads flagged `gh_missing'; an error on one thread is
-collected and the others still run, then reported together."
+collected and the others still run, then reported together.
+
+With `magit-dash-review-submit-via-code-review' non-nil the review is sent by
+`code-review-api-submit' instead (see \"Submit through code-review\"): every
+acknowledged item is stamped into REVIEW-FILE as it is acknowledged, an
+uncertain failure is reconciled against GitHub and never resent, and the call
+blocks Emacs while GitHub answers."
   (interactive
    (list (or (magit-dash-review--current-review-file)
              (user-error "No active review JSON file to submit"))
@@ -916,111 +959,1537 @@ collected and the others still run, then reported together."
   (let* ((file (expand-file-name
                 (or review-file
                     (magit-dash-review--current-review-file)
-                    (user-error "No active review JSON file to submit"))))
-         (data (magit-dash-review--read-for-write file))
+                    (user-error "No active review JSON file to submit")))))
+    (if magit-dash-review-submit-via-code-review
+        (magit-dash-review--cr-submit file feedback)
+      (magit-dash-review--legacy-submit file feedback))))
+
+(defun magit-dash-review--legacy-submit (file feedback)
+  "Submit the review in FILE with FEEDBACK through the GraphQL mutations.
+The legacy body of `magit-dash-review-submit'; see there."
+  (let ((lock (magit-dash-review--cr-lock file)))
+    (unwind-protect
+        (let* ((data (magit-dash-review--read-for-write file))
+               (_pending (when (map-elt data "submit_pending")
+                           (user-error "%s has an unfinished code-review submit (`submit_pending'): turn `magit-dash-review-submit-via-code-review' back on so it is reconciled first, or run M-x magit-dash-review-clear-submit-pending" file)))
+               (md (map-elt data "magit_dash"))
+               (slug (and md (map-elt md "repo")))
+               (pr-num (and md (map-elt md "number")))
+               (dir (magit-dash-review--trusted-worktree
+                     file
+                     (or (and md (map-elt md "worktree"))
+                         (map-elt data "root")
+                         default-directory)))
+               (comments (append (or (map-elt data "comments") []) nil))
+               (verdict-ht (map-elt data "verdict"))
+               (new-threads (magit-dash-review--collect-unsynced-threads comments))
+               (event (magit-dash-review--verdict-to-gh-event verdict-ht))
+               (verdict-pending (magit-dash-review--verdict-pending-p verdict-ht))
+               (feedback-p (and feedback (not (string-empty-p feedback))))
+               (errors nil)
+               (save (lambda ()
+                       (setf (map-elt data "comments") (vconcat comments))
+                       (magit-dash-review--write-json-file file data))))
+          (unless (and slug pr-num)
+            (user-error "Review file %s lacks `magit_dash' PR metadata" file))
+          (when (and verdict-ht (not event))
+            (message "magit-dash-review-submit: unknown verdict state %S; no verdict sent"
+                     (map-elt verdict-ht "state")))
+
+          ;; 1. New threads and/or verdict via addPullRequestReview, in chunks.
+          (when (or new-threads verdict-pending feedback-p)
+            (let* ((current-head (map-elt (magit-dash-review--fetch-pr-metadata slug pr-num dir)
+                                          'headRefOid))
+                   (pr-id (or (map-elt md "pr_node_id")
+                              (magit-dash-review--fetch-pr-node-id slug pr-num dir)))
+                   (review-head (or (map-elt md "head_oid") current-head))
+                   (chunks (or (seq-partition new-threads magit-dash-review--submit-chunk-size)
+                               (list nil))))
+              (when verdict-pending
+                (magit-dash-review--check-verdict-head md verdict-ht event current-head))
+              (seq-do-indexed
+               (lambda (chunk index)
+                 (let ((last-p (= index (1- (length chunks)))))
+                   (magit-dash-review--submit-threads
+                    chunk
+                    (if (and last-p verdict-pending) event "COMMENT")
+                    (and last-p feedback)
+                    pr-id review-head dir)
+                   (when (and last-p verdict-pending)
+                     (setf (map-elt verdict-ht "submitted_state") (map-elt verdict-ht "state"))
+                     (setf (map-elt verdict-ht "submitted_head")
+                           (or review-head ""))
+                     (setf (map-elt verdict-ht "submitted_at") (format-time-string "%FT%T%:z")))
+                   (funcall save)))
+               chunks)))
+
+          ;; 2. Pending replies on existing GitHub threads, one write per reply.
+          (seq-do
+           (lambda (c)
+             (let ((tid (map-elt c "gh_thread_id"))
+                   (failed nil)
+                   (pending (seq-filter
+                             (lambda (reply)
+                               (and (magit-dash-review--blank-p (map-elt reply "gh_comment_id"))
+                                    (not (member (map-elt reply "status") '("draft" "sent")))))
+                             (append (or (map-elt c "replies") []) nil))))
+               (cond
+                ((magit-dash-review--blank-p tid) nil)
+                ((eq (map-elt c "gh_missing") t)
+                 (when pending
+                   (message "magit-dash-review-submit: thread %s is gone on GitHub; skipping %d repl%s"
+                            tid (length pending) (if (cdr pending) "ies" "y"))))
+                (t
+                 (seq-do (lambda (reply)
+                           (unless failed
+                             (condition-case err
+                                 (progn
+                                   (magit-dash-review--post-reply c reply dir)
+                                   (funcall save))
+                               (error
+                                (setq failed t)
+                                (push (format "reply on %s: %s" tid (error-message-string err))
+                                      errors)))))
+                         pending)))))
+           comments)
+
+          ;; 3. Resolution changes that are local intent.
+          (seq-do
+           (lambda (c)
+             (let ((tid (map-elt c "gh_thread_id")))
+               (when (and (not (magit-dash-review--blank-p tid))
+                          (not (eq (map-elt c "gh_missing") t)))
+                 (when-let* ((intent (magit-dash-review--resolution-intent c)))
+                   (condition-case err
+                       (progn
+                         (magit-dash-review--set-thread-resolution c (eq intent 'resolve) dir)
+                         (funcall save))
+                     (error
+                      (push (format "%s on %s: %s" intent tid (error-message-string err))
+                            errors)))))))
+           comments)
+
+          (funcall save)
+          (magit-dash-review--refresh-visiting-buffer file)
+          (when errors
+            (error "Submit incomplete, %d error(s); what was sent is saved, resubmit to retry: %s"
+                   (length errors) (string-join (nreverse errors) "; ")))
+          file)
+      (magit-dash-review--cr-unlock lock))))
+
+;;; Submit through code-review
+;; `magit-dash-review-submit' takes this path when
+;; `magit-dash-review-submit-via-code-review' is non-nil.  The review JSON is
+;; exported, and `code-review-api-submit' does the sending; this section only
+;; turns the file into items, checkpoints every acknowledged item back into
+;; the file, and reconciles uncertain failures.  Item ids are strings
+;; "c:COMMENT-ID", "r:REPLY-ID" and "t:THREAD-ID" (the review itself is the
+;; symbol `review'), so an acknowledgement can be located in the file.
+;;
+;; Limits.  The review is ONE POST (no chunking, no pending review: that is an
+;; open design question), so a very large review lands whole or fails whole.
+;;
+;; BLOCKING.  `code-review-api-submit' waits for GitHub, up to
+;; `code-review-api-send-timeout' per request and more with retries, and so do
+;; the reconcile lookups before and after it.  `inhibit-quit' is bound from the
+;; send until the file is settled, so a quit cannot leave a half-stamped file; a
+;; quit typed meanwhile is reported and dropped afterwards.  When not in batch
+;; mode the user must confirm, with the worst case stated.  The GraphQL
+;; fallback for replies (below) also runs `gh' synchronously.  Run this from a
+;; batch or child Emacs when that wait is not acceptable.
+;;
+;; Crash safety.  The submit takes a lock file next to the review file FIRST
+;; (exclusive create with an owner token; a stale one is renamed away) and holds
+;; it to the end, including the GraphQL fallback replies; the file is read after
+;; that.  Before sending, `submit_pending' is written: the whole submission (the
+;; event and summary, per item the id, kind, body text and hash, path, lines,
+;; parent and the verdict), the head it was made for, and a baseline of the
+;; review and comment ids GitHub already had.  An item leaves it only when it
+;; is stamped from a response, or definitely failed (a rejected request).
+;;
+;; NEVER AUTOMATIC RESEND.  If the record still holds an item, the send may have
+;; reached GitHub without being stamped (a timed-out POST can land later).  The
+;; next submit looks each item up on GitHub with an exact match (account, body,
+;; path, line, commit, not in the baseline, not already stamped on another
+;; item) and stamps the ones found.  Any item still unresolved (not found, not
+;; checkable, edited or deleted since, or found but already imported by a sync
+;; as another thread) blocks the WHOLE submit: nothing is sent, not even other
+;; items, and the legacy path refuses too.  A retry with a different summary
+;; does not post a second review: the review entry is matched by the summary
+;; it was sent with, and while it is unresolved nothing goes out.  A human
+;; decides with `magit-dash-review-clear-submit-pending', which shows what
+;; GitHub has for each item and offers to mark it sent, discard it (the next
+;; submit sends it) or keep it.  The reconcile entries expose only the current
+;; commit and line, so after a push a landed comment may not match: that is
+;; what the human step is for.  Residual windows: a kill between the
+;; baseline snapshot and the POST leaves a record for a send that never
+;; happened (blocked until cleared), never the reverse; a stale-lock takeover
+;; is guarded by rename plus a content check but is not a kernel lock.
+;;
+;; Replies need the REST id of the thread's first comment (`gh_database_id',
+;; stored by `magit-dash-review-sync' and by the submit itself).  A reply to a
+;; thread without one makes the submit refuse before sending anything: sync
+;; first.  There is no GraphQL fallback.
+;;
+;; CAVEATS.  This path is experimental and OFF by default.  Emacs blocks, and
+;; cannot be quit, for up to `magit-dash-review-submit-time-limit' seconds.  An
+;; uncertain send blocks ALL later submits, including the legacy path, until
+;; `magit-dash-review-clear-submit-pending' resolves it; its \"mark sent\" and
+;; \"discard\" are trusted human decisions (mark sent on an unposted item loses
+;; it, discard of a posted one posts it twice, hence the confirmations).  After
+;; a push a landed comment can show as not found.  Do not use code-review's own
+;; submit commands on the same PR meanwhile: they know nothing of the record.
+;; The lock is a file lock (exclusive create), not a kernel lock: a live process
+;; on this host is never overridden, but another host cannot be seen.  It is
+;; held across the confirmation and token prompts, so an abandoned prompt blocks
+;; other instances until it is answered or C-g'd; delete FILE.submit-lock by
+;; hand only after confirming the owning Emacs is gone.
+;;
+;; More behaviour to know.  After a landed review, a verdict set again (a new
+;; state or head) is refused once, with the landed review stamped as what it
+;; was, and is sent by the NEXT submit.  New comments after a landed review with
+;; the same summary are posted singly, outside a review.  A crash in the middle
+;; of a send can leave items already stamped in the file but still listed in the
+;; record: the submit settles those itself, and the clear command shows them as
+;; already stamped (mark sent and discard are both safe for them).  Discarding an
+;; item whose lookup failed or that was found on GitHub asks for confirmation;
+;; only a positive "not found" does not.
+;;
+;; More caveats.  Item ids must be unique among the comments of a review file
+;; and among its replies.  Do not run a submit from another Emacs on the same
+;; file while the clear command is prompting (it refuses to apply if the record
+;; changed, but the other submit would still have run).  After a crash that had
+;; already stamped the review, retrying with the same summary is refused once,
+;; and a second retry posts the summary again as a COMMENT review: leave the
+;; summary empty then.  A verdict set again is sent by the next submit only when
+;; it carries a head; one without a head is not resent after the review head
+;; moves.  A resolve marked on a comment this path just posted is not applied by
+;; the submit that posts it, and refuses later submits until
+;; `magit-dash-review-sync' has fetched its thread id.
+
+(defvar code-review-github-host)
+(defvar code-review-auth-backend)
+
+(defun magit-dash-review--cr-account (dir slug)
+  "Return the gh account plist (:user :host) for DIR or SLUG, or nil."
+  (or (magit-dash-gh--repo-account dir)
+      (magit-dash-gh--repo-account slug)))
+
+(defun magit-dash-review--cr-comment-item (c)
+  "Return the `code-review-api-submit' comment item for local comment C."
+  (let* ((lines (append (map-elt c "lines") nil))
+         (l1 (nth 0 lines))
+         (l2 (nth 1 lines))
+         (side (cond
+                ((member (map-elt c "diff_side") '("LEFT" "RIGHT"))
+                 (map-elt c "diff_side"))
+                (t "RIGHT")))
+         (item (list :id (concat "c:" (or (map-elt c "id") ""))
+                     :path (map-elt c "path")
+                     :body (or (map-elt c "body") "")
+                     :line (or l2 l1)
+                     :side side)))
+    (cond
+     ((and l1 l2 (< l1 l2))
+      (append item (list :start-line l1 :start-side side)))
+     (t item))))
+
+(defun magit-dash-review--cr-match-posted (kind item recon head account &optional review-id)
+  "Return the entry of RECON that is the already-posted ITEM of KIND, or nil.
+KIND is `review', `comment' or `reply'; RECON is the result of
+`code-review-api-reconcile'.  An entry must be by ACCOUNT, have the trimmed
+body of ITEM, and: for a review the commit HEAD (both must be known) and the
+state of ITEM's :event; for a comment the commit HEAD, the path and the line,
+and, when REVIEW-ID and the entry's :review-id are both known, that review;
+for a reply the parent comment.  Without ACCOUNT nothing matches."
+  (let ((body (string-trim (or (plist-get item :body) "")))
+        (mine (lambda (entry)
+                (and (stringp account)
+                     (stringp (plist-get entry :user))
+                     (string-equal-ignore-case account (plist-get entry :user)))))
+        (commit-ok (lambda (entry)
+                     (and head
+                          (plist-get entry :commit-id)
+                          (equal head (plist-get entry :commit-id))))))
+    (pcase kind
+      ('review
+       (seq-find (lambda (r)
+                   (and (funcall mine r)
+                        (equal body (string-trim (or (plist-get r :body) "")))
+                        (funcall commit-ok r)
+                        (equal (plist-get r :state)
+                               (pcase (plist-get item :event)
+                                 ("APPROVE" "APPROVED")
+                                 ("REQUEST_CHANGES" "CHANGES_REQUESTED")
+                                 (_ "COMMENTED")))))
+                 (plist-get recon :reviews)))
+      ('comment
+       (seq-find (lambda (c)
+                   (and (funcall mine c)
+                        (equal body (string-trim (or (plist-get c :body) "")))
+                        (equal (plist-get item :path) (plist-get c :path))
+                        (equal (plist-get item :line) (plist-get c :line))
+                        (or (not (plist-member item :start-line))
+                            (not (plist-member c :start-line))
+                            (equal (plist-get item :start-line) (plist-get c :start-line)))
+                        (funcall commit-ok c)
+                        (or (null review-id)
+                            (null (plist-get c :review-id))
+                            (equal review-id (plist-get c :review-id)))))
+                 (plist-get recon :comments)))
+      ('reply
+       (seq-find (lambda (c)
+                   (and (funcall mine c)
+                        (equal body (string-trim (or (plist-get c :body) "")))
+                        (equal (plist-get item :reply-to-id) (plist-get c :in-reply-to-id))))
+                 (plist-get recon :comments))))))
+
+(defun magit-dash-review--cr-stamp (file id remote node &optional verdict)
+  "Checkpoint into FILE that the item ID was acknowledged.
+REMOTE is its REST id (an integer) or nil, NODE its GraphQL node id or nil.
+ID is `review' (stamp the verdict from the plist VERDICT, (:state S :head H),
+when given), \"c:ID\" (the comment becomes sent: `gh_comment_id' and
+`remote_id' are NODE when known, so a later sync matches it, and
+`gh_database_id' is REMOTE), \"r:ID\" (the reply becomes sent, likewise) or
+\"t:THREAD\" (the local resolved state is now GitHub's).  FILE is read fresh
+\(through the modified-buffer guard) and written at once, so a crash loses
+nothing acknowledged.  Return non-nil when something was stamped."
+  (let* ((data (magit-dash-review--read-for-write file))
+         (comments (append (or (map-elt data "comments") []) nil))
+         (key (and (stringp id) (substring id 2)))
+         (stamped nil))
+    (cond
+     ((eq id 'review)
+      (when verdict
+        (let ((v (cond
+                  ((hash-table-p (map-elt data "verdict"))
+                   (map-elt data "verdict"))
+                  (t (make-hash-table :test #'equal)))))
+          (when (magit-dash-review--blank-p (map-elt v "state"))
+            (setf (map-elt v "state") (plist-get verdict :state)))
+          ;; What was SENT, from the verdict plist: never the file's current state,
+          ;; which may have changed since (it then stays pending).
+          (setf (map-elt v "submitted_state") (or (plist-get verdict :state) (map-elt v "state")))
+          (setf (map-elt v "submitted_head") (or (plist-get verdict :head) ""))
+          (setf (map-elt v "submitted_at") (format-time-string "%FT%T%:z"))
+          (setf (map-elt data "verdict") v)
+          (setq stamped t))))
+     ((string-prefix-p "c:" id)
+      (when-let* ((c (seq-find (lambda (c) (equal (map-elt c "id") key)) comments)))
+        (when remote
+          (setf (map-elt c "gh_database_id") remote))
+        (when-let* ((ref (or node (and remote (number-to-string remote)))))
+          (setf (map-elt c "remote_id") ref))
+        (when node
+          (setf (map-elt c "gh_comment_id") node))
+        (setf (map-elt c "origin") "github")
+        (setf (map-elt c "status") "sent")
+        (setf (map-elt c "gh_resolved") :false)
+        (setq stamped t)))
+     ((string-prefix-p "r:" id)
+      (seq-do (lambda (c)
+                (when-let* ((reply (seq-find (lambda (r) (equal (map-elt r "id") key))
+                                             (append (or (map-elt c "replies") []) nil))))
+                  (when remote
+                    (setf (map-elt reply "gh_database_id") remote))
+                  (when node
+                    (setf (map-elt reply "gh_comment_id") node))
+                  (setf (map-elt reply "status") "sent")
+                  (setq stamped t)))
+              comments))
+     ((string-prefix-p "t:" id)
+      (when-let* ((c (seq-find (lambda (c) (equal (map-elt c "gh_thread_id") key)) comments)))
+        (setf (map-elt c "gh_resolved")
+              (cond
+               ((eq (map-elt c "resolved") t) t)
+               (t :false)))
+        (map-delete c "local_resolved")
+        (setq stamped t))))
+    (when stamped
+      (magit-dash-review--write-json-file file data))
+    stamped))
+
+(defun magit-dash-review--cr-reply-items (comments)
+  "Return (VIA-API . NEED-SYNC) pending replies of COMMENTS.
+VIA-API are `code-review-api-submit' reply items: a reply goes to any comment
+with a REST `gh_database_id' (that is its :reply-to-id), whether or not it has
+a thread id.  NEED-SYNC is a list with one list of reply ids per published
+thread (it has a thread id) that has no REST id, which the API cannot address.
+Comments flagged `gh_missing', and local ones with neither id, are skipped."
+  (let* ((usable (seq-remove
+                  (lambda (c)
+                    (or (eq (map-elt c "gh_missing") t)
+                        (not (or (integerp (map-elt c "gh_database_id"))
+                                 (not (magit-dash-review--blank-p (map-elt c "gh_thread_id")))))))
+                  comments))
+         (pending-of (lambda (c)
+                       (seq-filter
+                        (lambda (reply)
+                          (and (magit-dash-review--blank-p (map-elt reply "gh_comment_id"))
+                               (magit-dash-review--blank-p (map-elt reply "gh_database_id"))
+                               (not (member (map-elt reply "status") '("draft" "sent")))))
+                        (append (or (map-elt c "replies") []) nil)))))
+    (cons
+     (seq-mapcat
+      (lambda (c)
+        (when (integerp (map-elt c "gh_database_id"))
+          (seq-map (lambda (reply)
+                     (list :id (concat "r:" (or (map-elt reply "id") ""))
+                           :reply-to-id (map-elt c "gh_database_id")
+                           :body (or (map-elt reply "body") "")))
+                   (funcall pending-of c))))
+      usable)
+     (seq-filter
+      #'identity
+      (seq-map
+       (lambda (c)
+         (unless (integerp (map-elt c "gh_database_id"))
+           (seq-map (lambda (reply) (map-elt reply "id")) (funcall pending-of c))))
+       usable)))))
+
+(defun magit-dash-review--cr-known-ids (data)
+  "Return the GitHub ids stamped in DATA as (:sent IDS :imported IDS).
+:sent are REST ids and node ids of comments and replies this submit path
+stamped (status \"sent\"): their remote entries belong to those items.
+:imported are the ids of every other table that has some: threads a sync
+brought in.  A pending item's own landed comment can be among those (a sync
+imported it as a thread of its own), which is the \"twin\" case."
+  (let* ((tables (seq-mapcat
+                  (lambda (c)
+                    (cons c (append (or (map-elt c "replies") []) nil)))
+                  (append (or (map-elt data "comments") []) nil)))
+         (ids-of (lambda (selected)
+                   (seq-filter
+                    (lambda (id)
+                      (and id (not (equal id ""))))
+                    (seq-mapcat
+                     (lambda (table)
+                       (list (map-elt table "gh_database_id")
+                             (map-elt table "gh_comment_id")
+                             (map-elt table "remote_id")))
+                     selected)))))
+    (list :sent (funcall ids-of (seq-filter (lambda (tb) (equal (map-elt tb "status") "sent")) tables))
+          :imported (funcall ids-of (seq-remove (lambda (tb) (equal (map-elt tb "status") "sent"))
+                                                tables)))))
+
+(defun magit-dash-review--cr-reconcile (pending items head account slug pr-num &optional baseline known)
+  "Reconcile the PENDING item ids of a submit against GitHub; never resend.
+ITEMS maps item id to (KIND . ITEM).  BASELINE is the plist (:reviews IDS
+:comments IDS) of what GitHub had before the send, KNOWN the plist
+`magit-dash-review--cr-known-ids' returns: remote entries in the baseline or
+in :sent are never candidates.  Only reviews, comments and replies by ACCOUNT
+count and each remote entry matches at most one item.  A comment matches on
+its own (path, line, body, commit, and the matched review when both are
+known); a matched review never marks comments.  Without HEAD or BASELINE, or
+when a lookup failed, nothing can be told and every item is :unchecked.  An
+item whose match is a thread a sync imported (:imported) is a :twin: it is
+posted, but another table of the file already holds it.
+Return (:matched ((ID REMOTE NODE) ...) :missing IDS :unchecked IDS :twin IDS)."
+  (let* ((recon (condition-case err
+                    (code-review-api-reconcile slug pr-num :account account)
+                  (error (list :errors (list (error-message-string err))))))
+         (sent (plist-get known :sent))
+         (imported (plist-get known :imported))
+         (usable (lambda (entry baseline-ids)
+                   (not (or (member (plist-get entry :id) baseline-ids)
+                            (and (plist-get entry :id)
+                                 (member (plist-get entry :id) sent))
+                            (and (plist-get entry :node-id)
+                                 (member (plist-get entry :node-id) sent))))))
+         (reviews (seq-filter (lambda (e) (funcall usable e (plist-get baseline :reviews)))
+                              (plist-get recon :reviews)))
+         (comments (seq-filter (lambda (e) (funcall usable e (plist-get baseline :comments)))
+                               (plist-get recon :comments)))
+         (review-hit nil)
+         (matched nil)
+         (missing nil)
+         (twin nil))
+    (cond
+     ((or (plist-get recon :errors) (null head) (null baseline))
+      (list :matched nil :missing nil :unchecked (copy-sequence pending) :twin nil))
+     (t
+      (when (memq 'review pending)
+        (setq review-hit (magit-dash-review--cr-match-posted
+                          'review (cddr (assq 'review items))
+                          (list :reviews reviews) head account))
+        (cond
+         (review-hit
+          (push (list 'review (plist-get review-hit :id) (plist-get review-hit :node-id))
+                matched))
+         (t
+          (push 'review missing))))
+      (seq-do
+       (lambda (id)
+         (unless (eq id 'review)
+           (let* ((entry (cdr (assoc id items)))
+                  (hit (and entry
+                            (magit-dash-review--cr-match-posted
+                             (car entry) (cdr entry) (list :comments comments) head account
+                             (and review-hit (plist-get review-hit :id))))))
+             (cond
+              ((null hit)
+               (push id missing))
+              (t
+               (setq comments (delq hit comments))
+               (cond
+                ((or (member (plist-get hit :id) imported)
+                     (and (plist-get hit :node-id) (member (plist-get hit :node-id) imported)))
+                 (push id twin))
+                (t
+                 (push (list id (plist-get hit :id) (plist-get hit :node-id)) matched))))))))
+       pending)
+      (list :matched (nreverse matched) :missing (nreverse missing) :unchecked nil
+            :twin (nreverse twin))))))
+
+(defun magit-dash-review--cr-snapshot (slug pr-num account)
+  "Return (:reviews IDS :comments IDS) of what GitHub has for PR-NUM, or nil.
+Nil when a lookup failed or timed out: nothing is then known about what is
+new.  A PR with a very large history can exceed code-review's request limits;
+the submit then stops with a message instead of guessing."
+  (let ((recon (condition-case nil
+                   (code-review-api-reconcile slug pr-num :account account)
+                 (error nil))))
+    (when (and recon (null (plist-get recon :errors)))
+      (list :reviews (seq-map (lambda (e) (plist-get e :id)) (plist-get recon :reviews))
+            :comments (seq-map (lambda (e) (plist-get e :id)) (plist-get recon :comments))))))
+
+(defun magit-dash-review--cr-pending-write (file items baseline head &optional verdict)
+  "Record ITEMS, an alist of item id to (KIND . ITEM), as pending in FILE.
+This is the whole submission, enough to reconcile or retry it with nothing
+else: per item the id, kind, a hash and the text of the body, the path, lines,
+parent comment and (review) event; the summary is the review item's body.
+BASELINE is what GitHub had, HEAD the commit the send was made for, VERDICT
+the plist (:state S :head H) the review carries."
+  (let ((data (magit-dash-review--read-for-write file))
+        (record (make-hash-table :test #'equal))
+        (base (make-hash-table :test #'equal)))
+    (setf (map-elt record "at") (format-time-string "%FT%T%:z"))
+    (setf (map-elt record "head") (or head ""))
+    (setf (map-elt base "reviews") (vconcat (plist-get baseline :reviews)))
+    (setf (map-elt base "comments") (vconcat (plist-get baseline :comments)))
+    (setf (map-elt record "baseline") base)
+    (when verdict
+      (let ((v (make-hash-table :test #'equal)))
+        (setf (map-elt v "state") (plist-get verdict :state))
+        (setf (map-elt v "head") (or (plist-get verdict :head) ""))
+        (setf (map-elt record "verdict") v)))
+    (setf (map-elt record "items")
+          (vconcat
+           (seq-map (lambda (entry)
+                      (let ((e (make-hash-table :test #'equal))
+                            (item (cddr entry)))
+                        (setf (map-elt e "id") (format "%s" (car entry)))
+                        (setf (map-elt e "kind") (symbol-name (cadr entry)))
+                        (setf (map-elt e "body") (or (plist-get item :body) ""))
+                        (setf (map-elt e "hash") (secure-hash 'sha1 (or (plist-get item :body) "")))
+                        (seq-do (lambda (spec)
+                                  (when (plist-get item (car spec))
+                                    (setf (map-elt e (cdr spec)) (plist-get item (car spec)))))
+                                '((:path . "path") (:line . "line") (:start-line . "start_line")
+                                  (:reply-to-id . "reply_to") (:event . "event")))
+                        e))
+                    items)))
+    (setf (map-elt data "submit_pending") record)
+    (magit-dash-review--write-json-file file data)))
+
+(defun magit-dash-review--cr-record-items (record)
+  "Return the items alist (ID . (KIND . ITEM)) rebuilt from the entries of RECORD."
+  (seq-map
+   (lambda (e)
+     (let* ((name (map-elt e "id"))
+            (id (cond
+                 ((equal name "review") 'review)
+                 (t name)))
+            (kind (cond
+                   ((eq id 'review) 'review)
+                   ((string-prefix-p "r:" name) 'reply)
+                   (t 'comment))))
+       (cons id (cons kind
+                      (append (list :id id :body (or (map-elt e "body") ""))
+                              (seq-mapcat (lambda (spec)
+                                            (when (map-elt e (cdr spec))
+                                              (list (car spec) (map-elt e (cdr spec)))))
+                                          '((:path . "path") (:line . "line")
+                                            (:start-line . "start_line")
+                                            (:reply-to-id . "reply_to") (:event . "event"))))))))
+   (append (or (map-elt record "items") []) nil)))
+
+(defun magit-dash-review--cr-host-normalise (host)
+  "Return HOST as a bare lower-case hostname, \"github.com\" for the API host."
+  (let ((name (downcase (car (split-string
+                              (replace-regexp-in-string "\\`https?://" "" (or host "github.com"))
+                              "/")))))
+    (cond
+     ((string-prefix-p "api." name)
+      (substring name 4))
+     (t name))))
+
+(defun magit-dash-review--cr-lock (file)
+  "Take the submit lock of review FILE and return (PATH . TOKEN).
+This is a file lock (exclusive create of FILE.submit-lock holding pid, time,
+host and a random token), not a kernel lock.  A lock whose process is alive on
+this host is never taken, however old.  A lock is stale, and replaced (with a
+message), only when its process is dead on this host, or it is from another
+host (or unreadable) and older than an hour.  A stale lock is renamed aside,
+the moved content checked to be what was judged, and the exclusive create
+retried once, so two racers do not both win; otherwise `user-error'."
+  (let* ((lock (concat file ".submit-lock"))
+         (token (format "%d %f %s %08x" (emacs-pid) (float-time) (system-name)
+                        (random #xffffffff)))
+         (create (lambda ()
+                   (condition-case nil
+                       (progn
+                         (write-region token nil lock nil 'silent nil 'excl)
+                         t)
+                     (file-already-exists nil)))))
+    (unless (funcall create)
+      (let* ((seen (or (ignore-errors
+                         (with-temp-buffer
+                           (insert-file-contents lock)
+                           (buffer-string)))
+                       ""))
+             (fields (split-string seen))
+             (pid (string-to-number (or (nth 0 fields) "0")))
+             (at (string-to-number (or (nth 1 fields) "0")))
+             (local (and (nth 2 fields) (equal (nth 2 fields) (system-name))))
+             (age (- (float-time)
+                     (cond
+                      ((> at 0) at)
+                      (t (float-time (or (file-attribute-modification-time (file-attributes lock))
+                                         (current-time)))))))
+             (aside (format "%s.stale-%08x" lock (random #xffffffff))))
+        (cond
+         ((and local (> pid 0) (process-attributes pid))
+          (user-error "Another submit of %s holds %s (process %d is alive); wait for it, or delete the lock yourself if you are sure it is dead"
+                      file lock pid))
+         ((and (not (and local (> pid 0))) (< age 3600))
+          (user-error "Another submit of %s holds %s (another host, or unreadable, and only %ds old); wait, or delete the lock yourself"
+                      file lock age)))
+        (message "magit-dash-review: taking over the stale lock %s (%s)" lock
+                 (cond
+                  (local "its process is dead")
+                  (t "from another host or unreadable, and over an hour old")))
+        (condition-case nil
+            (rename-file lock aside)
+          (file-error
+           (user-error "Another submit of %s is taking over the stale lock %s" file lock)))
+        (cond
+         ((equal seen (with-temp-buffer
+                        (insert-file-contents aside)
+                        (buffer-string)))
+          (delete-file aside))
+         (t
+          (ignore-errors (rename-file aside lock))
+          (user-error "Another submit of %s took %s while it was being checked" file lock)))
+        (unless (funcall create)
+          (user-error "Another submit of %s took %s first" file lock))))
+    (cons lock token)))
+
+(defun magit-dash-review--cr-unlock (lock)
+  "Release LOCK, a (PATH . TOKEN) cell from `magit-dash-review--cr-lock'.
+Only a lock still holding this owner's token is removed."
+  (when (and lock (file-exists-p (car lock)))
+    (when (equal (ignore-errors
+                   (with-temp-buffer
+                     (insert-file-contents (car lock))
+                     (buffer-string)))
+                 (cdr lock))
+      (delete-file (car lock)))))
+
+(defun magit-dash-review--cr-pending-drop (file ids)
+  "Remove the item IDS (strings or `review') from the pending record of FILE.
+The record goes when no item is left.  Nothing is written when FILE has none."
+  (let* ((data (magit-dash-review--read-for-write file))
+         (record (map-elt data "submit_pending"))
+         (names (seq-map (lambda (id) (format "%s" id)) ids)))
+    (when (hash-table-p record)
+      (let ((left (seq-remove (lambda (e) (member (map-elt e "id") names))
+                              (append (or (map-elt record "items") []) nil))))
+        (cond
+         (left
+          (setf (map-elt record "items") (vconcat left)))
+         (t
+          (map-delete data "submit_pending")))
+        (magit-dash-review--write-json-file file data)))))
+
+(defun magit-dash-review--cr-describe (entry)
+  "Return a short name for the pending record ENTRY: its id and path:line."
+  (format "%s%s" (map-elt entry "id")
+          (cond
+           ((map-elt entry "path")
+            (format " (%s:%s)" (map-elt entry "path") (map-elt entry "line")))
+           (t ""))))
+
+(defun magit-dash-review--cr-entry-id (entry)
+  "Return the item id of the pending record ENTRY: `review' or a string."
+  (cond
+   ((equal (map-elt entry "id") "review") 'review)
+   (t (map-elt entry "id"))))
+
+(defun magit-dash-review--cr-record-verdict (record)
+  "Return the verdict plist (:state :head) the review of RECORD carried, or nil."
+  (when-let* ((v (map-elt record "verdict")))
+    (list :state (map-elt v "state") :head (map-elt v "head"))))
+
+(defun magit-dash-review--cr-baseline (record)
+  "Return the baseline plist (:reviews IDS :comments IDS) of RECORD, or nil."
+  (when-let* ((base (map-elt record "baseline"))
+              ((hash-table-p base)))
+    (list :reviews (append (map-elt base "reviews") nil)
+          :comments (append (map-elt base "comments") nil))))
+
+(defun magit-dash-review--cr-stamped-p (data record entry)
+  "Return non-nil when the item of pending ENTRY is already stamped in DATA.
+That happens when the process stopped after the item was acknowledged and
+stamped but before the record was trimmed.  A comment or reply is stamped when
+it is `sent' with a REST or node id; the review when the file's verdict
+records the verdict the review of RECORD carried as submitted."
+  (let* ((id (magit-dash-review--cr-entry-id entry))
+         (comments (append (or (map-elt data "comments") []) nil))
+         ;; \"c:ID\" is a top-level comment and \"r:ID\" a reply, never the other.
+         (tables (cond
+                  ((and (stringp id) (string-prefix-p "r:" id))
+                   (seq-mapcat (lambda (c) (append (or (map-elt c "replies") []) nil)) comments))
+                  (t comments))))
+    (cond
+     ((eq id 'review)
+      (when-let* ((rec (magit-dash-review--cr-record-verdict record))
+                  (v (map-elt data "verdict"))
+                  ((hash-table-p v)))
+        (and (map-elt v "submitted_at")
+             (equal (map-elt v "submitted_state") (plist-get rec :state))
+             (equal (map-elt v "submitted_head") (or (plist-get rec :head) "")))))
+     (t
+      (when-let* ((table (seq-find (lambda (tb) (equal (map-elt tb "id") (substring id 2))) tables)))
+        (and (equal (map-elt table "status") "sent")
+             (or (integerp (map-elt table "gh_database_id"))
+                 (not (magit-dash-review--blank-p (map-elt table "gh_comment_id"))))))))))
+
+(defun magit-dash-review--cr-signature (record)
+  "Return what identifies RECORD, a `submit_pending' table, as one particular send.
+The time, head and verdict of the send and, per item, the id, hash and event, so
+a record another instance replaced with one of the same ids is not mistaken for
+it."
+  (let ((verdict (magit-dash-review--cr-record-verdict record)))
+    (list (map-elt record "at") (map-elt record "head")
+          (plist-get verdict :state) (plist-get verdict :head)
+          (seq-map (lambda (e) (list (map-elt e "id") (map-elt e "hash") (map-elt e "event")))
+                   (append (or (map-elt record "items") []) nil)))))
+
+(defun magit-dash-review--cr-survey (file)
+  "Look at the pending record of FILE under the lock and return what GitHub has.
+Return (:entries ENTRIES :found RECONCILE-RESULT-OR-NIL :verdict V :signature S).
+Blocks on the lookup.  The lock is released before returning, so that nothing
+interactive happens while it is held."
+  (let ((lock (magit-dash-review--cr-lock file)))
+    (unwind-protect
+        (let* ((data (magit-dash-review--read-for-write file))
+               (record (or (map-elt data "submit_pending")
+                           (user-error "%s has no unfinished submit" file)))
+               (entries (append (or (map-elt record "items") []) nil))
+               (md (map-elt data "magit_dash"))
+               (slug (map-elt md "repo"))
+               (account (plist-get (magit-dash-review--cr-account
+                                    (magit-dash-review--trusted-worktree
+                                     file (or (map-elt md "worktree") (map-elt data "root")
+                                              default-directory))
+                                    slug)
+                                   :user)))
+          (list :entries entries
+                :stamped (seq-map #'magit-dash-review--cr-entry-id
+                                  (seq-filter (lambda (e)
+                                                (magit-dash-review--cr-stamped-p data record e))
+                                              entries))
+                :verdict (magit-dash-review--cr-record-verdict record)
+                :signature (magit-dash-review--cr-signature record)
+                :found (condition-case nil
+                           (magit-dash-review--cr-reconcile
+                            (seq-map #'magit-dash-review--cr-entry-id
+                                     (seq-remove (lambda (e)
+                                                   (magit-dash-review--cr-stamped-p data record e))
+                                                 entries))
+                            (magit-dash-review--cr-record-items record)
+                            (map-elt record "head") account slug (map-elt md "number")
+                            (magit-dash-review--cr-baseline record)
+                            (magit-dash-review--cr-known-ids data))
+                         (error nil))))
+      (magit-dash-review--cr-unlock lock))))
+
+;;;###autoload
+(defun magit-dash-review-clear-submit-pending (&optional review-file)
+  "Resolve the unfinished-submit record (`submit_pending') of REVIEW-FILE.
+A submit that was cut short may or may not have reached GitHub, and nothing is
+sent again until a human has decided each item.  For every item this shows what
+GitHub has for it (a lookup: it blocks) and offers `keep' (the default),
+`mark sent' (stamp it as sent, with the ids GitHub reported, without posting:
+asks again when it was NOT found) or `discard' (forget it, the next submit
+sends it: asks again when it WAS found, since it would be posted twice).
+These are trusted human decisions.  The lock is held only for the lookup and
+for applying the answers, never while prompting; the record is checked to be
+unchanged before anything is applied."
+  (interactive)
+  (let* ((file (expand-file-name
+                (or review-file
+                    (magit-dash-review--current-review-file)
+                    (user-error "No active review JSON file"))))
+         (survey (magit-dash-review--cr-survey file))
+         (found (plist-get survey :found))
+         (decisions
+          (seq-map
+           (lambda (e)
+             (let* ((id (magit-dash-review--cr-entry-id e))
+                    (hit (assoc id (plist-get found :matched)))
+                    (seen (or hit (member id (plist-get found :twin))))
+                    (stamped (member id (plist-get survey :stamped)))
+                    (missing (and found (member id (plist-get found :missing))))
+                    (finding (cond
+                              (stamped "already stamped in the file (marking it sent or discarding it is safe)")
+                              ((null found) "GitHub could not be checked")
+                              (hit "found on GitHub")
+                              (seen "found on GitHub, and a sync imported it as another thread")
+                              ((member id (plist-get found :unchecked)) "could not be checked")
+                              (t "not found on GitHub (it may still land)")))
+                    (choice (completing-read
+                             (format "%s: %s.  Resolve: " (magit-dash-review--cr-describe e) finding)
+                             '("keep" "mark sent" "discard (the next submit sends it)")
+                             nil t nil nil "keep")))
+               (cond
+                ((and (equal choice "mark sent") (not seen) (not stamped)
+                      (not (yes-or-no-p (format "%s was NOT found on GitHub; mark it sent without posting it? "
+                                                (map-elt e "id")))))
+                 (cons id "keep"))
+                ;; Only a positive "not found" (or an item already stamped) may
+                ;; be discarded without a second question.
+                ((and (string-prefix-p "discard" choice) (not stamped) (not missing)
+                      (not (yes-or-no-p (format "%s %s; discarding it will post it again if it landed.  Discard? "
+                                                (map-elt e "id")
+                                                (cond
+                                                 (seen "WAS found on GitHub")
+                                                 (t "could NOT be checked"))))))
+                 (cons id "keep"))
+                (t (cons id choice)))))
+           (plist-get survey :entries)))
+         (lock (magit-dash-review--cr-lock file)))
+    (unwind-protect
+        (let* ((record (or (map-elt (magit-dash-review--read-for-write file) "submit_pending")
+                           (user-error "The record of %s was cleared meanwhile" file))))
+          (unless (equal (plist-get survey :signature)
+                         (magit-dash-review--cr-signature record))
+            (user-error "The unfinished-submit record of %s changed while you were deciding; nothing was applied" file))
+          ;; A sync that imported the landed comment meanwhile would get the same
+          ;; ids stamped onto a second local item: refuse, apply nothing.
+          (let ((imported (plist-get (magit-dash-review--cr-known-ids
+                                      (magit-dash-review--read-json-file file))
+                                     :imported)))
+            (seq-do (lambda (decision)
+                      (let ((hit (assoc (car decision) (plist-get found :matched))))
+                        (when (and (equal (cdr decision) "mark sent") hit
+                                   (or (member (nth 1 hit) imported) (member (nth 2 hit) imported)))
+                          (user-error "%s was imported by a sync while you were deciding; nothing was applied (delete the duplicate or look again)"
+                                      (car decision)))))
+                    decisions))
+          (seq-do
+           (lambda (decision)
+             (let* ((id (car decision))
+                    (hit (assoc id (plist-get found :matched))))
+               (cond
+                ((equal (cdr decision) "mark sent")
+                 (magit-dash-review--cr-stamp file id (nth 1 hit) (nth 2 hit)
+                                              (and (eq id 'review) (plist-get survey :verdict)))
+                 (magit-dash-review--cr-pending-drop file (list id)))
+                ((string-prefix-p "discard" (cdr decision))
+                 (magit-dash-review--cr-pending-drop file (list id))))))
+           decisions))
+      (magit-dash-review--cr-unlock lock))))
+
+(defun magit-dash-review--cr-hosts (account-plist)
+  "Return (REVIEW-HOST . SEND-HOST), the normalised host of the gh ACCOUNT-PLIST
+and the one code-review would send to."
+  (cons (magit-dash-review--cr-host-normalise (plist-get account-plist :host))
+        (magit-dash-review--cr-host-normalise
+         (or (bound-and-true-p code-review-github-host) "api.github.com"))))
+
+(defun magit-dash-review--cr-plan (file feedback)
+  "Read FILE and plan the submit of FEEDBACK: return a plist of everything to send.
+Keys: :slug :pr-num :dir :account-plist :account :data :record :record-entries
+:event :api-event :feedback :feedback-p :head-oid :verdict-head :review-head
+:verdict-pending :cr-verdict-p :verdict-stamp :empty-verdict :comment-items
+:api-replies :graphql-replies :resolve-items :items.  Items come from the file:
+export marks every local comment without a cr_id a code-review draft, which must
+not decide what gets sent; export only supplies the verdict, defaulted from
+code-review's pending one.  Nothing is written or sent."
+  (let* ((data (magit-dash-review--read-for-write file))
          (md (map-elt data "magit_dash"))
          (slug (and md (map-elt md "repo")))
-         (pr-num (and md (map-elt md "number")))
-         (dir (magit-dash-review--trusted-worktree
-               file
-               (or (and md (map-elt md "worktree"))
-                   (map-elt data "root")
-                   default-directory)))
-         (comments (append (or (map-elt data "comments") []) nil))
-         (verdict-ht (map-elt data "verdict"))
-         (new-threads (magit-dash-review--collect-unsynced-threads comments))
-         (event (magit-dash-review--verdict-to-gh-event verdict-ht))
-         (verdict-pending (magit-dash-review--verdict-pending-p verdict-ht))
-         (feedback-p (and feedback (not (string-empty-p feedback))))
-         (errors nil)
-         (save (lambda ()
-                 (setf (map-elt data "comments") (vconcat comments))
-                 (magit-dash-review--write-json-file file data))))
+         (pr-num (and md (map-elt md "number"))))
     (unless (and slug pr-num)
       (user-error "Review file %s lacks `magit_dash' PR metadata" file))
-    (when (and verdict-ht (not event))
-      (message "magit-dash-review-submit: unknown verdict state %S; no verdict sent"
-               (map-elt verdict-ht "state")))
+    (let* ((dir (magit-dash-review--trusted-worktree
+                 file
+                 (or (map-elt md "worktree") (map-elt data "root") default-directory)))
+           (account-plist (magit-dash-review--cr-account dir slug))
+           (comments (append (or (map-elt data "comments") []) nil))
+           (verdict-ht (map-elt (let ((magit-dash-review-json-source-function (lambda (_) data)))
+                                  (magit-dash-review-json-export (cons slug pr-num)))
+                                "verdict"))
+           (verdict-pending (magit-dash-review--verdict-pending-p verdict-ht))
+           (new-threads (seq-filter
+                         (lambda (c)
+                           (magit-dash-review--blank-p (map-elt c "remote_id")))
+                         (magit-dash-review--collect-unsynced-threads comments)))
+           (feedback-p (and feedback (not (string-empty-p feedback))))
+           (event (cond
+                   (verdict-pending (magit-dash-review--verdict-to-gh-event verdict-ht))
+                   ((or new-threads feedback-p) "COMMENT")))
+           (verdict-head (and verdict-pending (map-elt verdict-ht "head")))
+           (head-oid (cond
+                      ((magit-dash-review--blank-p verdict-head) (map-elt md "head_oid"))
+                      (t verdict-head)))
+           (comment-items (seq-map #'magit-dash-review--cr-comment-item new-threads))
+           (replies (magit-dash-review--cr-reply-items comments))
+           (verdict-stamp (and verdict-pending
+                               (list :state (map-elt verdict-ht "state") :head head-oid)))
+           (empty-verdict (and verdict-pending (equal event "COMMENT")
+                               (null comment-items) (not feedback-p)))
+           (api-event (and (not empty-verdict) event))
+           (record (map-elt data "submit_pending")))
+      (list :slug slug :pr-num pr-num :dir dir :data data
+            :account-plist account-plist
+            :account (or (plist-get account-plist :user)
+                         (user-error "No gh account is configured for %s; refusing to send with an unnamed one" slug))
+            :record record
+            :record-entries (append (and (hash-table-p record) (map-elt record "items")) nil)
+            :event event :api-event api-event
+            :feedback feedback :feedback-p feedback-p
+            :head-oid head-oid :verdict-head verdict-head :review-head (map-elt md "head_oid")
+            :verdict-pending verdict-pending
+            :cr-verdict-p (magit-dash-review--blank-p
+                           (and (hash-table-p (map-elt data "verdict"))
+                                (map-elt (map-elt data "verdict") "state")))
+            :verdict-stamp verdict-stamp :empty-verdict empty-verdict
+            :comment-items comment-items :api-replies (car replies)
+            :graphql-replies (cdr replies)
+            :resolve-needs-sync (seq-map
+                                 (lambda (c) (map-elt c "id"))
+                                 (seq-filter
+                                  (lambda (c)
+                                    (and (magit-dash-review--blank-p (map-elt c "gh_thread_id"))
+                                         (not (eq (map-elt c "gh_missing") t))
+                                         (or (integerp (map-elt c "gh_database_id"))
+                                             (equal (map-elt c "status") "sent"))
+                                         (magit-dash-review--resolution-intent c)))
+                                  comments))
+            :resolve-items (seq-map
+                            (lambda (c)
+                              (list :id (concat "t:" (map-elt c "gh_thread_id"))
+                                    :thread-id (map-elt c "gh_thread_id")
+                                    :resolved (eq (magit-dash-review--resolution-intent c) 'resolve)
+                                    :remote-resolved (eq (map-elt c "gh_resolved") t)))
+                            (seq-filter
+                             (lambda (c)
+                               (and (not (magit-dash-review--blank-p (map-elt c "gh_thread_id")))
+                                    (not (eq (map-elt c "gh_missing") t))
+                                    (magit-dash-review--resolution-intent c)))
+                             comments))
+            :items (append
+                    (and api-event
+                         (list (cons 'review (cons 'review (list :body (and feedback-p feedback)
+                                                                 :event api-event)))))
+                    (seq-map (lambda (item) (cons (plist-get item :id) (cons 'comment item)))
+                             comment-items)
+                    (seq-map (lambda (item) (cons (plist-get item :id) (cons 'reply item)))
+                             (car replies)))))))
 
-    ;; 1. New threads and/or verdict via addPullRequestReview, in chunks.
-    (when (or new-threads verdict-pending feedback-p)
-      (let* ((current-head (map-elt (magit-dash-review--fetch-pr-metadata slug pr-num dir)
-                                    'headRefOid))
-             (pr-id (or (map-elt md "pr_node_id")
-                        (magit-dash-review--fetch-pr-node-id slug pr-num dir)))
-             (review-head (or (map-elt md "head_oid") current-head))
-             (chunks (or (seq-partition new-threads magit-dash-review--submit-chunk-size)
-                         (list nil))))
-        (when verdict-pending
-          (magit-dash-review--check-verdict-head md verdict-ht event current-head))
-        (seq-do-indexed
-         (lambda (chunk index)
-           (let ((last-p (= index (1- (length chunks)))))
-             (magit-dash-review--submit-threads
-              chunk
-              (if (and last-p verdict-pending) event "COMMENT")
-              (and last-p feedback)
-              pr-id review-head dir)
-             (when (and last-p verdict-pending)
-               (setf (map-elt verdict-ht "submitted_state") (map-elt verdict-ht "state"))
-               (setf (map-elt verdict-ht "submitted_head")
-                     (or review-head ""))
-               (setf (map-elt verdict-ht "submitted_at") (format-time-string "%FT%T%:z")))
-             (funcall save)))
-         chunks)))
+(defun magit-dash-review--cr-check (plan)
+  "Signal a `user-error' when PLAN must not be sent.  Nothing is written or sent.
+Refuses: a host that is not the one code-review sends to, a token that is not
+the gh account's, REQUEST_CHANGES without a summary, APPROVE or
+REQUEST_CHANGES without (or with disagreeing) heads, and replies to threads
+without a REST id (sync first: there is no safe fallback)."
+  (let ((hosts (magit-dash-review--cr-hosts (plist-get plan :account-plist)))
+        (api-event (plist-get plan :api-event))
+        (verdict-head (plist-get plan :verdict-head))
+        (review-head (plist-get plan :review-head)))
+    (unless (equal (car hosts) (cdr hosts))
+      (user-error "The account for %s is on %s but code-review would send to %s (`code-review-github-host'); refusing to publish to a different host"
+                  (plist-get plan :slug) (car hosts) (cdr hosts)))
+    (when (and (boundp 'code-review-auth-backend)
+               (not (eq code-review-auth-backend 'gh)))
+      (user-error "`code-review-auth-backend' is %S: cannot confirm that its token is the gh account %s; set it to `gh' to submit this way"
+                  code-review-auth-backend (plist-get plan :account)))
+    (when (and (equal api-event "REQUEST_CHANGES") (not (plist-get plan :feedback-p)))
+      (user-error "REQUEST_CHANGES needs a review summary"))
+    (when (and (member api-event '("APPROVE" "REQUEST_CHANGES"))
+               (magit-dash-review--blank-p (plist-get plan :head-oid)))
+      (user-error "Refusing to send %s: no head commit says what was reviewed" api-event))
+    (when (and (member (plist-get plan :event) '("APPROVE" "REQUEST_CHANGES"))
+               (not (magit-dash-review--blank-p verdict-head))
+               (not (magit-dash-review--blank-p review-head))
+               (not (equal verdict-head review-head)))
+      (user-error "Refusing to send %s: the verdict was made at %s but the review at %s; re-review first"
+                  (plist-get plan :event) (substring verdict-head 0 (min 12 (length verdict-head)))
+                  (substring review-head 0 (min 12 (length review-head)))))
+    (when (plist-get plan :resolve-needs-sync)
+      (user-error "Resolving %d comment(s) of %s needs the thread id, which they do not have yet; run `magit-dash-review-sync' first (nothing was sent)"
+                  (length (plist-get plan :resolve-needs-sync)) (plist-get plan :slug)))
+    (when (plist-get plan :graphql-replies)
+      (user-error "Replies to %d thread(s) of %s have no REST id for code-review to address; run `magit-dash-review-sync' first to fetch them (there is no safe fallback)"
+                  (length (plist-get plan :graphql-replies)) (plist-get plan :slug)))))
 
-    ;; 2. Pending replies on existing GitHub threads, one write per reply.
-    (seq-do
-     (lambda (c)
-       (let ((tid (map-elt c "gh_thread_id"))
-             (failed nil)
-             (pending (seq-filter
-                       (lambda (reply)
-                         (and (magit-dash-review--blank-p (map-elt reply "gh_comment_id"))
-                              (not (member (map-elt reply "status") '("draft" "sent")))))
-                       (append (or (map-elt c "replies") []) nil))))
+(defun magit-dash-review--cr-confirm (plan)
+  "Ask whether to send PLAN, stating that Emacs blocks and the worst case."
+  (let* ((retries (or (bound-and-true-p code-review-api-send-max-retries) 2))
+         (timeout (or (bound-and-true-p code-review-api-send-timeout) 60))
+         (max-wait (or (bound-and-true-p code-review-api-send-max-wait) 60))
+         ;; head lookup, review, comment ids, replies, resolves, the two
+         ;; baseline GETs, the two GETs of each reconcile (before and after).
+         (requests (+ 3 (length (plist-get plan :api-replies))
+                      (length (plist-get plan :resolve-items)) 2 2
+                      (cond ((plist-get plan :record) 2) (t 0))))
+         (worst (* requests (+ (* (1+ retries) timeout) (* retries max-wait)))))
+    (unless (y-or-n-p (format "Send %s#%s through code-review?  Emacs blocks, including for lookups before and after, and cannot be quit until GitHub answers (worst case about %ds, never more than %ss). "
+                              (plist-get plan :slug) (plist-get plan :pr-num) worst
+                              magit-dash-review-submit-time-limit))
+      (user-error "Submit cancelled"))))
+
+(defun magit-dash-review--cr-resolve-record (file plan run)
+  "Settle the unfinished earlier submit in PLAN's record against GitHub.
+RUN is the hash table of mutable submit state.  Items found by an exact
+per-item match are stamped (the review with the verdict ITS record carried,
+never the current one) and leave the record.  ANY other pending item (not
+found, not checkable, edited or deleted since, found but already imported by a
+sync) blocks the submit with a `user-error': nothing is sent.  An item already
+stamped in the file (the process stopped before the record was trimmed) is
+settled without a lookup.  When the earlier review landed but this submit's
+event, summary or verdict head differs, it stops too, saying so: it never posts
+a different review, nor new comments outside one.  When the earlier review
+landed with the SAME event and summary, comments new since then are posted
+singly, outside a review (that is what `code-review-api-submit' does without an
+event), because a second review with the same summary would be a duplicate."
+  (let* ((record (plist-get plan :record))
+         (items (plist-get plan :items))
+         (entries (plist-get plan :record-entries))
+         (rec-items (magit-dash-review--cr-record-items record))
+         (current-hash (lambda (id)
+                         (secure-hash 'sha1 (or (plist-get (cddr (assoc id items)) :body) ""))))
+         (stamped (seq-filter
+                   (lambda (e)
+                     (magit-dash-review--cr-stamped-p (magit-dash-review--read-json-file file)
+                                                      record e))
+                   entries))
+         (checkable (seq-filter
+                     (lambda (e)
+                       (let ((id (magit-dash-review--cr-entry-id e)))
+                         (or (eq id 'review)
+                             (and (assoc id items)
+                                  (equal (map-elt e "hash") (funcall current-hash id))))))
+                     (seq-remove (lambda (e) (member e stamped)) entries)))
+         ;; Nothing checkable means no lookup: no blocking call for nothing.
+         (found (and checkable
+                     (magit-dash-review--cr-reconcile
+                      (seq-map #'magit-dash-review--cr-entry-id checkable) rec-items
+                      (or (map-elt record "head") (plist-get plan :head-oid))
+                      (plist-get plan :account) (plist-get plan :slug) (plist-get plan :pr-num)
+                      (magit-dash-review--cr-baseline record)
+                      (magit-dash-review--cr-known-ids (magit-dash-review--read-json-file file)))))
+         (matched (plist-get found :matched)))
+    (seq-do (lambda (m)
+              (magit-dash-review--cr-stamp
+               file (car m) (cadr m) (nth 2 m)
+               (and (eq (car m) 'review) (magit-dash-review--cr-record-verdict record)))
+              (push (car m) (map-elt run 'settled))
+              (when (eq (car m) 'review)
+                (setf (map-elt run 'sent-review) t))
+              (setf (map-elt run 'comment-items)
+                    (seq-remove (lambda (i) (equal (plist-get i :id) (car m)))
+                                (map-elt run 'comment-items)))
+              (setf (map-elt run 'api-replies)
+                    (seq-remove (lambda (i) (equal (plist-get i :id) (car m)))
+                                (map-elt run 'api-replies))))
+            matched)
+    (seq-do (lambda (e)
+              (push (magit-dash-review--cr-entry-id e) (map-elt run 'settled)))
+            stamped)
+    (magit-dash-review--cr-pending-drop file (map-elt run 'settled))
+    (let ((unresolved (seq-remove
+                       (lambda (e)
+                         (member (magit-dash-review--cr-entry-id e) (map-elt run 'settled)))
+                       entries)))
+      (when unresolved
+        (user-error "An earlier submit of %s is unresolved: %s.  It may or may not be on GitHub, so nothing is sent (not even other items, and not through the legacy path) until you decide each item with M-x magit-dash-review-clear-submit-pending"
+                    file (string-join (seq-map #'magit-dash-review--cr-describe unresolved) ", "))))
+    (when (or (assq 'review matched) (member 'review (map-elt run 'settled)))
+      (setf (map-elt run 'sent-review) t)
+      (let ((earlier (cddr (assq 'review rec-items))))
+        (when (and (map-elt run 'api-event)
+                   (or (not (equal (map-elt run 'api-event) (plist-get earlier :event)))
+                       (and (plist-get plan :verdict-stamp)
+                            (magit-dash-review--cr-record-verdict record)
+                            (not (equal (plist-get (plist-get plan :verdict-stamp) :head)
+                                        (plist-get (magit-dash-review--cr-record-verdict record) :head))))
+                       (not (equal (or (and (plist-get plan :feedback-p) (plist-get plan :feedback)) "")
+                                   (or (plist-get earlier :body) "")))))
+          (user-error "The earlier review of %s (%s) landed on GitHub and is stamped, but this submit has a different event or summary (%s); nothing was posted.  Look at the PR and the file, then resubmit what is still wanted"
+                      file (plist-get earlier :event) (map-elt run 'api-event))))
+      (setf (map-elt run 'api-event) nil))))
+
+(defun magit-dash-review--cr-send (file plan run)
+  "Send what is left of PLAN (see RUN) through `code-review-api-submit' and settle it.
+Writes `submit_pending' first (after a baseline snapshot: no snapshot, no
+send), stamps each acknowledged item as it is acknowledged, replays failed
+stamps from the result, stamps the verdict last, reconciles uncertain failures
+(stamping what is found, leaving the rest pending) and drops from the record
+only what was stamped or definitely failed.  Problems go to RUN's `errors'."
+  (let* ((slug (plist-get plan :slug))
+         (pr-num (plist-get plan :pr-num))
+         (account (plist-get plan :account))
+         (head-oid (plist-get plan :head-oid))
+         (verdict-stamp (plist-get plan :verdict-stamp))
+         (api-event (map-elt run 'api-event))
+         (comment-items (map-elt run 'comment-items))
+         (api-replies (map-elt run 'api-replies))
+         (sending (seq-filter (lambda (entry)
+                                (or (and api-event (eq (car entry) 'review))
+                                    (seq-find (lambda (i) (equal (plist-get i :id) (car entry)))
+                                              (append comment-items api-replies))))
+                              (plist-get plan :items)))
+         (baseline nil)
+         (result nil))
+    (when sending
+      (setq baseline (or (magit-dash-review--cr-snapshot slug pr-num account)
+                         (user-error "Cannot read the PR's current reviews and comments from GitHub (the lookup failed or timed out; a PR with a very large history can exceed the limit); nothing was sent")))
+      (magit-dash-review--cr-pending-write file sending baseline head-oid
+                                           (and api-event verdict-stamp)))
+    (message "magit-dash-review-submit: sending %s#%s through code-review; Emacs is blocked until GitHub answers"
+             slug pr-num)
+    (redisplay)
+    (setq result
+          (condition-case err
+              (when (or api-event comment-items api-replies (plist-get plan :resolve-items))
+                (code-review-api-submit
+                 slug pr-num
+                 :event api-event
+                 :body (and api-event (plist-get plan :feedback-p) (plist-get plan :feedback))
+                 :comments comment-items
+                 :replies api-replies
+                 :resolve (plist-get plan :resolve-items)
+                 :head-oid head-oid
+                 :account account
+                 :on-item (lambda (id outcome remote detail)
+                            (cond
+                             ((eq outcome 'skipped)
+                              (push id (map-elt run 'settled)))
+                             ((not (eq outcome 'sent))
+                              nil)
+                             ((eq id 'review)
+                              (setf (map-elt run 'sent-review) t)
+                              (unless verdict-stamp
+                                (push id (map-elt run 'settled))))
+                             (t
+                              (condition-case nil
+                                  (progn
+                                    (magit-dash-review--cr-stamp
+                                     file id remote
+                                     (and (listp detail) (plist-get detail :node-id)))
+                                    (push id (map-elt run 'settled)))
+                                (error (push id (map-elt run 'stamp-failed)))))))))
+            ;; `code-review-api-submit' signals `user-error' only BEFORE it sends
+            ;; anything (stale or missing head, missing body, bad arguments), and
+            ;; this relies on that: a refusal sent nothing, so the record it
+            ;; would leave only misleads.  Every failure after sending is
+            ;; reported in the result, never signalled.
+            (user-error
+             (when sending
+               (magit-dash-review--cr-pending-drop file (seq-map #'car sending)))
+             (signal (car err) (cdr err)))))
+    ;; Replay what the result knows for items whose stamp failed.
+    (seq-do (lambda (id)
+              (condition-case err
+                  (progn
+                    (magit-dash-review--cr-stamp
+                     file id (cdr (assoc id (plist-get result :remote-ids)))
+                     (cdr (assoc id (plist-get result :node-ids))))
+                    (push id (map-elt run 'settled)))
+                (error
+                 (setf (map-elt run 'stamp-error-p) t)
+                 (push (format "stamp %s: %s" id (error-message-string err)) (map-elt run 'errors)))))
+            (reverse (map-elt run 'stamp-failed)))
+    ;; The verdict is stamped last, after the comments it carried.
+    (when (and (map-elt run 'sent-review) verdict-stamp api-event)
+      (condition-case err
+          (progn
+            (magit-dash-review--cr-stamp file 'review nil nil verdict-stamp)
+            (push 'review (map-elt run 'settled)))
+        (error
+         (setf (map-elt run 'stamp-error-p) t)
+         (push (format "stamp verdict: %s" (error-message-string err)) (map-elt run 'errors)))))
+    (seq-do (lambda (w)
+              (message "magit-dash-review-submit: %s" w))
+            (plist-get result :warnings))
+    (let* ((failed (plist-get result :failed))
+           (uncertain (seq-filter (lambda (f) (plist-get f :maybe-accepted)) failed))
+           (definite (seq-remove (lambda (f) (plist-get f :maybe-accepted)) failed))
+           (found (and uncertain
+                       (magit-dash-review--cr-reconcile
+                        (seq-map (lambda (f) (plist-get f :id)) uncertain)
+                        (plist-get plan :items) (or (plist-get result :head) head-oid)
+                        account slug pr-num baseline
+                        (magit-dash-review--cr-known-ids (magit-dash-review--read-json-file file)))))
+           (left (append (plist-get found :missing) (plist-get found :unchecked)
+                         (plist-get found :twin))))
+      (setf (map-elt run 'settled)
+            (append (seq-map (lambda (f) (plist-get f :id)) definite) (map-elt run 'settled)))
+      (seq-do (lambda (m)
+                (condition-case err
+                    (progn
+                      (magit-dash-review--cr-stamp
+                       file (car m) (cadr m) (nth 2 m)
+                       (and (eq (car m) 'review) verdict-stamp))
+                      (push (car m) (map-elt run 'settled))
+                      (when (eq (car m) 'review)
+                        (setf (map-elt run 'sent-review) t)))
+                  (error
+                   (setf (map-elt run 'stamp-error-p) t)
+                   (push (format "stamp %s: %s" (car m) (error-message-string err))
+                         (map-elt run 'errors)))))
+              (plist-get found :matched))
+      (setf (map-elt run 'errors)
+            (append (seq-map (lambda (group)
+                               (format "%s: %s"
+                                       (string-join (seq-map (lambda (f) (format "%s" (plist-get f :id)))
+                                                             (cdr group))
+                                                    ", ")
+                                       (car group)))
+                             (seq-group-by (lambda (f) (plist-get f :error)) definite))
+                    (map-elt run 'errors)))
+      (when left
+        (push (format "%s may or may not have reached GitHub (a slow request can still land); they stay pending and no later submit sends anything until M-x magit-dash-review-clear-submit-pending resolves them"
+                      (string-join (seq-map (lambda (id) (format "%s" id)) left) ", "))
+              (map-elt run 'errors))))
+    (when (plist-get plan :empty-verdict)
+      (message "magit-dash-review-submit: the pending COMMENT verdict has no summary or comments to post; marking it settled")
+      (condition-case err
+          (progn
+            (magit-dash-review--cr-stamp file 'review nil nil verdict-stamp)
+            (setf (map-elt run 'sent-review) t))
+        (error
+         (setf (map-elt run 'stamp-error-p) t)
+         (push (format "stamp verdict: %s" (error-message-string err)) (map-elt run 'errors)))))
+    ;; Only what was stamped or definitely failed leaves the record.
+    (when (or sending (plist-get plan :record))
+      (condition-case err
+          (magit-dash-review--cr-pending-drop file (map-elt run 'settled))
+        (error
+         (push (format "pending record: %s" (error-message-string err)) (map-elt run 'errors)))))
+    (when (and (plist-get plan :verdict-pending) (plist-get plan :cr-verdict-p)
+               (map-elt run 'sent-review) (not (map-elt run 'stamp-error-p)))
+      (cond
+       ((fboundp 'code-review-api-set-verdict)
+        (condition-case err
+            (code-review-api-set-verdict slug pr-num nil)
+          (error
+           (message "magit-dash-review-submit: could not clear code-review's verdict: %s"
+                    (error-message-string err)))))
+       (t
+        (message "magit-dash-review-submit: code-review-api-set-verdict is unavailable; its pending verdict was not cleared"))))))
+
+(defun magit-dash-review--cr-submit (file feedback)
+  "Submit the review in FILE with FEEDBACK through `code-review-api-submit'.
+See `magit-dash-review-submit'.  Return FILE; signal when anything remains
+unsent.  The lock is taken first and held to the end.  While `submit_pending'
+holds an item that is not positively resolved nothing at all is sent: no
+uncertain item is ever sent again automatically.  When interactive, the user
+confirms first and the file is read AGAIN afterwards, so what is sent is what
+the file says after the prompt."
+  (unless (fboundp 'code-review-api-submit)
+    (user-error "`code-review-api-submit' is not available; load code-review or turn off `magit-dash-review-submit-via-code-review'"))
+  (let ((lock (magit-dash-review--cr-lock file)))
+    (unwind-protect
+        (let ((plan (magit-dash-review--cr-plan file feedback))
+              (run (make-hash-table :test #'eq)))
+          (magit-dash-review--cr-check plan)
+          (unless noninteractive
+            (magit-dash-review--cr-confirm plan)
+            (setq plan (magit-dash-review--cr-plan file feedback))
+            (magit-dash-review--cr-check plan))
+          (setf (map-elt run 'comment-items) (plist-get plan :comment-items))
+          (setf (map-elt run 'api-replies) (plist-get plan :api-replies))
+          (setf (map-elt run 'api-event) (plist-get plan :api-event))
+          ;; The token is resolved here, where a gh or keyring call may block or
+          ;; prompt, never inside the no-quit region below.
+          (when (fboundp 'code-review-auth-resolve)
+            (condition-case err
+                (code-review-auth-resolve 'github
+                                          (or (bound-and-true-p code-review-github-host) "api.github.com")
+                                          (plist-get plan :account))
+              (error
+               (user-error "No token for %s: %s" (plist-get plan :account) (error-message-string err)))))
+          (let ((inhibit-quit t))
+            (unwind-protect
+                (progn
+                  (with-timeout (magit-dash-review-submit-time-limit (setf (map-elt run 'timed-out) t))
+                    (when (plist-get plan :record-entries)
+                      (magit-dash-review--cr-resolve-record file plan run))
+                    (magit-dash-review--cr-send file plan run))
+                  (setf (map-elt run 'completed) t))
+              (when quit-flag
+                (setq quit-flag nil)
+                (setf (map-elt run 'quit-seen) t))
+              (when (map-elt run 'quit-seen)
+                (message "Quit deferred; submit %s"
+                         (cond ((map-elt run 'completed) "completed") (t "interrupted"))))
+              (when (map-elt run 'timed-out)
+                (push (format "the whole submit timed out after %ss and was abandoned; GitHub may still accept what was sent; the items stay pending until M-x magit-dash-review-clear-submit-pending"
+                              magit-dash-review-submit-time-limit)
+                      (map-elt run 'errors)))))
+          (let ((errors (reverse (map-elt run 'errors))))
+            (when (and magit-dash-review-sync-viewed (not errors))
+              (condition-case err
+                  (magit-dash-review--sync-viewed file (cons (plist-get plan :slug) (plist-get plan :pr-num))
+                                                  (plist-get plan :dir) (plist-get plan :account-plist))
+                (error
+                 (message "magit-dash-review-submit: viewed sync failed: %s" (error-message-string err)))))
+            (magit-dash-review--refresh-visiting-buffer file)
+            (when errors
+              (error "Submit incomplete, %d problem(s); drafts are kept and nothing uncertain is resent (M-x magit-dash-review-clear-submit-pending resolves an unfinished-submit record): %s"
+                     (length errors) (string-join errors "; ")))
+            file))
+      (magit-dash-review--cr-unlock lock))))
+
+;;; Viewed state
+;; diff-review's `viewed' maps path to the blob it was viewed at.  code-review
+;; (local only) and GitHub (markFileAsViewed, unmarkFileAsViewed) track it too.
+;; A mark is used only where code-review's stored blob for the path matches the
+;; diff-review blob, because code-review's own flag follows the diff block, not
+;; the blob.  `magit_dash.viewed_synced' records the marks (path to blob) known
+;; to be on GitHub: a path in it that the file no longer has was un-viewed
+;; locally on purpose, so it is unmarked on GitHub (never anything else is) and
+;; not imported back.  The record changes only after GitHub confirmed, so a
+;; failed push is retried next time.  The `gh' calls use the review's account.
+;; Only the first 100 files of a PR are read from GitHub; a larger PR is not
+;; pushed.  Everything here is best effort.
+
+(defconst magit-dash-review--viewed-query
+  "query($owner:String! $repo:String! $number:Int!){
+  repository(owner:$owner name:$repo){
+    pullRequest(number:$number){ id headRefOid files(first:100){ pageInfo{ hasNextPage } nodes{ path viewerViewedState } } }
+  }
+}"
+  "GraphQL query for a PR's node id, head and per-file viewed state.")
+
+(defun magit-dash-review--viewed-mutation (viewed-p)
+  "Return the GraphQL mutation that marks (VIEWED-P) or unmarks a file viewed."
+  (format "mutation($id:ID! $path:String!){ %s(input:{pullRequestId:$id path:$path}){ pullRequest{ id } } }"
+          (cond
+           (viewed-p "markFileAsViewed")
+           (t "unmarkFileAsViewed"))))
+
+(defun magit-dash-review--gh-viewed-state (slug pr-num dir account on-state)
+  "Fetch the viewed state of PR-NUM in SLUG with `gh' in DIR, asynchronously.
+ACCOUNT is the gh account plist to use.  Call ON-STATE with (PR-ID HEAD-OID
+STATES TRUNCATED), STATES an alist of path to viewerViewedState and TRUNCATED
+non-nil when the PR has more files than were read.  Text goes as raw `-f'
+fields (never `-F', which would read local files); only the number is typed."
+  (let ((parts (split-string slug "/")))
+    (with-magit-gh-account account
+      (magit-dash-gh--run-process
+       (list "api" "graphql"
+             "-f" (concat "query=" magit-dash-review--viewed-query)
+             "-f" (concat "owner=" (car parts))
+             "-f" (concat "repo=" (cadr parts))
+             "-F" (format "number=%d" pr-num))
+       dir
+       (lambda (out)
+         (condition-case err
+             (let* ((resp (json-parse-string out :object-type 'alist :array-type 'list))
+                    (pr (map-nested-elt resp '(data repository pullRequest))))
+               (unless pr
+                 (error "no pull request in the response"))
+               (funcall on-state
+                        (map-elt pr 'id)
+                        (map-elt pr 'headRefOid)
+                        (seq-map (lambda (n)
+                                   (cons (map-elt n 'path) (map-elt n 'viewerViewedState)))
+                                 (map-nested-elt pr '(files nodes)))
+                        (eq t (map-nested-elt pr '(files pageInfo hasNextPage)))))
+           (error
+            (message "magit-dash-review: viewed state of %s#%s unavailable: %s"
+                     slug pr-num (error-message-string err)))))
+       (lambda (msg _code)
+         (message "magit-dash-review: viewed state of %s#%s unavailable: %s" slug pr-num msg))))))
+
+(defun magit-dash-review--push-viewed (pr-id ops dir account on-done)
+  "Apply OPS, a list of (PATH . VIEWED-P), to PR-ID on GitHub through `gh' in DIR.
+ACCOUNT is the gh account plist.  ON-DONE is called with (PATH VIEWED-P) after
+each request GitHub accepted.  One asynchronous request at a time; a failure
+messages and the rest still run."
+  (when ops
+    (let ((op (car ops))
+          (next (lambda (&rest _)
+                  (magit-dash-review--push-viewed pr-id (cdr ops) dir account on-done))))
+      (with-magit-gh-account account
+        (magit-dash-gh--run-process
+         (list "api" "graphql"
+               "-f" (concat "query=" (magit-dash-review--viewed-mutation (cdr op)))
+               "-f" (concat "id=" pr-id)
+               "-f" (concat "path=" (car op)))
+         dir
+         (lambda (_out)
+           (funcall on-done (car op) (cdr op))
+           (funcall next))
+         (lambda (msg code)
+           (message "magit-dash-review: %s viewed of %s on GitHub failed: %s"
+                    (cond
+                     ((cdr op) "marking")
+                     (t "unmarking"))
+                    (car op) msg)
+           (funcall next code)))))))
+
+(defun magit-dash-review--viewed-synced-set (file path blob)
+  "Record in FILE that GitHub has PATH viewed at BLOB, or (nil BLOB) not viewed."
+  (let* ((data (magit-dash-review--read-for-write file))
+         (md (map-elt data "magit_dash")))
+    (when (hash-table-p md)
+      (let ((synced (cond
+                     ((hash-table-p (map-elt md "viewed_synced"))
+                      (map-elt md "viewed_synced"))
+                     (t (make-hash-table :test #'equal)))))
+        (cond
+         (blob
+          (setf (map-elt synced path) blob))
+         (t
+          (map-delete synced path)))
+        (setf (map-elt md "viewed_synced") synced)
+        (magit-dash-review--write-json-file file data)))))
+
+(defun magit-dash-review--sync-viewed (file key dir account)
+  "Mirror the viewed marks of FILE for PR KEY to code-review and GitHub.
+KEY is (REPO . NUMBER), ACCOUNT the review's gh account plist.  Marks whose
+blob agrees with code-review's stored blob are set in code-review (seam op
+`set-viewed') and, when GitHub does not have them, marked there.  A path in
+`viewed_synced' that FILE no longer views was un-viewed on purpose: it is
+unmarked on GitHub when GitHub shows it viewed.  Nothing else is ever
+unmarked, and a blob mismatch is never marked.  `viewed_synced' changes only
+after GitHub confirmed.  GitHub is asked asynchronously through
+`magit-dash-gh--run-process' (retrying 5xx), only for the head the review was
+made at (`head_oid', which must be known) and a PR of at most 100 files."
+  (let* ((data (magit-dash-review--read-for-write file))
+         (md (map-elt data "magit_dash"))
+         (local (map-elt data "viewed"))
+         (synced (map-elt md "viewed_synced"))
+         (reviewed (map-elt md "head_oid"))
+         (api (funcall magit-dash-review-json-code-review-function 'viewed key))
+         (agree (make-hash-table :test #'equal))
+         (unviewed nil))
+    (when (and (hash-table-p local) (hash-table-p api))
+      (map-do (lambda (path blob)
+                (when-let* ((info (map-elt api path)))
+                  (when (magit-dash-review-json-viewed-blob-match-p blob (map-elt info "blob"))
+                    (setf (map-elt agree path) blob))))
+              local))
+    (when (and (hash-table-p local) (hash-table-p synced))
+      (setq unviewed (seq-remove (lambda (path)
+                                   (map-elt local path))
+                                 (map-keys synced))))
+    (when (> (map-length agree) 0)
+      (funcall magit-dash-review-json-code-review-function 'set-viewed key agree))
+    (cond
+     ((not (or (> (map-length agree) 0) unviewed))
+      nil)
+     ((magit-dash-review--blank-p reviewed)
+      (message "magit-dash-review: no head_oid recorded for the review; viewed state not pushed to GitHub"))
+     (t
+      (magit-dash-review--gh-viewed-state
+       (car key) (cdr key) dir account
+       (lambda (pr-id head states truncated)
          (cond
-          ((magit-dash-review--blank-p tid) nil)
-          ((eq (map-elt c "gh_missing") t)
-           (when pending
-             (message "magit-dash-review-submit: thread %s is gone on GitHub; skipping %d repl%s"
-                      tid (length pending) (if (cdr pending) "ies" "y"))))
+          ((not (equal reviewed head))
+           (message "magit-dash-review: PR head moved since the review; viewed state not pushed to GitHub"))
+          (truncated
+           (message "magit-dash-review: %s#%s has more than 100 files; viewed state not pushed to GitHub"
+                    (car key) (cdr key)))
           (t
-           (seq-do (lambda (reply)
-                     (unless failed
-                       (condition-case err
-                           (progn
-                             (magit-dash-review--post-reply c reply dir)
-                             (funcall save))
-                         (error
-                          (setq failed t)
-                          (push (format "reply on %s: %s" tid (error-message-string err))
-                                errors)))))
-                   pending)))))
-     comments)
+           (let ((github-viewed (lambda (path)
+                                  (equal (cdr (assoc path states)) "VIEWED"))))
+             ;; Already as wanted on GitHub: just record it.
+             (seq-do (lambda (path)
+                       (when (funcall github-viewed path)
+                         (magit-dash-review--viewed-synced-set file path (map-elt agree path))))
+                     (map-keys agree))
+             (seq-do (lambda (path)
+                       (unless (funcall github-viewed path)
+                         (magit-dash-review--viewed-synced-set file path nil)))
+                     unviewed)
+             (magit-dash-review--push-viewed
+              pr-id
+              (append
+               (seq-map (lambda (path) (cons path t))
+                        (seq-remove github-viewed (map-keys agree)))
+               (seq-map (lambda (path) (cons path nil))
+                        (seq-filter github-viewed unviewed)))
+              dir account
+              (lambda (path viewed-p)
+                (magit-dash-review--viewed-synced-set
+                 file path (and viewed-p (map-elt agree path))))))))))))))
 
-    ;; 3. Resolution changes that are local intent.
-    (seq-do
-     (lambda (c)
-       (let ((tid (map-elt c "gh_thread_id")))
-         (when (and (not (magit-dash-review--blank-p tid))
-                    (not (eq (map-elt c "gh_missing") t)))
-           (when-let* ((intent (magit-dash-review--resolution-intent c)))
-             (condition-case err
-                 (progn
-                   (magit-dash-review--set-thread-resolution c (eq intent 'resolve) dir)
-                   (funcall save))
-               (error
-                (push (format "%s on %s: %s" intent tid (error-message-string err))
-                      errors)))))))
-     comments)
+(defun magit-dash-review--import-github-viewed (file slug pr-num dir account)
+  "Import GitHub's viewed files of PR-NUM in SLUG into the `viewed' map of FILE.
+Asynchronous, best effort, with the gh ACCOUNT plist.  A file is imported
+only when GitHub's head is the head FILE was made at (which must be known),
+code-review's stored blob for it is known, and that blob matches the blob git
+resolves for the path at the head in DIR.  Marks FILE already has are kept,
+and a file in `viewed_synced' that FILE no longer has was un-viewed on purpose
+and is not imported back."
+  (magit-dash-review--gh-viewed-state
+   slug pr-num dir account
+   (lambda (_pr-id head states _truncated)
+     (let* ((data (magit-dash-review--read-for-write file))
+            (md (map-elt data "magit_dash"))
+            (reviewed (map-elt md "head_oid"))
+            (api (funcall magit-dash-review-json-code-review-function 'viewed (cons slug pr-num)))
+            (local (cond
+                    ((hash-table-p (map-elt data "viewed"))
+                     (map-elt data "viewed"))
+                    (t (make-hash-table :test #'equal))))
+            (synced (cond
+                     ((hash-table-p (map-elt md "viewed_synced"))
+                      (map-elt md "viewed_synced"))
+                     (t (make-hash-table :test #'equal))))
+            (added 0))
+       (cond
+        ((not (and (stringp head) (stringp reviewed) (equal head reviewed)))
+         (message "magit-dash-review: GitHub's head is not a known reviewed head; viewed state not imported"))
+        ((not (hash-table-p api))
+         (message "magit-dash-review: code-review has no stored diff for %s#%s; viewed state not imported" slug pr-num))
+        (t
+         (seq-do (lambda (entry)
+                   (when (and (equal (cdr entry) "VIEWED")
+                              (not (map-elt local (car entry)))
+                              (not (map-elt synced (car entry))))
+                     (let ((blob (magit-dash-review-json-resolve-blob dir head (car entry)))
+                           (theirs (map-elt (map-elt api (car entry)) "blob")))
+                       (when (magit-dash-review-json-viewed-blob-match-p blob theirs)
+                         (setf (map-elt local (car entry)) blob)
+                         (setf (map-elt synced (car entry)) blob)
+                         (setq added (1+ added))))))
+                 states)
+         (when (> added 0)
+           (setf (map-elt data "viewed") local)
+           (setf (map-elt md "viewed_synced") synced)
+           (magit-dash-review--write-json-file file data)
+           (magit-dash-review--refresh-visiting-buffer file))))))))
 
-    (funcall save)
-    (magit-dash-review--refresh-visiting-buffer file)
-    (when errors
-      (error "Submit incomplete, %d error(s); what was sent is saved, resubmit to retry: %s"
-             (length errors) (string-join (nreverse errors) "; ")))
-    file))
+(defun magit-dash-review--maybe-import-viewed (file slug pr-num dir)
+  "Import GitHub's viewed state into FILE when the code-review path is enabled.
+Needs a configured gh account for SLUG (the review's own).  Never signals: a
+failure messages."
+  (when (and magit-dash-review-submit-via-code-review magit-dash-review-sync-viewed)
+    (condition-case err
+        (if-let* ((account (magit-dash-review--cr-account dir slug)))
+            (magit-dash-review--import-github-viewed file slug pr-num dir account)
+          (message "magit-dash-review: no gh account configured for %s; viewed state not imported" slug))
+      (error
+       (message "magit-dash-review: viewed import failed: %s" (error-message-string err))))))
 
 ;;; Agent Remediation, ASW/ASQ Dispatch, Hunk Critique, and Draft Promotion
 

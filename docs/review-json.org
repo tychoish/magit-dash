@@ -46,6 +46,8 @@ All optional.
 | Where                    | Key                   | Type / meaning                                                       |
 |--------------------------+-----------------------+----------------------------------------------------------------------|
 | top level                | =code_review=         | Object: =pullreq_id= (string), =account=, =analysis=.                |
+| top level                | =submit_pending=      | Written by the code-review submit before sending, under a lock file (=FILE.submit-lock=): =at=, =head=, =baseline= (review and comment ids GitHub already had), =verdict= and =items= (per item =id=, =kind=, =body= text and =hash=, =path=, =line=, =start_line=, =reply_to=, =event=; the review item's body is the summary). An item leaves it only when stamped from a response or definitely failed. While any item is unresolved (not found, not checkable, edited or deleted since, or already imported by a sync) the whole submit refuses and sends nothing, and the legacy path refuses too: an uncertain item is never resent automatically. Items found on GitHub by an exact per-item match are stamped. =M-x magit-dash-review-clear-submit-pending= shows what GitHub has for each item and offers mark sent, discard (resend next submit) or keep. |
+| =magit_dash=             | =viewed_synced=       | Path to blob of the viewed marks known to be on GitHub; a path here that =viewed= lacks was un-viewed locally. Changes only after GitHub confirmed. |
 | =code_review.analysis=   | by path, then by hunk | =rank= (integer), =tags= (strings such as =NO-TEST=), =criteria= (ids). |
 | each comment             | =cr_id=               | Integer; code-review's comment id.                                   |
 | each comment             | =remote_id=           | String; GitHub node id once sent. May differ from =gh_comment_id=.   |
@@ -176,3 +178,25 @@ diff-review parses hunks with =git diff -U0=, whose old-side ranges differ from 
 =M-x magit-dash-review-analysis-refresh= computes analysis explicitly: it exports with analysis in a throwaway =emacs --batch -Q= child (never on the UI thread), then writes =code_review.analysis= with the adapter's writer, replacing any analysis in the file. A second refresh of the same file replaces the running child; =magit-dash-review-analysis-cancel= kills it; =magit-dash-review-analysis-timeout= (default 600 seconds) bounds it. A modified visiting buffer follows =magit-dash-review-json-modified-buffer-action=; with =skip= the file is written, the buffer is not refreshed and the message says so. A corrupt review file (only its backup parses) is never overwritten. Because the child runs with =-Q=, code-review must be on the parent's =load-path= or the setup (database, accounts) must come from =magit-dash-review-analysis-child-init-files=, a list of files loaded with =-l= first; refresh refuses with a =user-error= otherwise.
 
 Caveat: the sidebar is narrow (36 columns by default, =diff-review-sidebar-width=), so a file line with several tags may wrap. The commands are unbound: diff-review's map is third-party.
+
+* Submitting through code-review (experimental)
+
+=magit-dash-review-submit-via-code-review= (default nil) sends the review through =code-review-api-submit= instead of the legacy GraphQL mutations. Caveats:
+
+- It is experimental and off by default.
+- Emacs blocks, and cannot be quit, for up to =magit-dash-review-submit-time-limit= seconds (the whole send, including the lookups before and after). When interactive you confirm first and the file is read again afterwards.
+- An uncertain send (a timeout or 5xx on a create) leaves =submit_pending=. Until =M-x magit-dash-review-clear-submit-pending= resolves it, EVERY submit refuses, including the legacy path: nothing is ever resent automatically. Items found on GitHub by an exact match are stamped; the rest need a human decision.
+- =mark sent= and =discard= in the clear command are trusted human decisions: marking an unposted item sent loses it, discarding a posted one posts it twice (both ask to confirm; the default is keep).
+- After a push a landed comment can show as not found, since GitHub moves its commit and line.
+- Replies need the thread's REST id (=gh_database_id=); sync first. There is no fallback.
+- Do not use code-review's own submit commands on the same PR while a record exists.
+- The lock (=FILE.submit-lock=) is a file lock, not a kernel lock. A live process on this host is never overridden; a lock from another host is only replaced when over an hour old.
+- After a landed review, setting the verdict again (a new state or head) is refused once: the landed review is stamped as what it actually carried, and the new verdict stays pending and is sent by the next submit. New comments after a landed review with the same summary are posted singly, outside a review.
+- A crash in the middle of a send can leave items already stamped in the file but still listed in =submit_pending=. The next submit settles those itself; the clear command lists them as already stamped, and both mark sent and discard are safe for them.
+- The clear command asks for confirmation before discarding an item that was found on GitHub or whose lookup failed; only a positive "not found" (or an already stamped item) is discarded without the second question.
+- The lock is held across the confirmation and token prompts, so an abandoned prompt blocks other instances until it is answered or C-g'd. Delete =FILE.submit-lock= by hand only after confirming that the owning Emacs is gone.
+- Item ids must be unique among the comments of a review file and among its replies.
+- Do not run a submit from another Emacs on the same file while the clear command is prompting: the clear command refuses to apply if the record changed, but the other submit would still have run.
+- After a crash that had already stamped the review, retrying with the same summary is refused once, and a second retry posts the summary again as a COMMENT review: leave the summary empty then.
+- "A verdict set again is sent by the next submit" holds only when the verdict carries a head; a head-less verdict is not resent after the review head moves.
+- A resolve marked on a comment this path just posted is not applied by the submit that posts it, and refuses later submits until =magit-dash-review-sync= has fetched its thread id.
