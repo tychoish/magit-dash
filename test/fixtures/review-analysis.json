@@ -1,0 +1,21 @@
+{
+  "format": "diff-review/1",
+  "root": "/tmp/wt/pr-1/",
+  "base": "main",
+  "head": "feature/login",
+  "viewed": {},
+  "comments": [],
+  "magit_dash": {"repo": "o/r", "number": 1},
+  "code_review": {
+    "analysis": {
+      "src/a.ts": {
+        "-1,3 +1,4": {"rank": 2, "tags": ["NO-TEST"], "criteria": ["c1", "c2"]},
+        "-20 +21,2": {"rank": 5, "tags": ["CI-GAME", "RISK"], "criteria": []},
+        "-90,2 +99,2": {"rank": 1, "tags": [], "criteria": []}
+      },
+      "src/b.ts": {
+        "-5,1 +5,0": {"rank": 3, "tags": [], "criteria": ["c9"]}
+      }
+    }
+  }
+}
