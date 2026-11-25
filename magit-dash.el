@@ -49,6 +49,7 @@
 (require 'magit-dash-stack)
 (require 'magit-dash-update)
 (require 'magit-dash-pr)
+(require 'magit-dash-pr-cache)
 (require 'magit-dash-pr-status)
 (require 'magit-dash-gh)
 (require 'magit-dash-open)
@@ -1309,6 +1310,7 @@ Returns a plist with keys :branch :remote-origin :behind :ahead :dirty
                       :fetch-age (magit-dash--fetch-age path)
                       :updated-age (magit-dash--commit-timestamp-to-age commit-ts)
                       :head-hash (magit-dash--head-hash path)
+                      :fetched-at (float-time)
                       :recent-log recent-log)))
     (magit-dash-gh--cache-set path :stats stats)
     stats))
@@ -1360,6 +1362,7 @@ accumulating their outputs before assembling the stats plist."
                                     :fetch-age (magit-dash--fetch-age path)
                                     :updated-age (magit-dash--commit-timestamp-to-age commit-ts)
                                     :head-hash (magit-dash--head-hash path)
+                                    :fetched-at (float-time)
                                     :recent-log recent-log)))
                   (magit-dash-gh--cache-set-if-current path :stats stats token)
                   (funcall callback stats))
@@ -3043,6 +3046,32 @@ Registers command abbreviations and adjusts idle delay."
   (add-hook 'kill-buffer-hook #'magit-dash--which-key-sync-timer nil t)
   (magit-dash--which-key-setup))
 
+(defun magit-dash--row-stale-p (stats &optional now)
+  "Return non-nil when the repo row backed by STATS should be dimmed.
+STATS is a stats plist whose `:fetched-at' records the last refresh.
+Staleness uses `magit-dash-pr-cache-stale-p' and its threshold.  Unlike
+PR records, stats with no `:fetched-at' (placeholders for rows whose
+first load is pending, or missing submodules) are treated as fresh so a
+row just built is never dimmed.  A `:fetched-at' in the future is fresh.
+
+Dimming means \"old, press refresh\".  A stale row whose HEAD is unchanged
+is not auto-refreshed, and staleness is only evaluated when a row is
+rebuilt (`magit-dash--build-entry'), not on a timer."
+  (and (numberp (plist-get stats :fetched-at))
+       (magit-dash-pr-cache-stale-p stats now)))
+
+(defun magit-dash--dim-cells (cells)
+  "Return a copy of the vector CELLS with `magit-dash-stale' added to each string."
+  (seq-into
+   (seq-map (lambda (cell)
+              (if (stringp cell)
+                  (let ((copy (copy-sequence cell)))
+                    (add-face-text-property 0 (length copy) 'magit-dash-stale t copy)
+                    copy)
+                cell))
+            cells)
+   'vector))
+
 (defun magit-dash--build-entry (repo)
   "Return a `tabulated-list-entries' entry for REPO using enabled columns.
 Uses cached stats without blocking; stale or absent stats show as placeholders
@@ -3050,7 +3079,11 @@ until `magit-dash--populate-stats-async' updates them."
   (let* ((stats (magit-dash--get-stats-fast repo))
          (active (magit-dash--active-columns)))
     (list repo
-          (apply #'vector
+          (funcall
+           (if (magit-dash--row-stale-p stats)
+               #'magit-dash--dim-cells
+             #'identity)
+           (apply #'vector
                  (seq-map
                   (lambda (col)
                     (pcase col
@@ -3134,7 +3167,7 @@ until `magit-dash--populate-stats-async' updates them."
                            (if ci-status
                                (magit-dash-gh-ci--format-status ci-status)
                              (propertize "?" 'face 'shadow)))))))
-                  active)))))
+                  active))))))
 
 (defun magit-dash--update-entry (repo)
   "Rebuild the dashboard row for REPO from the current cache and re-render."

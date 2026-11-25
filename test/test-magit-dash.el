@@ -13,7 +13,131 @@
 (require 'map)
 (require 'magit-dash)
 (require 'magit-dash-pr)
+(require 'magit-dash-pr-cache)
 (require 'magit-dash-global)
+
+;;;; stale row dimming
+
+(ert-deftest magit-dash/row-stale-p-thresholds ()
+  "Old rows are stale; fresh, future-dated, and unrecorded rows are not."
+  (let ((now 1000000.0)
+        (limit (magit-dash-pr-cache-stale-seconds)))
+    (should (magit-dash--row-stale-p (list :fetched-at (- now limit 1)) now))
+    (should-not (magit-dash--row-stale-p (list :fetched-at (- now 5)) now))
+    (should-not (magit-dash--row-stale-p (list :fetched-at (+ now 9999)) now))
+    (should-not (magit-dash--row-stale-p (list :branch "…") now))))
+
+(ert-deftest magit-dash/dim-cells-applies-stale-face ()
+  "Dimming adds `magit-dash-stale' to string cells without mutating inputs."
+  (let* ((orig (propertize "x" 'face 'bold))
+         (out (magit-dash--dim-cells (vector orig 3)))
+         (face (flatten-tree (get-text-property 0 'face (aref out 0)))))
+    (should (memq 'magit-dash-stale face))
+    (should (memq 'bold face))
+    (should (equal 'bold (get-text-property 0 'face orig)))
+    (should (= 3 (aref out 1)))))
+
+(ert-deftest magit-dash/build-entry-dims-only-stale-rows ()
+  "build-entry dims a stale fixture row and leaves fresh/future rows alone."
+  (let ((repo (magit-dash-repo--make :name "r" :path "/tmp/stale-fixture-r"))
+        (limit (magit-dash-pr-cache-stale-seconds))
+        (stats nil))
+    (cl-letf (((symbol-function 'magit-dash--get-stats-fast)
+               (lambda (_r) stats)))
+      (let ((dimmed-p (lambda (s)
+                        (setq stats s)
+                        (let ((cell (aref (cadr (magit-dash--build-entry repo)) 0)))
+                          (memq 'magit-dash-stale
+                                (flatten-tree (get-text-property 0 'face cell)))))))
+        (should (funcall dimmed-p (list :branch "m" :fetched-at (- (float-time) limit 60))))
+        (should-not (funcall dimmed-p (list :branch "m" :fetched-at (float-time))))
+        (should-not (funcall dimmed-p (list :branch "m" :fetched-at (+ (float-time) 99999))))
+        (should-not (funcall dimmed-p (list :branch "m")))))))
+
+;;;; stale row dimming: :fetched-at and stacking
+
+(defun magit-dash-test--face-count (str face)
+  "Count FACE occurrences across all face segments of STR."
+  (let ((pos 0)
+        (total 0))
+    (while pos
+      (let ((next (next-single-property-change pos 'face str)))
+        (setq total (+ total
+                       (length (seq-filter
+                                (lambda (f) (eq f face))
+                                (flatten-tree (get-text-property pos 'face str))))))
+        (setq pos next)))
+    total))
+
+(ert-deftest magit-dash/collect-stats-sets-fetched-at ()
+  "Synchronous collect-stats records :fetched-at as the current time."
+  (let ((repo (magit-dash-repo--make :name "test" :path "/tmp/test"))
+        (before (float-time)))
+    (cl-letf (((symbol-function 'magit-git-string) (lambda (&rest _) nil))
+              ((symbol-function 'magit-git-lines) (lambda (&rest _) nil))
+              ((symbol-function 'magit-dash--fetch-age) (lambda (_) nil))
+              ((symbol-function 'magit-dash--head-hash) (lambda (_) "abc")))
+      (let* ((magit-dash--stats-cache (make-hash-table :test #'equal))
+             (stats (magit-dash--collect-stats repo)))
+        (should (numberp (plist-get stats :fetched-at)))
+        (should (>= (plist-get stats :fetched-at) before))
+        (should (<= (plist-get stats :fetched-at) (float-time)))))))
+
+(ert-deftest magit-dash/collect-stats-async-sets-fetched-at ()
+  "Asynchronous collect-stats records :fetched-at when the callback fires."
+  (let ((repo (magit-dash-repo--make :name "test" :path "/tmp/test"))
+        (before (float-time))
+        (result nil))
+    (cl-letf (((symbol-function 'magit-dash-gh--cache-request) (lambda (&rest _) 'tok))
+              ((symbol-function 'magit-dash-gh--cache-set-if-current) #'ignore)
+              ((symbol-function 'magit-dash--run-git)
+               (lambda (_path _args on-success &optional _on-error)
+                 (funcall on-success "")))
+              ((symbol-function 'magit-dash--fetch-age) (lambda (_) nil))
+              ((symbol-function 'magit-dash--head-hash) (lambda (_) "abc")))
+      (magit-dash--collect-stats-async repo (lambda (stats) (setq result stats)))
+      (should (numberp (plist-get result :fetched-at)))
+      (should (>= (plist-get result :fetched-at) before))
+      (should (<= (plist-get result :fetched-at) (float-time))))))
+
+(ert-deftest magit-dash/reused-stats-keep-original-fetched-at ()
+  "Building rows from a cached stats plist leaves its :fetched-at untouched."
+  (let* ((repo (magit-dash-repo--make :name "r" :path "/tmp/stale-fixture-r"))
+         (old (- (float-time) (magit-dash-pr-cache-stale-seconds) 60))
+         (stats (list :branch "m" :fetched-at old)))
+    (cl-letf (((symbol-function 'magit-dash--get-stats-fast) (lambda (_r) stats)))
+      (magit-dash--build-entry repo)
+      (magit-dash--build-entry repo))
+    (should (= old (plist-get stats :fetched-at)))
+    (should (magit-dash--row-stale-p stats))))
+
+(ert-deftest magit-dash/repeated-rebuild-does-not-stack-stale-face ()
+  "Rebuilding a stale row repeatedly applies `magit-dash-stale' once per cell."
+  (let* ((repo (magit-dash-repo--make :name "r" :path "/tmp/stale-fixture-r"))
+         (stats (list :branch "m"
+                      :fetched-at (- (float-time) (magit-dash-pr-cache-stale-seconds) 60))))
+    (cl-letf (((symbol-function 'magit-dash--get-stats-fast) (lambda (_r) stats))
+              ((symbol-function 'magit-dash--active-columns)
+               (lambda () '(name branch))))
+      (dotimes (_ 3)
+        (let ((cells (cadr (magit-dash--build-entry repo))))
+          (should (= 1 (magit-dash-test--face-count (aref cells 0) 'magit-dash-stale)))
+          (should (= 1 (magit-dash-test--face-count (aref cells 1) 'magit-dash-stale))))))))
+
+(ert-deftest magit-dash/dimming-applies-to-non-first-column ()
+  "A stale row dims non-first columns, and a fresh row does not."
+  (let* ((repo (magit-dash-repo--make :name "r" :path "/tmp/stale-fixture-r"))
+         (stats (list :branch "m" :fetched-at (float-time))))
+    (cl-letf (((symbol-function 'magit-dash--get-stats-fast) (lambda (_r) stats))
+              ((symbol-function 'magit-dash--active-columns)
+               (lambda () '(name branch))))
+      (should (= 0 (magit-dash-test--face-count
+                    (aref (cadr (magit-dash--build-entry repo)) 1) 'magit-dash-stale)))
+      (setq stats (list :branch "m"
+                        :fetched-at (- (float-time)
+                                       (magit-dash-pr-cache-stale-seconds) 60)))
+      (should (= 1 (magit-dash-test--face-count
+                    (aref (cadr (magit-dash--build-entry repo)) 1) 'magit-dash-stale))))))
 
 ;;;; magit-dash-register
 
