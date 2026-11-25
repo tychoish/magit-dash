@@ -162,13 +162,6 @@
                               (map-elt (magit-dash-review-json-export '("owner/repo" . 42)) "comments"))
                      '("sent" "sent" "draft" "pending"))))))
 
-(ert-deftest magit-dash-review-json/default-seam-skips-everything ()
-  "With the default seam (no public code-review API) nothing is written."
-  (let ((magit-dash-review-json-code-review-function #'magit-dash-review-json-code-review-default))
-    (should (equal (magit-dash-review-json-test/counts
-                    (magit-dash-review-json-import (magit-dash-review-json-test/full-table)))
-                   '(:added 0 :updated 0 :skipped 4)))))
-
 (ert-deftest magit-dash-review-json/remote-thread-added-between-imports-appears-once ()
   (magit-dash-review-json-test/with-stub
     (setq magit-dash-review-json-test/source (magit-dash-review-json-test/full-table))
@@ -666,6 +659,509 @@
                      l)
                    remote)))
       (should-not (map-elt merged "gh_reopened")))))
+
+;;; In-memory fake of the code-review API
+
+(defvar magit-dash-review-json-test/fake nil
+  "Fake code-review state: plist :comments (list of plists) :verdict :viewed :analysis :worktree.")
+
+(defun magit-dash-review-json-test/fake-id-p (id)
+  "Return non-nil when ID is a valid draft id."
+  (and (integerp id) (<= (ash 1 44) id) (< id (ash 1 53))))
+
+(defmacro magit-dash-review-json-test/with-fake-api (&rest body)
+  "Run BODY with `code-review-api-*' faked in memory and the default seam."
+  (declare (indent 0))
+  `(let ((magit-dash-review-json-test/fake (list :comments nil :verdict nil :viewed nil :analysis nil :worktree t))
+         (magit-dash-review-json-code-review-function #'magit-dash-review-json-code-review-default)
+         (magit-dash-review-json-source-function (lambda (_key) magit-dash-review-json-test/source))
+         (magit-dash-review-json-test/source nil)
+         (magit-dash-review-json-dry-run nil)
+         (next 1))
+     (cl-letf (((symbol-function 'code-review-api-comments)
+                (lambda (_repo _number)
+                  (copy-tree (plist-get magit-dash-review-json-test/fake :comments))))
+               ((symbol-function 'code-review-api-upsert-comment)
+                (lambda (_repo _number plist &rest keys)
+                  (let* ((id (or (plist-get plist :id)
+                                 (+ (ash 1 44) (setq next (1+ next)))))
+                         (old (seq-find (lambda (c) (equal (plist-get c :id) id))
+                                        (plist-get magit-dash-review-json-test/fake :comments)))
+                         (parent (and (plist-get plist :reply-to)
+                                      (seq-find (lambda (c) (equal (plist-get c :id) (plist-get plist :reply-to)))
+                                                (plist-get magit-dash-review-json-test/fake :comments)))))
+                    (unless (magit-dash-review-json-test/fake-id-p id)
+                      (user-error "bad id"))
+                    (when (and old (not (eq (plist-get old :status) 'draft)))
+                      (user-error "sent comments are read-only"))
+                    (when (and (plist-get plist :reply-to) (not parent))
+                      (user-error "bad reply-to"))
+                    (let ((new (list :id id :remote-id nil
+                                     :path (or (plist-get plist :path) (plist-get parent :path))
+                                     :line (plist-get plist :line) :lines (plist-get plist :lines)
+                                     :side (plist-get plist :side) :body (plist-get plist :body)
+                                     :author (or (plist-get plist :author) "local")
+                                     :at "2026-01-01T00:00:00Z" :status 'draft
+                                     :reply-to (plist-get plist :reply-to) :resolved nil)))
+                      (unless (plist-get new :path)
+                        (user-error "A comment needs a :path"))
+                      (unless (plist-get keys :dry-run)
+                        (plist-put magit-dash-review-json-test/fake :comments
+                                   (append (seq-remove (lambda (c) (equal (plist-get c :id) id))
+                                                       (plist-get magit-dash-review-json-test/fake :comments))
+                                           (list new))))
+                      new))))
+               ((symbol-function 'code-review-api-verdict)
+                (lambda (_repo _number) (plist-get magit-dash-review-json-test/fake :verdict)))
+               ((symbol-function 'code-review-api-set-verdict)
+                (lambda (_repo _number state &optional head &rest keys)
+                  (unless (memq (if (stringp state) (intern state) state) '(approved changes comment nil))
+                    (user-error "bad state"))
+                  (let ((new (and state (list :state (if (stringp state) (intern state) state)
+                                              :head-oid head :at "2026-01-01T00:00:00Z"))))
+                    (unless (plist-get keys :dry-run)
+                      (plist-put magit-dash-review-json-test/fake :verdict new))
+                    new)))
+               ((symbol-function 'code-review-api-viewed)
+                (lambda (_repo _number) (copy-tree (plist-get magit-dash-review-json-test/fake :viewed))))
+               ((symbol-function 'code-review-api-set-viewed)
+                (lambda (_repo _number path blob viewed-p)
+                  (let ((entry (assoc path (plist-get magit-dash-review-json-test/fake :viewed))))
+                    (cond
+                     ((null entry) nil)
+                     ((and blob (not (string-prefix-p blob (plist-get (cdr entry) :blob)))) nil)
+                     ((eq (plist-get (cdr entry) :viewed-p) (and viewed-p t)) :unchanged)
+                     (t (plist-put (cdr entry) :viewed-p (and viewed-p t)) t)))))
+               ((symbol-function 'code-review-api-analysis-available-p)
+                (lambda (_repo _number) (plist-get magit-dash-review-json-test/fake :worktree)))
+               ((symbol-function 'code-review-api-analysis)
+                (lambda (_repo _number) (copy-tree (plist-get magit-dash-review-json-test/fake :analysis)))))
+       ,@body)))
+
+(defun magit-dash-review-json-test/fake-snapshot ()
+  "Return a deep copy of the fake state for comparison."
+  (copy-tree magit-dash-review-json-test/fake t))
+
+(defun magit-dash-review-json-test/draft (id body &optional cr-id)
+  "A local draft comment table with ID and BODY, and CR-ID when given."
+  (let ((c (magit-dash-review-json-test/comment cr-id body)))
+    (setf (map-elt c "id") id)
+    (setf (map-elt c "origin") "agent")
+    c))
+
+(ert-deftest magit-dash-review-json/api-import-export-idempotent-with-cr-id ()
+  "Export, import, export is identical including the derived cr_id."
+  (magit-dash-review-json-test/with-fake-api
+    (setq magit-dash-review-json-test/source
+          (magit-dash-review-json-test/table
+           (magit-dash-review-json-test/draft "d1" "one")
+           (magit-dash-review-json-test/draft "d2" "two")))
+    (let* ((key '("owner/repo" . 42))
+           (first (magit-dash-review-json-export key))
+           (counts (magit-dash-review-json-import first))
+           (second (magit-dash-review-json-export key)))
+      (should (equal (magit-dash-review-json-test/counts counts) '(:added 2 :updated 0 :skipped 0)))
+      (should (seq-every-p (lambda (c) (magit-dash-review-json-test/fake-id-p (map-elt c "cr_id")))
+                           (map-elt first "comments")))
+      (should (= 2 (length (map-elt second "comments"))))
+      (should (equal (magit-dash-review-json-test/plain first)
+                     (magit-dash-review-json-test/plain second)))
+      (should (equal (magit-dash-review-json-test/counts (magit-dash-review-json-import second))
+                     '(:added 0 :updated 0 :skipped 2)))
+      (should (= 2 (length (plist-get magit-dash-review-json-test/fake :comments)))))))
+
+(ert-deftest magit-dash-review-json/api-import-updates-and-maps-plist-shape ()
+  (magit-dash-review-json-test/with-fake-api
+    (let ((table (magit-dash-review-json-test/table (magit-dash-review-json-test/draft "d1" "one"))))
+      (setf (map-elt (aref (map-elt table "comments") 0) "lines") [3 5])
+      (setf (map-elt (aref (map-elt table "comments") 0) "diff_side") "LEFT")
+      (magit-dash-review-json-import table)
+      (let ((stored (car (plist-get magit-dash-review-json-test/fake :comments))))
+        (should (equal "a.el" (plist-get stored :path)))
+        (should (= 5 (plist-get stored :line)))
+        (should (equal '(3 5) (plist-get stored :lines)))
+        (should (equal "LEFT" (plist-get stored :side)))
+        (should (equal "one" (plist-get stored :body))))
+      (setf (map-elt (aref (map-elt table "comments") 0) "body") "edited")
+      (should (equal (magit-dash-review-json-test/counts (magit-dash-review-json-import table))
+                     '(:added 0 :updated 1 :skipped 0)))
+      (should (= 1 (length (plist-get magit-dash-review-json-test/fake :comments))))
+      (should (equal "edited" (plist-get (car (plist-get magit-dash-review-json-test/fake :comments)) :body))))))
+
+(ert-deftest magit-dash-review-json/api-export-maps-comments-replies-and-status ()
+  (magit-dash-review-json-test/with-fake-api
+    (let ((parent (+ (ash 1 40) 5)))
+      (plist-put magit-dash-review-json-test/fake :comments
+                 (list (list :id parent :remote-id "PRRC_x" :path "a.el" :line 7 :lines nil :side "RIGHT"
+                             :body "remote" :author "bob" :at "t0" :status 'sent :reply-to nil :resolved t)
+                       (list :id (+ (ash 1 44) 9) :remote-id nil :path "a.el" :line 7 :lines nil :side nil
+                             :body "my reply" :author "me" :at "t1" :status 'draft :reply-to parent :resolved nil)))
+      (let* ((table (magit-dash-review-json-export '("owner/repo" . 42)))
+             (c (aref (map-elt table "comments") 0)))
+        (should (= 1 (length (map-elt table "comments"))))
+        (should (equal parent (map-elt c "cr_id")))
+        (should (equal "PRRC_x" (map-elt c "remote_id")))
+        (should (equal "sent" (map-elt c "status")))
+        (should (eq t (map-elt c "resolved")))
+        (should (equal [7 7] (map-elt c "lines")))
+        (should (equal "my reply" (map-elt (aref (map-elt c "replies") 0) "body")))))))
+
+(ert-deftest magit-dash-review-json/api-unpublished-reply-on-sent-comment-is-upserted-as-reply ()
+  (magit-dash-review-json-test/with-fake-api
+    (let* ((parent (+ (ash 1 40) 5))
+           (reply (make-hash-table :test #'equal))
+           (comment (magit-dash-review-json-test/comment parent "remote")))
+      (plist-put magit-dash-review-json-test/fake :comments
+                 (list (list :id parent :remote-id "PRRC_x" :path "a.el" :line 3 :body "remote"
+                             :author "bob" :status 'sent)))
+      (setf (map-elt comment "gh_comment_id") "PRRC_x")
+      (setf (map-elt reply "id") "r1")
+      (setf (map-elt reply "author") "me")
+      (setf (map-elt reply "body") "thanks")
+      (setf (map-elt comment "replies") (vector reply))
+      (let ((table (magit-dash-review-json-test/table comment)))
+        (should (equal (magit-dash-review-json-test/counts (magit-dash-review-json-import table))
+                       '(:added 0 :updated 1 :skipped 0)))
+        (let ((stored (plist-get magit-dash-review-json-test/fake :comments)))
+          (should (= 2 (length stored)))
+          (should (equal parent (plist-get (cadr stored) :reply-to))))
+        (should (equal (magit-dash-review-json-test/counts (magit-dash-review-json-import table))
+                       '(:added 0 :updated 0 :skipped 1)))))))
+
+(ert-deftest magit-dash-review-json/api-sent-comment-without-stored-copy-is-skipped ()
+  (magit-dash-review-json-test/with-fake-api
+    (let ((comment (magit-dash-review-json-test/comment nil "from github")))
+      (setf (map-elt comment "gh_thread_id") "T1")
+      (setf (map-elt comment "status") "sent")
+      (should (equal (magit-dash-review-json-test/counts
+                      (magit-dash-review-json-import (magit-dash-review-json-test/table comment)))
+                     '(:added 0 :updated 0 :skipped 1)))
+      (should-not (plist-get magit-dash-review-json-test/fake :comments)))))
+
+(ert-deftest magit-dash-review-json/api-dry-run-leaves-fake-unchanged ()
+  (magit-dash-review-json-test/with-fake-api
+    (setq magit-dash-review-json-test/source
+          (magit-dash-review-json-test/table (magit-dash-review-json-test/draft "d1" "one")))
+    (setf (map-elt magit-dash-review-json-test/source "verdict")
+          (let ((v (make-hash-table :test #'equal)))
+            (setf (map-elt v "state") "approved")
+            (setf (map-elt v "head") "abc")
+            v))
+    (let ((before (magit-dash-review-json-test/fake-snapshot))
+          (result (magit-dash-review-json-import-dry-run '("owner/repo" . 42))))
+      (should (equal (magit-dash-review-json-test/counts result) '(:added 1 :updated 0 :skipped 0)))
+      (should (plist-get result :dry-run))
+      (should (equal before (magit-dash-review-json-test/fake-snapshot)))
+      (should-not magit-dash-review-json-dry-run)
+      (should (equal (magit-dash-review-json-test/counts
+                      (magit-dash-review-json-import (magit-dash-review-json-export '("owner/repo" . 42))))
+                     '(:added 1 :updated 0 :skipped 0)))
+      (should (= 1 (length (plist-get magit-dash-review-json-test/fake :comments))))
+      (should (eq 'approved (plist-get (plist-get magit-dash-review-json-test/fake :verdict) :state))))))
+
+(ert-deftest magit-dash-review-json/api-dry-run-parses-key-string-and-rejects-garbage ()
+  (magit-dash-review-json-test/with-fake-api
+    (setq magit-dash-review-json-test/source (magit-dash-review-json-test/table))
+    (should (= 0 (plist-get (magit-dash-review-json-import-dry-run "owner/repo#42") :added)))
+    (should-error (magit-dash-review-json-import-dry-run "nonsense") :type 'user-error)))
+
+(ert-deftest magit-dash-review-json/api-dry-run-errors-without-review-source ()
+  (magit-dash-review-json-test/with-fake-api
+    (setq magit-dash-review-json-test/source nil)
+    (let ((err (should-error (magit-dash-review-json-import-dry-run '("owner/repo" . 42))
+                             :type 'user-error)))
+      (should (string-match-p "No review file" (cadr err))))))
+
+(ert-deftest magit-dash-review-json/api-dry-run-refuses-seam-without-declared-support ()
+  (let ((writes 0)
+        (magit-dash-review-json-source-function
+         (lambda (_key) (magit-dash-review-json-test/table (magit-dash-review-json-test/draft "d1" "x"))))
+        (magit-dash-review-json-code-review-function
+         (lambda (op &rest _) (when (eq op 'write) (setq writes (1+ writes))) nil)))
+    (should-error (magit-dash-review-json-import-dry-run '("owner/repo" . 42)) :type 'user-error)
+    (should (= 0 writes))
+    (put 'magit-dash-review-json-test/declared-seam 'magit-dash-review-json-dry-run-supported t)
+    (fset 'magit-dash-review-json-test/declared-seam (lambda (&rest _) nil))
+    (unwind-protect
+        (let ((magit-dash-review-json-code-review-function 'magit-dash-review-json-test/declared-seam))
+          (should (plist-get (magit-dash-review-json-import-dry-run '("owner/repo" . 42)) :dry-run)))
+      (fmakunbound 'magit-dash-review-json-test/declared-seam))))
+
+(ert-deftest magit-dash-review-json/api-import-refuses-idless-drafts ()
+  (magit-dash-review-json-test/with-fake-api
+    (let ((c (magit-dash-review-json-test/comment nil "hand written")))
+      (map-delete c "id")
+      (should (equal (magit-dash-review-json-test/counts
+                      (magit-dash-review-json-import (magit-dash-review-json-test/table c)))
+                     '(:added 0 :updated 0 :skipped 1)))
+      (should-not (plist-get magit-dash-review-json-test/fake :comments))
+      (setq magit-dash-review-json-test/source (magit-dash-review-json-test/table c))
+      (let* ((exported (magit-dash-review-json-export '("owner/repo" . 42)))
+             (stamped (aref (map-elt exported "comments") 0)))
+        (should (stringp (map-elt stamped "id")))
+        (should (magit-dash-review-json-test/fake-id-p (map-elt stamped "cr_id")))
+        (should (equal '(:added 1 :updated 0 :skipped 0)
+                       (magit-dash-review-json-test/counts (magit-dash-review-json-import exported))))))))
+
+(ert-deftest magit-dash-review-json/api-resolved-only-difference-is-unchanged ()
+  (magit-dash-review-json-test/with-fake-api
+    (let ((table (magit-dash-review-json-test/table (magit-dash-review-json-test/draft "d1" "x"))))
+      (magit-dash-review-json-import table)
+      (setf (map-elt (aref (map-elt table "comments") 0) "resolved") t)
+      (should (equal '(:added 0 :updated 0 :skipped 1)
+                     (magit-dash-review-json-test/counts (magit-dash-review-json-import table)))))))
+
+(ert-deftest magit-dash-review-json/api-published-reply-compares-consistently ()
+  (magit-dash-review-json-test/with-fake-api
+    (let* ((parent (+ (ash 1 40) 5))
+           (comment (magit-dash-review-json-test/comment parent "remote"))
+           (published (make-hash-table :test #'equal))
+           (draft (make-hash-table :test #'equal)))
+      (plist-put magit-dash-review-json-test/fake :comments
+                 (list (list :id parent :remote-id "PRRC_x" :path "a.el" :line 3 :body "remote"
+                             :author "bob" :status 'sent)))
+      (setf (map-elt comment "gh_comment_id") "PRRC_x")
+      (setf (map-elt published "gh_comment_id") "PRRC_r")
+      (setf (map-elt published "author") "bob")
+      (setf (map-elt published "body") "already on github")
+      (setf (map-elt comment "replies") (vector published))
+      (let ((table (magit-dash-review-json-test/table comment)))
+        (should (equal '(:added 0 :updated 0 :skipped 1)
+                       (magit-dash-review-json-test/counts (magit-dash-review-json-import table))))
+        (setf (map-elt draft "id") "r1")
+        (setf (map-elt draft "body") "mine")
+        (setf (map-elt comment "replies") (vector published draft))
+        (should (equal '(:added 0 :updated 1 :skipped 0)
+                       (magit-dash-review-json-test/counts (magit-dash-review-json-import table))))
+        (should (equal '(:added 0 :updated 0 :skipped 1)
+                       (magit-dash-review-json-test/counts (magit-dash-review-json-import table))))
+        (should (= 2 (length (plist-get magit-dash-review-json-test/fake :comments))))))))
+
+(ert-deftest magit-dash-review-json/api-origin-github-is-never-stored-as-draft ()
+  (magit-dash-review-json-test/with-fake-api
+    (let ((c (magit-dash-review-json-test/comment nil "from github")))
+      (setf (map-elt c "origin") "github")
+      (should (equal '(:added 0 :updated 0 :skipped 1)
+                     (magit-dash-review-json-test/counts
+                      (magit-dash-review-json-import (magit-dash-review-json-test/table c)))))
+      (should-not (plist-get magit-dash-review-json-test/fake :comments)))))
+
+(ert-deftest magit-dash-review-json/api-import-never-clears-verdict ()
+  (magit-dash-review-json-test/with-fake-api
+    (plist-put magit-dash-review-json-test/fake :verdict
+               (list :state 'approved :head-oid "abc" :at "t"))
+    (let ((table (magit-dash-review-json-test/table))
+          (empty (make-hash-table :test #'equal)))
+      (setf (map-elt table "verdict") empty)
+      (should (= 0 (plist-get (magit-dash-review-json-import table) :verdict-failed)))
+      (should (eq 'approved (plist-get (plist-get magit-dash-review-json-test/fake :verdict) :state)))
+      (setf (map-elt empty "state") "")
+      (magit-dash-review-json-import table)
+      (should (eq 'approved (plist-get (plist-get magit-dash-review-json-test/fake :verdict) :state)))
+      (should-error (funcall magit-dash-review-json-code-review-function 'verdict
+                             '("owner/repo" . 42) empty)
+                    :type 'user-error))))
+
+(ert-deftest magit-dash-review-json/api-op-checks-the-exact-functions-it-calls ()
+  (magit-dash-review-json-test/with-fake-api
+    (fmakunbound 'code-review-api-analysis-available-p)
+    (let ((start (with-current-buffer (get-buffer-create "*Messages*") (point-max)))
+          (message-log-max t))
+      (should-not (funcall magit-dash-review-json-code-review-function 'analysis '("owner/repo" . 42)))
+      (should (string-match-p "code-review-api-analysis-available-p is not available"
+                              (with-current-buffer "*Messages*"
+                                (buffer-substring-no-properties start (point-max))))))))
+
+(ert-deftest magit-dash-review-json/api-autoloaded-entry-point-counts-as-available ()
+  (let ((file (make-temp-file "mdrj-autoload-" nil ".el"
+                              ";;; -*- lexical-binding: t -*-\n(defun code-review-api-comments (_r _n) (list (list :id 1 :path \"a\" :body \"b\" :status 'sent)))\n"))
+        (old (and (fboundp 'code-review-api-comments) (symbol-function 'code-review-api-comments))))
+    (unwind-protect
+        (progn
+          (fset 'code-review-api-comments (list 'autoload file nil nil nil))
+          (should (autoloadp (symbol-function 'code-review-api-comments)))
+          (let ((comments (magit-dash-review-json-code-review-default 'comments '("o/r" . 1))))
+            (should (= 1 (length comments)))
+            (should (equal "b" (map-elt (car comments) "body")))))
+      (if old
+          (fset 'code-review-api-comments old)
+        (fmakunbound 'code-review-api-comments))
+      (delete-file file))))
+
+(ert-deftest magit-dash-review-json/api-verdict-round-trip-and-bad-state ()
+  (magit-dash-review-json-test/with-fake-api
+    (let ((table (magit-dash-review-json-test/table))
+          (verdict (make-hash-table :test #'equal)))
+      (setf (map-elt verdict "state") "changes")
+      (setf (map-elt verdict "head") "abc")
+      (setf (map-elt verdict "by") "me")
+      (setf (map-elt table "verdict") verdict)
+      (should (= 0 (plist-get (magit-dash-review-json-import table) :verdict-failed)))
+      (should (equal "changes" (map-elt (funcall magit-dash-review-json-code-review-function
+                                                 'verdict '("owner/repo" . 42))
+                                        "state")))
+      (should (= 0 (plist-get (magit-dash-review-json-import table) :verdict-failed)))
+      (setf (map-elt verdict "state") "bogus")
+      (should (= 1 (plist-get (magit-dash-review-json-import table) :verdict-failed))))))
+
+(ert-deftest magit-dash-review-json/api-viewed-ops-and-blob-agreement ()
+  (magit-dash-review-json-test/with-fake-api
+    (plist-put magit-dash-review-json-test/fake :viewed
+               (list (cons "a.el" (list :blob "1234567abcdef" :viewed-p t))
+                     (cons "b.el" (list :blob "9999999" :viewed-p nil))))
+    (let* ((key '("owner/repo" . 42))
+           (api (funcall magit-dash-review-json-code-review-function 'viewed key))
+           (local (make-hash-table :test #'equal)))
+      (should (eq t (map-elt (map-elt api "a.el") "viewed")))
+      (should (eq :false (map-elt (map-elt api "b.el") "viewed")))
+      (setf (map-elt local "a.el") "1234567abcdef")
+      (setf (map-elt local "b.el") "9999999")
+      (setf (map-elt local "c.el") "0000000")
+      (should (equal '(("a.el" . "1234567abcdef"))
+                     (map-pairs (magit-dash-review-json-viewed-agreement local api))))
+      (setf (map-elt local "a.el") "7654321zzz")
+      (should-not (map-pairs (magit-dash-review-json-viewed-agreement local api)))
+      (setf (map-elt local "a.el") "1234")
+      (should-not (map-pairs (magit-dash-review-json-viewed-agreement local api)))
+      (let ((marks (make-hash-table :test #'equal)))
+        (setf (map-elt marks "a.el") "1234567")
+        (setf (map-elt marks "b.el") "9999999")
+        (setf (map-elt marks "b.el") "0000000")
+        (setf (map-elt marks "z.el") "9999999")
+        (let ((result (funcall magit-dash-review-json-code-review-function 'set-viewed key marks)))
+          (should (equal "unchanged" (map-elt result "a.el")))
+          (should (equal "stale" (map-elt result "b.el")))
+          (should (equal "stale" (map-elt result "z.el"))))
+        (setf (map-elt marks "b.el") "9999999")
+        (should (equal "set" (map-elt (funcall magit-dash-review-json-code-review-function
+                                               'set-viewed key marks)
+                                      "b.el")))))))
+
+(ert-deftest magit-dash-review-json/api-analysis-export-keyed-by-ranges ()
+  (magit-dash-review-json-test/with-fake-api
+    (plist-put magit-dash-review-json-test/fake :analysis
+               '(("a.el" . (("-1,3 +1,4" . (:rank 2 :tags ("NO-TEST") :criteria ("c1")))
+                            ("-10,2 +11,2" . (:rank 1 :tags nil :criteria nil))))))
+    (let* ((key '("owner/repo" . 42))
+           (plain (magit-dash-review-json-export key))
+           (table (magit-dash-review-json-export key t))
+           (hunk (map-nested-elt table '("code_review" "analysis" "a.el" "-1,3 +1,4"))))
+      (should-not (map-nested-elt plain '("code_review" "analysis")))
+      (should (= 2 (map-elt hunk "rank")))
+      (should (equal ["NO-TEST"] (map-elt hunk "tags")))
+      (should (equal ["c1"] (map-elt hunk "criteria")))
+      (should (equal [] (map-nested-elt table '("code_review" "analysis" "a.el" "-10,2 +11,2" "tags"))))
+      (should (json-serialize table :null-object nil :false-object :false)))
+    (plist-put magit-dash-review-json-test/fake :worktree nil)
+    (should-not (map-nested-elt (magit-dash-review-json-export '("owner/repo" . 42) t)
+                                '("code_review" "analysis")))))
+
+(ert-deftest magit-dash-review-json/api-skips-with-message-when-not-available ()
+  (let ((saved (seq-map (lambda (f) (cons f (symbol-function f)))
+                        (seq-filter #'fboundp
+                                    '(code-review-api-comments code-review-api-upsert-comment
+                                      code-review-api-verdict code-review-api-set-verdict
+                                      code-review-api-viewed code-review-api-set-viewed
+                                      code-review-api-analysis code-review-api-analysis-available-p)))))
+    (unwind-protect
+        (let ((start (with-current-buffer (get-buffer-create "*Messages*") (point-max)))
+              (message-log-max t)
+              (magit-dash-review-json-code-review-function #'magit-dash-review-json-code-review-default))
+          (seq-do (lambda (f) (fmakunbound (car f))) saved)
+          (should-not (funcall magit-dash-review-json-code-review-function 'comments '("o/r" . 1)))
+          (should-error (funcall magit-dash-review-json-code-review-function 'write '("o/r" . 1)
+                                 (magit-dash-review-json-test/comment nil "x"))
+                        :type 'user-error)
+          (should (equal (magit-dash-review-json-test/counts
+                          (magit-dash-review-json-import
+                           (magit-dash-review-json-test/table (magit-dash-review-json-test/comment nil "x"))))
+                         '(:added 0 :updated 0 :skipped 1)))
+          (should (string-match-p "skipping comments, code-review-api-comments is not available"
+                                  (with-current-buffer "*Messages*"
+                                    (buffer-substring-no-properties start (point-max))))))
+      (seq-do (lambda (f) (fset (car f) (cdr f))) saved))))
+
+(ert-deftest magit-dash-review-json/api-failing-write-is-skipped-not-raised ()
+  (magit-dash-review-json-test/with-fake-api
+    (let ((c (magit-dash-review-json-test/draft "d1" "x")))
+      (map-delete c "path")
+      (should (equal (magit-dash-review-json-test/counts
+                      (magit-dash-review-json-import (magit-dash-review-json-test/table c)))
+                     '(:added 0 :updated 0 :skipped 1))))))
+
+(ert-deftest magit-dash-review-json/draft-id-is-deterministic-and-in-range ()
+  (let ((a (magit-dash-review-json-test/draft "d1" "one"))
+        (b (magit-dash-review-json-test/draft "d2" "one")))
+    (should (= (magit-dash-review-json-draft-id a) (magit-dash-review-json-draft-id a)))
+    (should-not (= (magit-dash-review-json-draft-id a) (magit-dash-review-json-draft-id b)))
+    (should (magit-dash-review-json-test/fake-id-p (magit-dash-review-json-draft-id a)))
+    (should-not (= (magit-dash-review-json-draft-id a) (magit-dash-review-json-draft-id b a)))))
+
+;;; Worktree resolver
+
+(ert-deftest magit-dash-review-json/resolver-uses-existing-worktree-and-never-creates ()
+  (let ((created nil)
+        (seen nil))
+    (cl-letf (((symbol-function 'magit-dash-pr--find-existing-worktree)
+               (lambda (dir number &rest _) (setq seen (list dir number)) "/tmp/repo/.wt/pr-5/"))
+              ((symbol-function 'magit-dash-pr--create-worktree-for-entry)
+               (lambda (&rest _) (setq created t) nil))
+              ((symbol-function 'yes-or-no-p) (lambda (&rest _) (error "prompted")))
+              ((symbol-function 'y-or-n-p) (lambda (&rest _) (error "prompted")))
+              ((symbol-function 'read-string) (lambda (&rest _) (error "prompted"))))
+      (should (equal "/tmp/repo/.wt/pr-5" (magit-dash-review-worktree-resolver "/tmp/repo/" 5)))
+      (should (equal '("/tmp/repo" 5) seen))
+      (should-not created))))
+
+(ert-deftest magit-dash-review-json/resolver-returns-nil-on-failure-or-no-worktree ()
+  (cl-letf (((symbol-function 'magit-dash-pr--find-existing-worktree)
+             (lambda (&rest _) (error "git exploded"))))
+    (should-not (magit-dash-review-worktree-resolver "/tmp/repo" 5)))
+  (cl-letf (((symbol-function 'magit-dash-pr--find-existing-worktree) (lambda (&rest _) nil)))
+    (should-not (magit-dash-review-worktree-resolver "/tmp/repo" 5))))
+
+(ert-deftest magit-dash-review-json/mirror-flag-stays-off-by-default ()
+  (should-not (default-value 'magit-dash-review-use-code-review-adapter)))
+
+;;; Integration against the real code-review API (skipped without it)
+
+(ert-deftest magit-dash-review-json/real-api-import-dry-run-and-idempotence ()
+  "Run the default seam on a temp closql db; skip only when ~/src/code-review is absent."
+  (let ((dir (expand-file-name "~/src/code-review")))
+    (unless (file-directory-p dir)
+      (ert-skip "~/src/code-review does not exist"))
+    (add-to-list 'load-path dir)
+    (add-to-list 'load-path (expand-file-name "test" dir))
+    (unless (and (locate-library "code-review-api") (locate-library "code-review-test-helpers"))
+      (ert-fail (format "%s exists but code-review-api or its test helpers are missing" dir)))
+    (require 'code-review)
+    (require 'code-review-api)
+    (require 'code-review-test-helpers))
+  (eval
+   '(code-review-test--with-db
+      (code-review-db--pullreq-create
+       (code-review-github-repo :owner "owner" :repo "repo" :number "42"))
+      (let ((pr (code-review-db-get-pullreq)))
+        (oset pr saved t)
+        (code-review-db-update pr))
+      (let* ((magit-dash-review-json-code-review-function #'magit-dash-review-json-code-review-default)
+             (magit-dash-review-json-dry-run nil)
+             (source (magit-dash-review-json-test/table
+                      (magit-dash-review-json-test/draft "d1" "one")))
+             (magit-dash-review-json-source-function (lambda (_key) source))
+             (key '("owner/repo" . 42)))
+        (should (= 0 (plist-get (magit-dash-review-json-import-dry-run key) :skipped)))
+        (should-not (code-review-api-comments "owner/repo" 42))
+        (let* ((first (magit-dash-review-json-export key))
+               (counts (magit-dash-review-json-import first))
+               (second (magit-dash-review-json-export key)))
+          (should (equal (magit-dash-review-json-test/counts counts) '(:added 1 :updated 0 :skipped 0)))
+          (should (equal (magit-dash-review-json-test/plain first)
+                         (magit-dash-review-json-test/plain second)))
+          (should (= 1 (length (code-review-api-comments "owner/repo" 42))))
+          (should (equal (magit-dash-review-json-test/counts (magit-dash-review-json-import second))
+                         '(:added 0 :updated 0 :skipped 1))))))
+   t))
 
 (provide 'test-magit-dash-review-json)
 ;;; test-magit-dash-review-json.el ends here

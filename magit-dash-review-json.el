@@ -13,10 +13,10 @@
 ;; - `magit-dash-review-json-merge' and `-transcode-thread' hold the
 ;;   GitHub thread merge that used to live in magit-dash-review.el.
 ;;
-;; code-review has no supported data API for reading or writing comments
-;; (the audit is in docs/review-json.org), so every call into it goes through
-;; one overridable seam, `magit-dash-review-json-code-review-function'.
-;; This file never touches closql objects.
+;; Every call into code-review goes through one overridable seam,
+;; `magit-dash-review-json-code-review-function', whose default implements
+;; the ops on code-review's public `code-review-api-*' functions (the audit
+;; is in docs/review-json.org).  This file never touches closql objects.
 
 ;;; Code:
 
@@ -28,6 +28,14 @@
 (declare-function magit-dash-review-file "magit-dash-review" (root pr-number &optional repo))
 (declare-function magit-dash-worktree-main-dir "magit-dash-worktree" (&optional directory))
 (declare-function diff-review-refresh "diff-review" ())
+(declare-function code-review-api-comments "code-review-api" (repo number))
+(declare-function code-review-api-upsert-comment "code-review-api" (repo number plist &key dry-run))
+(declare-function code-review-api-verdict "code-review-api" (repo number))
+(declare-function code-review-api-set-verdict "code-review-api" (repo number state &optional head-oid &key dry-run))
+(declare-function code-review-api-viewed "code-review-api-viewed" (repo number))
+(declare-function code-review-api-set-viewed "code-review-api-viewed" (repo number path blob viewed-p))
+(declare-function code-review-api-analysis "code-review-api-analysis" (repo number))
+(declare-function code-review-api-analysis-available-p "code-review-api-analysis" (repo number))
 
 (defgroup magit-dash-review-json nil
   "diff-review/1 JSON adapter for code-review."
@@ -39,18 +47,34 @@
 Called as (FUNCTION OP PR-KEY &optional ARG) where PR-KEY is (REPO . NUMBER)
 and OP is one of:
   `comments'  return code-review's comments as a list of tables shaped
-              like diff-review/1 comments (id, path, lines, author, at,
+              like diff-review/1 comments (path, lines, author, at,
               body, resolved, replies, cr_id, remote_id, status).
   `pullreq'   return a table with pullreq_id, account and analysis, or nil.
   `write'     store the comment table ARG; return the stored table (with
-              cr_id and status set), or signal an error.
+              cr_id set), or nil when nothing could be stored (skipped),
+              or signal an error.
   `verdict'   with ARG, store the verdict table ARG and return non-nil or
               signal; without ARG, return the stored verdict table or nil.
+  `viewed'    return a table of path to (blob, viewed) for every file of
+              the stored diff; code-review marks are local only and follow
+              the diff block, so compare blobs yourself (see
+              `magit-dash-review-json-viewed-agreement').
+  `set-viewed' ARG is a table of path to blob; mark each viewed in
+              code-review and return a table of path to `set',
+              `unchanged' or `stale'.
+  `analysis'  return code_review.analysis (path, then @@ ranges text, to
+              rank, tags, criteria), or nil when the engines cannot run.
+              SYNCHRONOUS and potentially SLOW: never call it on the UI
+              thread or in a live daemon.
+While `magit-dash-review-json-dry-run' is non-nil, `write' and `verdict'
+must validate and roll back instead of persisting.
 Tables passed and returned are diff-review/1 JSON values: hash tables
 \(equal test), vectors, strings, numbers, t, nil and :false.  Lists are
 tolerated in what the seam returns: export turns them into vectors.
 `magit-dash-review-json-deep-copy' accepts exactly these shapes.
-The default reports that code-review exposes no supported data API."
+The default calls the `code-review-api-*' functions.  When one is not
+`fboundp' it messages why and returns nil for reads and signals a
+`user-error' for writes, so comments stay drafts."
   :type 'function
   :group 'magit-dash-review-json)
 
@@ -69,13 +93,240 @@ Every other key keeps its local value when the local thread has one.")
 
 ;;; Seam default and source
 
-(defun magit-dash-review-json-code-review-default (op _pr-key &optional arg)
-  "Default `magit-dash-review-json-code-review-function' for OP.
-Reads return nil; writes signal, so comments stay drafts."
+(defvar magit-dash-review-json-dry-run nil
+  "When non-nil the seam validates `write' and `verdict' and rolls back.
+Bound by `magit-dash-review-json-import-dry-run'.  A custom seam must honour
+it and say so with a `magit-dash-review-json-dry-run-supported' symbol
+property, or the command refuses.")
+
+(defun magit-dash-review-json-draft-id (comment &optional parent)
+  "Return the deterministic code-review id for the local COMMENT table, or nil.
+An integer in [2^44, 2^53), the range code-review accepts for drafts, derived
+from COMMENT's id and, for a reply, PARENT's id, so the same comment always
+upserts the same draft: that is what makes export, import, export idempotent.
+Nil when COMMENT (or PARENT) has no id: a comment must carry an id (export
+stamps one) because nothing else identifies it across edits."
+  (let ((parent-id (and parent (magit-dash-review-json-draft-id parent))))
+    (unless (or (magit-dash-review-json--empty-p (map-elt comment "id"))
+                (and parent (not parent-id)))
+      (+ (ash 1 44)
+         (string-to-number
+          (substring (secure-hash 'sha1 (format "cr-draft\0%s\0%s" parent-id (map-elt comment "id")))
+                     0 13)
+          16)))))
+
+(defun magit-dash-review-json--sentish-p (comment)
+  "Return non-nil when COMMENT table belongs to GitHub rather than being a draft."
+  (or (member (map-elt comment "status") '("sent" "pending"))
+      (equal (map-elt comment "origin") "github")
+      (seq-some (lambda (key) (not (magit-dash-review-json--empty-p (map-elt comment key))))
+                '("remote_id" "gh_thread_id" "gh_comment_id"))))
+
+(defun magit-dash-review-json--plist-table (plist)
+  "Return the diff-review/1 comment table for code-review comment PLIST."
+  (let ((table (make-hash-table :test #'equal)))
+    (seq-do (lambda (spec)
+              (when-let* ((value (plist-get plist (cadr spec))))
+                (setf (map-elt table (car spec)) value)))
+            '(("cr_id" :id) ("remote_id" :remote-id) ("path" :path) ("diff_side" :side)
+              ("author" :author) ("at" :at)))
+    (setf (map-elt table "body") (or (plist-get plist :body) ""))
+    (setf (map-elt table "status") (symbol-name (or (plist-get plist :status) 'draft)))
+    (setf (map-elt table "resolved") (if (plist-get plist :resolved) t :false))
+    (when-let* ((line (plist-get plist :line)))
+      (setf (map-elt table "lines")
+            (vector (or (car (plist-get plist :lines)) line) line)))
+    table))
+
+(defun magit-dash-review-json--op-comments (pr-key _arg)
+  "Seam `comments': code-review's comments of PR-KEY as tables, replies nested."
+  (let* ((plists (code-review-api-comments (car pr-key) (cdr pr-key)))
+         (ids (seq-map (lambda (p) (plist-get p :id)) plists))
+         (reply-p (lambda (p) (and (plist-get p :reply-to)
+                                   (member (plist-get p :reply-to) ids)))))
+    (seq-map (lambda (top)
+               (let ((table (magit-dash-review-json--plist-table top)))
+                 (setf (map-elt table "replies")
+                       (vconcat
+                        (thread-last plists
+                                     (seq-filter (lambda (p)
+                                                   (and (funcall reply-p p)
+                                                        (equal (plist-get p :reply-to)
+                                                               (plist-get top :id)))))
+                                     (seq-map #'magit-dash-review-json--plist-table))))
+                 table))
+             (seq-remove reply-p plists))))
+
+(defun magit-dash-review-json--op-write (pr-key comment)
+  "Seam `write': store COMMENT table for PR-KEY, return the stored table or nil.
+A local draft is upserted under its cr_id, else its derived draft id; a
+draft with neither (no id) signals `user-error' and is counted skipped.
+A comment GitHub owns is read-only in code-review: only its unpublished
+replies are upserted, as replies to its cr_id; nil when nothing was stored.
+Replies to a draft are not supported by code-review and are ignored.  Reply
+ids are derived from the reply and parent ids and not written back.  The
+resolved flag is read-only in code-review and never written."
+  (let ((repo (car pr-key))
+        (number (cdr pr-key)))
+    (cond
+     ((and (not (magit-dash-review-json--sentish-p comment))
+           (not (map-elt comment "cr_id"))
+           (not (magit-dash-review-json-draft-id comment)))
+      (user-error "Comment on %s has no id, so it cannot be stored under a stable id"
+                  (or (map-elt comment "path") "the review")))
+     ((not (magit-dash-review-json--sentish-p comment))
+      (let ((lines (append (map-elt comment "lines") nil)))
+        (magit-dash-review-json--plist-table
+         (code-review-api-upsert-comment
+          repo number
+          (append (list :id (or (map-elt comment "cr_id") (magit-dash-review-json-draft-id comment))
+                        :path (map-elt comment "path")
+                        :line (cadr lines)
+                        :lines (and (cadr lines) (< (car lines) (cadr lines)) lines)
+                        :body (map-elt comment "body"))
+                  (when-let* ((side (map-elt comment "diff_side")))
+                    (list :side side))
+                  (when-let* ((author (map-elt comment "author")))
+                    (list :author author)))
+          :dry-run magit-dash-review-json-dry-run))))
+     ((null (map-elt comment "cr_id"))
+      (message "magit-dash-review-json: %s has no cr_id in code-review; not stored"
+               (or (map-elt comment "gh_thread_id") (map-elt comment "id")))
+      nil)
+     (t
+      (let ((stored (seq-keep
+                     (lambda (reply)
+                       (when (magit-dash-review-json--empty-p (map-elt reply "gh_comment_id"))
+                         (code-review-api-upsert-comment
+                          repo number
+                          (list :id (or (map-elt reply "cr_id")
+                                        (magit-dash-review-json-draft-id reply comment)
+                                        (user-error "Reply to %s has no id" (map-elt comment "cr_id")))
+                                :reply-to (map-elt comment "cr_id")
+                                :path (map-elt comment "path")
+                                :body (map-elt reply "body")
+                                :author (map-elt reply "author"))
+                          :dry-run magit-dash-review-json-dry-run)))
+                     (append (map-elt comment "replies") nil))))
+        (when stored
+          (let ((copy (magit-dash-review-json-deep-copy comment)))
+            (setf (map-elt copy "cr_id") (map-elt comment "cr_id"))
+            copy)))))))
+
+(defun magit-dash-review-json--op-verdict (pr-key verdict)
+  "Seam `verdict': read the stored verdict of PR-KEY, or store VERDICT.
+Only state and head are stored; by, at and the submitted_* stamps stay in the
+file.  Return the verdict table, or nil when none."
   (cond
-   ((memq op '(comments pullreq)) nil)
-   ((and (eq op 'verdict) (null arg)) nil)
-   (t (error "code-review has no supported data API to %s; set `magit-dash-review-json-code-review-function'" op))))
+   ((and verdict (magit-dash-review-json--empty-p (map-elt verdict "state")))
+    (user-error "Refusing to clear code-review's verdict: verdict has no state"))
+   (verdict
+    (code-review-api-set-verdict (car pr-key) (cdr pr-key)
+                                 (map-elt verdict "state") (map-elt verdict "head")
+                                 :dry-run magit-dash-review-json-dry-run))
+   (t
+    (when-let* ((stored (code-review-api-verdict (car pr-key) (cdr pr-key)))
+                (table (make-hash-table :test #'equal)))
+      (setf (map-elt table "state") (symbol-name (plist-get stored :state)))
+      (when-let* ((head (plist-get stored :head-oid)))
+        (setf (map-elt table "head") head))
+      (when-let* ((at (plist-get stored :at)))
+        (setf (map-elt table "at") at))
+      table))))
+
+(defun magit-dash-review-json--op-viewed (pr-key _arg)
+  "Seam `viewed': table of path to (blob, viewed) from code-review for PR-KEY."
+  (let ((table (make-hash-table :test #'equal)))
+    (seq-do (lambda (entry)
+              (let ((info (make-hash-table :test #'equal)))
+                (when-let* ((blob (plist-get (cdr entry) :blob)))
+                  (setf (map-elt info "blob") blob))
+                (setf (map-elt info "viewed") (if (plist-get (cdr entry) :viewed-p) t :false))
+                (setf (map-elt table (car entry)) info)))
+            (code-review-api-viewed (car pr-key) (cdr pr-key)))
+    table))
+
+(defun magit-dash-review-json--op-set-viewed (pr-key marks)
+  "Seam `set-viewed': mark the paths of MARKS (path to blob) viewed for PR-KEY.
+Return a table of path to \"set\", \"unchanged\" or \"stale\" (unknown path or
+blob mismatch).  These marks are local to code-review: its GitHub seeding can
+overwrite them on the next fetch."
+  (let ((result (make-hash-table :test #'equal)))
+    (map-do (lambda (path blob)
+              (setf (map-elt result path)
+                    (pcase (code-review-api-set-viewed (car pr-key) (cdr pr-key) path blob t)
+                      ('t "set")
+                      (:unchanged "unchanged")
+                      (_ "stale"))))
+            marks)
+    result))
+
+(defun magit-dash-review-json--op-analysis (pr-key _arg)
+  "Seam `analysis': code_review.analysis for PR-KEY, or nil.
+SYNCHRONOUS and potentially SLOW (worktree-wide git grep and blame): never
+call it on the UI thread or in a live daemon.  Nil, with a message, unless
+`code-review-api-analysis-available-p', since without it the result would
+be partial and look like \"no findings\".  Hunks are keyed by the raw @@
+ranges text, e.g. -1,3 +1,4."
+  (cond
+   ((not (code-review-api-analysis-available-p (car pr-key) (cdr pr-key)))
+    (message "magit-dash-review-json: analysis engines cannot run for %s#%s (no stored diff or worktree)"
+             (car pr-key) (cdr pr-key))
+    nil)
+   (t
+    (let ((table (make-hash-table :test #'equal)))
+      (seq-do (lambda (file)
+                (let ((hunks (make-hash-table :test #'equal)))
+                  (seq-do (lambda (hunk)
+                            (let ((info (make-hash-table :test #'equal)))
+                              (setf (map-elt info "rank") (plist-get (cdr hunk) :rank))
+                              (setf (map-elt info "tags") (vconcat (plist-get (cdr hunk) :tags)))
+                              (setf (map-elt info "criteria") (vconcat (plist-get (cdr hunk) :criteria)))
+                              (setf (map-elt hunks (car hunk)) info)))
+                          (cdr file))
+                  (setf (map-elt table (car file)) hunks)))
+              (code-review-api-analysis (car pr-key) (cdr pr-key)))
+      table))))
+
+(defconst magit-dash-review-json--ops
+  '((comments (code-review-api-comments) magit-dash-review-json--op-comments)
+    (pullreq nil ignore)
+    (write (code-review-api-upsert-comment) magit-dash-review-json--op-write t)
+    (verdict (code-review-api-verdict) magit-dash-review-json--op-verdict)
+    (viewed (code-review-api-viewed) magit-dash-review-json--op-viewed)
+    (set-viewed (code-review-api-set-viewed) magit-dash-review-json--op-set-viewed t)
+    (analysis (code-review-api-analysis-available-p code-review-api-analysis)
+              magit-dash-review-json--op-analysis))
+  "Seam ops: (OP FUNCTIONS HANDLER [WRITE-P]).
+FUNCTIONS are every code-review function HANDLER calls; the op is skipped
+unless each is `fboundp' (an autoload counts, so it loads on first call).
+WRITE-P ops signal when skipped, the others return nil.  A `verdict' with an
+argument needs `code-review-api-set-verdict' instead.  There is no code-review
+API for pullreq_id or account, so `pullreq' is nil.")
+
+(defun magit-dash-review-json-code-review-default (op pr-key &optional arg)
+  "Default `magit-dash-review-json-code-review-function' for OP, PR-KEY and ARG.
+Calls code-review's `code-review-api-*' functions (see
+`magit-dash-review-json--ops').  When a function the op needs is not
+`fboundp' (code-review's API is not loaded and has no autoload), message which
+one and skip: nil for reads, a `user-error' for writes.  It never loads
+anything itself."
+  (let* ((spec (map-elt magit-dash-review-json--ops op))
+         (writing (or (nth 2 spec) (and (eq op 'verdict) arg)))
+         (missing (seq-remove #'fboundp
+                              (if (and (eq op 'verdict) arg)
+                                  '(code-review-api-set-verdict)
+                                (car spec)))))
+    (cond
+     ((null spec)
+      (error "Unknown code-review seam op %s" op))
+     ((null missing)
+      (funcall (nth 1 spec) pr-key arg))
+     (t
+      (message "magit-dash-review-json: skipping %s, %s is not available (code-review API not loaded)"
+               op (mapconcat #'symbol-name missing ", "))
+      (when writing
+        (user-error "code-review API unavailable; cannot %s" op))))))
 
 (defun magit-dash-review-json-default-source (pr-key)
   "Read the review file for PR-KEY from the main worktree of `default-directory'.
@@ -345,6 +596,13 @@ Hash tables are modified in place."
    ((vectorp value) (vconcat (seq-map #'magit-dash-review-json--vectorize-nested value)))
    (t (magit-dash-review-json--vectorize value))))
 
+(defun magit-dash-review-json--read-op (op pr-key)
+  "Call the seam read OP for PR-KEY; message and return nil when it signals."
+  (condition-case err
+      (funcall magit-dash-review-json-code-review-function op pr-key)
+    (error (message "magit-dash-review-json: cannot read %s: %s" op (error-message-string err))
+           nil)))
+
 (defun magit-dash-review-json--comments (table)
   "Return the comments of TABLE as a list."
   (append (or (map-elt table "comments") []) nil))
@@ -370,8 +628,10 @@ Hash tables are modified in place."
 
 (defun magit-dash-review-json-find-match (comment candidates)
   "Return the member of CANDIDATES that is the same thread as COMMENT, or nil.
-Tiers, first hit wins: GitHub node id (remote_id or gh_comment_id), cr_id,
-gh_thread_id, then content hash of path, line and body.  A candidate whose
+Tiers, first hit wins: GitHub node id (remote_id or gh_comment_id), cr_id
+\(also the id `magit-dash-review-json-draft-id' derives for a comment
+without one, in either direction), gh_thread_id, then content hash of path,
+line and body.  A candidate whose
 gh_thread_id differs from COMMENT's never matches.  The hash tier skips
 candidates with origin local or agent unless COMMENT has that origin, so
 locally authored comments are never absorbed by a GitHub thread."
@@ -396,6 +656,13 @@ locally authored comments are never absorbed by a GitHub thread."
                                                      (map-elt cand "gh_comment_id"))))
                        node-ids))
            (lambda (cand) (and cr-id (equal cr-id (map-elt cand "cr_id"))))
+           (lambda (cand)
+             (or (and (not cr-id)
+                      (map-elt cand "cr_id")
+                      (equal (map-elt cand "cr_id") (magit-dash-review-json-draft-id comment)))
+                 (and (not (map-elt cand "cr_id"))
+                      cr-id
+                      (equal cr-id (magit-dash-review-json-draft-id cand)))))
            (lambda (cand)
              (and (not (magit-dash-review-json--empty-p thread-id))
                   (equal thread-id (map-elt cand "gh_thread_id"))))
@@ -633,14 +900,21 @@ of EXISTING-HT and REMOTE-THREADS: mutating it changes neither."
 
 ;;; Export and import
 
-(defun magit-dash-review-json-export (pr-key)
+(defun magit-dash-review-json-export (pr-key &optional with-analysis)
   "Return the diff-review/1 hash table for PR-KEY, (REPO . NUMBER).
 Starts from the review file (`magit-dash-review-json-source-function'),
 then overlays code-review's cr_id, remote_id and status onto matching
 threads (never overwriting local values), appends code-review comments
 with no match, and fills missing code_review keys and the magit_dash repo
 and number from PR-KEY, so the result can be imported.  Never mutates the
-source table."
+source table.  A local draft without an id is stamped one (from its content), and one
+without a cr_id gets the deterministic
+`magit-dash-review-json-draft-id' (and status draft), so import stores it
+under that id and a second export is identical.  The verdict comes from the
+file; code-review's pending verdict fills it only when the file has none.
+With WITH-ANALYSIS, code_review.analysis is filled from the seam `analysis'
+op when the file has none: SYNCHRONOUS and potentially SLOW, never call it
+on the UI thread or in a live daemon."
   (let* ((source (funcall magit-dash-review-json-source-function pr-key))
          (table (if source
                     (magit-dash-review-json-deep-copy source)
@@ -649,6 +923,10 @@ source table."
                   (funcall magit-dash-review-json-code-review-function 'comments pr-key)))
          (pullreq (magit-dash-review-json--vectorize
                    (funcall magit-dash-review-json-code-review-function 'pullreq pr-key)))
+         (verdict (magit-dash-review-json--read-op 'verdict pr-key))
+         (analysis (and with-analysis
+                        (magit-dash-review-json--vectorize
+                         (magit-dash-review-json--read-op 'analysis pr-key))))
          (state (seq-reduce
                  (lambda (acc stored-c)
                    (let ((local-c (magit-dash-review-json-find-match stored-c (car acc))))
@@ -677,8 +955,23 @@ source table."
                  (cons (magit-dash-review-json--comments table) nil)))
          (code-review (or (map-elt table "code_review")
                           (make-hash-table :test #'equal))))
+    (seq-do (lambda (c)
+              (when (and (magit-dash-review-json--empty-p (map-elt c "cr_id"))
+                         (not (magit-dash-review-json--sentish-p c)))
+                (when (magit-dash-review-json--empty-p (map-elt c "id"))
+                  (setf (map-elt c "id")
+                        (magit-dash-review-json-make-id (magit-dash-review-json-content-hash c))))
+                (setf (map-elt c "cr_id") (magit-dash-review-json-draft-id c))
+                (when (magit-dash-review-json--empty-p (map-elt c "status"))
+                  (setf (map-elt c "status") "draft"))))
+            (magit-dash-review-json--comments table))
     (setf (map-elt table "comments")
           (vconcat (magit-dash-review-json--comments table) (nreverse (cdr state))))
+    (when (and (hash-table-p verdict) (not (map-elt table "verdict")))
+      (setf (map-elt table "verdict") (magit-dash-review-json-deep-copy verdict)))
+    (when (and analysis (hash-table-p analysis) (> (map-length analysis) 0)
+               (magit-dash-review-json--empty-p (map-elt code-review "analysis")))
+      (setf (map-elt code-review "analysis") analysis))
     (map-do (lambda (key value)
               (when (magit-dash-review-json--empty-p (map-elt code-review key))
                 (setf (map-elt code-review key) value)))
@@ -704,10 +997,15 @@ source table."
     table))
 
 (defun magit-dash-review-json--reply-content (comment)
-  "Return the (author at body) of each reply of COMMENT as a list."
-  (seq-map (lambda (reply)
-             (list (map-elt reply "author") (map-elt reply "at") (map-elt reply "body")))
-           (map-elt comment "replies")))
+  "Return the bodies of the unpublished replies of COMMENT as a list.
+A reply with a gh_comment_id is on GitHub, where code-review's API lists it as
+its own comment rather than a reply, so only unpublished replies (code-review
+drafts, which have no gh_comment_id) are comparable.  Bodies alone are
+compared: code-review stamps its own author and time on a draft."
+  (thread-last (append (map-elt comment "replies") nil)
+               (seq-filter (lambda (reply)
+                             (magit-dash-review-json--empty-p (map-elt reply "gh_comment_id"))))
+               (seq-map (lambda (reply) (map-elt reply "body")))))
 
 (defun magit-dash-review-json-apply-assigned (table result)
   "Set cr_id on the comments of TABLE that RESULT says code-review numbered.
@@ -726,12 +1024,14 @@ TABLE is a diff-review/1 table with magit_dash repo and number.  Returns
 ALIST holds (INDEX . CR-ID) for each comment of TABLE that has no cr_id but
 is stored in code-review under one; see `magit-dash-review-json-apply-assigned'.
 Comments are matched with `magit-dash-review-json-find-match'.  A comment is
-unchanged, and skipped, when body, resolved state and reply content (author,
-time, body) equal the stored ones; status is ignored because code-review
+unchanged, and skipped, when body and unpublished reply bodies equal the
+stored ones (resolved is read-only in code-review, so never compared); status is ignored because code-review
 assigns it.  A write that signals leaves the comment counted as skipped and
 TABLE untouched, so drafts stay drafts.  The verdict is written only when it
-differs from the stored one; a failed write counts in :verdict-failed.  TABLE
-is never mutated."
+differs from the stored one in state or head; a failed write counts in
+:verdict-failed.  TABLE is never mutated.  With
+`magit-dash-review-json-dry-run' bound non-nil the seam validates and rolls
+back, and the result carries :dry-run t."
   (let* ((pr-key (or (magit-dash-review-json-pr-key table)
                      (user-error "Review JSON has no magit_dash repo and number")))
          (fn magit-dash-review-json-code-review-function)
@@ -750,8 +1050,6 @@ is never mutated."
               (kind (cond
                      ((null match) :added)
                      ((and (equal (map-elt comment "body") (map-elt match "body"))
-                           (eq (eq (map-elt comment "resolved") t)
-                               (eq (map-elt match "resolved") t))
                            (equal (magit-dash-review-json--reply-content comment)
                                   (magit-dash-review-json--reply-content match)))
                       nil)
@@ -772,17 +1070,79 @@ is never mutated."
            (push (cons index cr-id) assigned))
          (setq remaining (seq-remove (lambda (c) (eq c match)) remaining))))
      (magit-dash-review-json--comments table))
-    (when-let* ((verdict (map-elt table "verdict")))
+    (when-let* ((verdict (map-elt table "verdict"))
+                ((not (magit-dash-review-json--empty-p (map-elt verdict "state")))))
       (condition-case err
           (let ((current (funcall fn 'verdict pr-key)))
             (unless (and current
-                         (= (map-length verdict) (map-length current))
-                         (map-every-p (lambda (k v) (equal v (map-elt current k))) verdict))
+                         (equal (map-elt verdict "state") (map-elt current "state"))
+                         (equal (map-elt verdict "head") (map-elt current "head")))
               (unless (funcall fn 'verdict pr-key verdict)
                 (error "verdict write returned nil"))))
         (error (message "magit-dash-review-json: %s" (error-message-string err))
                (setq counts (plist-put counts :verdict-failed 1)))))
-    (plist-put counts :assigned (nreverse assigned))))
+    (plist-put counts :assigned (nreverse assigned))
+    (when magit-dash-review-json-dry-run
+      (plist-put counts :dry-run t))
+    counts))
+
+(defun magit-dash-review-json-import-dry-run (pr-key)
+  "Run the code-review import for PR-KEY without persisting, and report it.
+PR-KEY is (REPO . NUMBER) or the string \"owner/repo#N\".  The table is the
+review file from `magit-dash-review-json-source-function' (read from the main
+worktree of `default-directory'), which is what the mirror imports after it
+merges GitHub state into it; the merge itself is not run.  Signal a
+`user-error' when there is no such file, rather than reporting an empty
+import.  The seam validates each write inside a rolled back transaction
+\(`magit-dash-review-json-dry-run'); a seam other than the default must have a
+non-nil `magit-dash-review-json-dry-run-supported' symbol property or the
+command refuses, since it would really write.  Message what would be added,
+updated and skipped (skipped includes writes code-review would refuse, each
+with its own message), and return the import result plist."
+  (interactive (list (read-string "PR (owner/repo#N): ")))
+  (let* ((key (cond
+               ((consp pr-key) pr-key)
+               ((string-match "\\`\\(.+\\)#\\([0-9]+\\)\\'" pr-key)
+                (cons (match-string 1 pr-key) (string-to-number (match-string 2 pr-key))))
+               (t (user-error "Expected owner/repo#N, got %S" pr-key))))
+         (source (funcall magit-dash-review-json-source-function key))
+         (result nil))
+    (unless (or (eq magit-dash-review-json-code-review-function
+                    #'magit-dash-review-json-code-review-default)
+                (and (symbolp magit-dash-review-json-code-review-function)
+                     (get magit-dash-review-json-code-review-function
+                          'magit-dash-review-json-dry-run-supported)))
+      (user-error "`magit-dash-review-json-code-review-function' does not declare dry-run support"))
+    (unless source
+      (user-error "No review file for %s#%s from %s (run from the PR's repository)"
+                  (car key) (cdr key) default-directory))
+    (setq result (let ((magit-dash-review-json-dry-run t))
+                   (magit-dash-review-json-import source)))
+    (message "Import dry run for %s#%s: would add %d, update %d, skip %d, verdict failed %d; nothing written"
+             (car key) (cdr key) (plist-get result :added) (plist-get result :updated)
+             (plist-get result :skipped) (plist-get result :verdict-failed))
+    result))
+
+(defun magit-dash-review-json-viewed-agreement (local api)
+  "Return the entries of LOCAL that code-review's API also marks viewed.
+LOCAL is the diff-review viewed table (path to blob); API is the seam
+`viewed' table.  An entry counts only when API says viewed and the blobs
+match (prefix match, at least 7 characters, since code-review stores the
+index line's abbreviated hash): code-review marks follow the diff block, not
+the blob, so its own viewed flag alone is not trusted.  API marks are local
+to code-review, never pushed to GitHub."
+  (let ((agreed (make-hash-table :test #'equal)))
+    (map-do (lambda (path blob)
+              (let* ((info (map-elt api path))
+                     (theirs (and info (map-elt info "blob"))))
+                (when (and info
+                           (eq (map-elt info "viewed") t)
+                           (stringp blob) (stringp theirs)
+                           (>= (min (length blob) (length theirs)) 7)
+                           (or (string-prefix-p theirs blob) (string-prefix-p blob theirs)))
+                  (setf (map-elt agreed path) blob))))
+            local)
+    agreed))
 
 (provide 'magit-dash-review-json)
 ;;; magit-dash-review-json.el ends here

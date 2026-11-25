@@ -53,7 +53,7 @@ All optional.
 
 =pullreq_id= is the chosen spelling (snake_case, like every other JSON key). =cr_id= is an integer while =remote_id= and =pullreq_id= are strings.
 
-Proposed convention, to be confirmed by the json-adapter task: the hunk key under =code_review.analysis.<path>= is the zero-based hunk index as a string (="0"=, ="1"=, ...).
+Hunk key convention (confirmed against code-review): the key under =code_review.analysis.<path>= is the raw =@@= ranges text of the hunk header, for example ="-1,3 +1,4"=, not an index. It matches code-review's own hunk keys for ordinary =@@= headers; combined =@@@= hunks are omitted. Each value is ={"rank": N, "tags": [...], "criteria": [...]}=.
 
 Distinct from the core =resolved= flag, =gh_resolved= records GitHub's state and =resolved= may be changed locally, so they can differ.
 
@@ -90,12 +90,20 @@ Implemented by the json-adapter task in =magit-dash-review-json.el=. =magit-dash
 ** Export and import
 
 - =magit-dash-review-json-export= =(REPO . NUMBER)= reads the review file (=magit-dash-review-json-source-function=), deep-copies it, and overlays code-review's =cr_id= and =remote_id= onto matching threads only where the file has none; =status= from the seam wins whenever it is non-empty and different, so a comment the seam reports =sent= is never left as =draft=. Code-review comments with no match are appended with =origin= =code-review=. Missing =code_review= keys (=pullreq_id=, =account=, =analysis=) are filled from code-review. Replies, resolved state, verdict and viewed always come from the file.
-- =magit-dash-review-json-import= TABLE mirrors comments and the verdict into code-review and returns =(:added N :updated N :skipped N :verdict-failed N :assigned ALIST)=. Unchanged comments (same body, resolved state and reply content: author, time, body) are skipped, so a second import is a no-op; status is ignored because code-review assigns it. A write that signals (transport failure, or no supported API) counts as skipped and never touches TABLE, so drafts stay drafts. An error from the seam's =comments= read is caught, messaged, and counts every comment as skipped (nothing is written, so nothing is duplicated). The verdict is read through the seam first and written only when it differs; a failed verdict write counts in =:verdict-failed=. TABLE needs =magit_dash.repo= and =number=.
+- =magit-dash-review-json-import= TABLE mirrors comments and the verdict into code-review and returns =(:added N :updated N :skipped N :verdict-failed N :assigned ALIST)=. Unchanged comments (same body and same unpublished reply bodies, see below) are skipped, so a second import is a no-op; status is ignored because code-review assigns it. A write that signals (transport failure, or no supported API) counts as skipped and never touches TABLE, so drafts stay drafts. An error from the seam's =comments= read is caught, messaged, and counts every comment as skipped (nothing is written, so nothing is duplicated). The verdict is read through the seam first and written only when it differs; a failed verdict write counts in =:verdict-failed=. TABLE needs =magit_dash.repo= and =number=.
 - =:assigned= is a list of =(INDEX . CR-ID)= for comments of TABLE that had no =cr_id= but are now stored under one. =magit-dash-review-json-apply-assigned= sets them on TABLE; the mirror (=magit-dash-review--maybe-mirror=) does that and rewrites the review file, so a later edit of an id-less draft updates the stored comment instead of adding a second copy. Import itself never mutates TABLE.
 - Export with no review file (nil source) fills =magit_dash.repo= and =number= from PR-KEY, so its result can be imported. The default source function returns nil, with a message, when the file's =magit_dash.repo= is not the PR-KEY repo, or when reading fails.
 - Seam values are JSON tables: hash tables, vectors, strings, numbers, =t=, =nil=, =:false=. Lists are tolerated in what the seam returns: export converts every non-empty list to a vector, so the exported table always serializes. =magit-dash-review-json-deep-copy= accepts both shapes.
-- Round trip: export, import, export yields identical JSON for tables whose comments already carry =cr_id= (a comment code-review numbers on first write gets its =cr_id= on the next export, or at once in the file when mirrored).
-- Zero-based hunk-index key convention for =code_review.analysis.<path>= is unchanged and still unconfirmed by code, since nothing writes =analysis= yet.
+- Round trip: export, import, export yields identical JSON, including =cr_id=, even on the first export. code-review gives drafts stable ids in [2^44, 2^53) (so they are JSON-safe integers and cannot collide with forge ids) but only keeps a caller-chosen id when the adapter passes =:id=. So export gives every local draft without a =cr_id= the deterministic id =magit-dash-review-json-draft-id= (a hash of the comment =id=, stamping one from the content first when it has none; replies also hash their parent) and status =draft=, and import passes that id to code-review. Matching treats a derived id as a =cr_id= match in both directions, so a draft is never added twice. The old "first export lacks =cr_id=" caveat is gone; a comment that only code-review knows keeps the id code-review minted.
+- =magit-dash-review-json-export= takes an optional WITH-ANALYSIS argument: =code_review.analysis= is filled from the seam =analysis= op only then, because the call is synchronous and can run worktree-wide =git grep= and =git blame=. Never pass it on the UI thread or in the live daemon. Without a stored diff and an existing worktree the seam returns nil (with a message) rather than a partial result that would read as "no findings". The file's own =analysis= is never overwritten.
+- The verdict comes from the file. When the file has none, code-review's pending verdict (=state=, =head=, =at=) fills it. Import writes only =state= and =head= (=by=, =at= and the =submitted_*= stamps stay in the file) and only when state or head differ from the stored one.
+- Reply content compares the bodies of unpublished replies (no =gh_comment_id=) only: code-review stamps its own author and time on a draft, and a published reply is listed by code-review as its own comment, not as a reply. =resolved= is never compared (code-review cannot store it), so a resolved-only difference is unchanged. Import never clears code-review's verdict: a verdict with no =state= is not written.
+- A draft must carry an =id=: import refuses (skips with a message) a draft that has neither =cr_id= nor =id=, because nothing else identifies it across edits. Export stamps an =id= (from the comment's content) on such drafts, so this only affects hand-written JSON imported without export. Reply =cr_id= values are derived from the reply and parent ids and are not written back.
+- The file wins: import overwrites a draft's body with the file's, so an edit made to the same draft in code-review's UI is lost on the next import. A draft already published stays in code-review as a draft (import never deletes; =code-review-api-delete-comment= is unused), so a sent comment can briefly show beside its draft. Pruning such duplicates is a follow-up.
+
+** Dry run
+
+=magit-dash-review-json-import-dry-run= (interactive, takes =owner/repo#N= or =(REPO . NUMBER)=, unbound) imports the review file read by =magit-dash-review-json-source-function= (from the main worktree of =default-directory=) with =magit-dash-review-json-dry-run= bound. That is the table the mirror imports, except that the mirror first merges GitHub state into it and the dry run does not. It signals =user-error= when there is no such file instead of reporting an empty import. The default seam then passes =:dry-run t= to =code-review-api-upsert-comment= and =code-review-api-set-verdict=, which write inside a transaction, validate by reading back, and roll back. The command messages how many comments would be added, updated and skipped (a skip includes a write code-review would refuse, each with its own message: unknown PR, missing path, sent comment) and how many verdict writes would fail, and returns the result plist with =:dry-run t=. Nothing is persisted, so it is the way to check what turning on the mirror would do. A seam other than the default is refused unless its function symbol has a non-nil =magit-dash-review-json-dry-run-supported= property (and then must honour =magit-dash-review-json-dry-run=), since otherwise the "dry run" would write.
 
 ** Submit (=magit-dash-review-submit=, legacy GraphQL path)
 
@@ -112,7 +120,9 @@ Every writer (=append-reply=, draft insertion, =promote-draft=, EARS projection,
 
 ** Flag
 
-=magit-dash-review-use-code-review-adapter= (default nil) makes =magit-dash-review-pr= and =magit-dash-review-sync= import the merged table into code-review. =magit-dash-review-submit= still uses its GraphQL mutations (see Submit); routing it through code-review is the route-submit task.
+=magit-dash-review-use-code-review-adapter= (default nil; whether it should default to on is an open question) makes =magit-dash-review-pr= and =magit-dash-review-sync= import the merged table into code-review and write the assigned =cr_id= values back to the file. The PR must already be in code-review's database. =magit-dash-review-submit= still uses its GraphQL mutations (see Submit); routing it through code-review is the route-submit task. Check the effect first with =magit-dash-review-json-import-dry-run=.
+
+=code-review-worktree-resolver= is not set by this package; set it in your config to =magit-dash-review-worktree-resolver=, called as =(REPO-DIR NUMBER)= with an integer. It returns the existing =pr-N= or =cr-N= worktree from =magit-dash-pr--find-existing-worktree=, or nil on any failure; it never creates a worktree and never prompts. code-review uses the result only when it is a worktree of the same repository whose HEAD is the PR head.
 
 * Encoding
 
@@ -120,29 +130,39 @@ Files are UTF-8: written with =utf-8-unix= and read as =utf-8=, so non-ASCII tex
 
 Parse with =:object-type 'hash-table :array-type 'array :null-object nil :false-object :false=; serialize with the matching =:null-object nil :false-object :false=. Empty =viewed= is ={}=, empty =replies= is =[]=.
 
-* code-review public API audit (json-adapter task)
+* code-review public API
 
-Audited only part of =~/src/code-review=: =code-review-db.el=, =code-review-db-reviewed.el=, =code-review-comment.el=, =code-review-github.el=, =code-review-actions.el=, =code-review-local.el= and =code-review-viewed.el=. Other files were not checked, so a gap below may have an answer there. Only non =--= functions count as public.
+code-review gained a public data API (merged on main of =~/src/code-review=; the old audit found none). The adapter's default seam, =magit-dash-review-json-code-review-default=, calls only these functions. =REPO= is =owner/name= and =NUMBER= the PR number; the PR must already be in code-review's database (open it there once), since no function creates a pullreq record. Each call is guarded at the call site: every code-review function an op calls must be =fboundp= (an autoload counts and loads on first use; the seam never =require=s anything), otherwise the op is skipped with a message naming the missing function (reads return nil, writes signal =user-error=, which import counts as skipped). Declare or autoload the API in your config so it is found.
 
-Public and relevant:
+| Function (library)                                                         | Seam op       | Notes |
+|----------------------------------------------------------------------------+---------------+-------|
+| =code-review-api-comments= REPO NUMBER (=code-review-api=)                 | =comments=    | Plists =:id :remote-id :path :line :lines :side :body :author :at :status :reply-to :resolved=. =:id= is =cr_id=, =:remote-id= is =remote_id=, =:status= is =draft=, =pending= or =sent=, =:side= is =diff_side=, =:lines= is =(START END)= (the JSON =lines= is =[START END]=, =[L L]= for one line). A plist with =:reply-to= becomes an entry of its parent's =replies=. |
+| =code-review-api-upsert-comment= REPO NUMBER PLIST =&key dry-run=          | =write=       | Creates or updates a local draft by =:id=. Ids are integers in [2^44, 2^53), so the adapter must pass =:id=; sent and pending comments are read-only (=user-error=); a draft needs =:path=; =:reply-to= must be a forge comment of the PR; =:resolved=, =:status=, =:remote-id=, =:at= and =:author= (on update) are ignored. Last writer wins against an open review buffer. |
+| =code-review-api-delete-comment= REPO NUMBER ID                            | none          | Not used by the seam yet (import never deletes). |
+| =code-review-api-verdict= / =-set-verdict= REPO NUMBER STATE HEAD =&key dry-run= | =verdict= | Stored in the pullreq record's otherwise unused =review= slot (no schema migration). STATE is =approved=, =changes=, =comment= or nil to clear. =code-review-api-verdict-stale-p= is not used yet. The submit commands do not read it; route-submit must default to it and clear it after a send. |
+| =code-review-api-viewed= / =-set-viewed= (=code-review-api-viewed=)        | =viewed=, =set-viewed= | See Viewed state. |
+| =code-review-api-analysis= and =-available-p= (=code-review-api-analysis=) | =analysis=    | See Analysis. |
 
-| Function | What it gives |
-|----------+---------------|
-| =code-review-db-search= OWNER REPO NUMBER | A closql =code-review-db-pullreq= object (saved, unfinished review). Comments are in its =raw-comments= slot, read only through =oref=, which is closql. |
-| =code-review-db-get-pullreq=, =-get-buffer=, =-get-comment= | Closql objects, resolved through the dynamic variable =code-review-db--pullreq-id=. |
-| =code-review-db-update= OBJ | Writes a closql object back. |
-| =code-review-db-delete-raw-comment= IDENTIFIER | Deletes one raw comment by =internal-id= or =databaseId=. The only public comment mutation. |
-| =code-review-db-all-unfinished=, =-cleanup=, =-local-pr-p= | Listing, cleanup, local-PR predicate. |
-| =code-review-submit-comments=, =-submit-request-changes=, =-submit-lgtm=, =-submit-only-replies=, =code-review-submit-approve= | Interactive send paths for the current review buffer: verdict maps to =COMMENT=, =REQUEST_CHANGES=, =APPROVE=. They need the live review buffer and dynamic db context. |
-| =code-review-send-review=, =-send-replies=, =-new-code-comment=, =-toggle-resolved=, =-update-comment= (generic methods) | Transport through ghub for a pullreq object and prepared submit objects. |
-| =code-review-comment-add=, =-comment-add-or-edit=, =-edit-remote-comment-at-point=, =-viewed-toggle= | Interactive, act at point in the review buffer. |
+No API exists for =pullreq_id= or the account, so the seam op =pullreq= returns nil and export leaves those =code_review= keys to the file. Fields the JSON carries that code-review cannot store: =resolved= (read-only; an import that only changes resolved counts as skipped), =outdated=, =blob=, =gh_*= keys, =origin=, a reply to a draft (code-review only stores replies to forge comments), and verdict =by=, =at= and =submitted_*= (those stay in the file).
 
-Gaps (no supported data API, so the adapter cannot do these without reaching into closql or private functions):
+** Mapping
 
-1. Reading comments as data. Raw comments sit in the =raw-comments= slot of a closql object; there is no accessor that is not =code-review-db--pullreq-raw-comments= (private). A possible but undocumented path exists: =code-review-db-search= returns the pullreq object, =oref= reads =raw-comments=, and =oset= followed by =code-review-db-update= writes it back. The stored format is undocumented, and there is no draft-comment upsert, so the caller would have to build and merge raw comment records itself.
-2. Writing or updating a local (draft) comment programmatically. Local comments are made by =code-review-comment-handler-commit= methods acting on a section object, and stored by private =code-review-db--pullreq-raw-comments-update=, =code-review-comment--save-draft=.
-3. Recording a verdict. There is no stored verdict; the event is an argument of the interactive submit commands.
-4. Reviewed (viewed) state. =code-review-db-reviewed.el= has only =code-review-db--reviewed-*= functions; the only public entry is the interactive =code-review-viewed-toggle=.
-5. =pullreq_id=, account and analysis (criteria, risk rank, test-impact tags) have no data-level accessor either.
+| diff-review/1 comment | code-review plist | Rule |
+|-----------------------+-------------------+------|
+| =cr_id=               | =:id=             | Integer. A local draft without one uses =magit-dash-review-json-draft-id=. |
+| =remote_id=           | =:remote-id=      | Read only. |
+| =status=              | =:status=         | String of the symbol; read only. |
+| =resolved=            | =:resolved=       | =true= or =false=; read only. |
+| =lines=, none         | =:line=, =:lines= | =[S E]= maps to =:lines (S E)= and =:line E=; one line is =:line= alone. |
+| =diff_side=           | =:side=           | =LEFT= or =RIGHT=. |
+| =replies[]=           | =:reply-to=       | An unpublished reply of a sent comment is upserted with =:reply-to= set to the parent's =cr_id=; a reply to a draft is not stored. |
 
-Decision: every call into code-review goes through =magit-dash-review-json-code-review-function= (a defcustom), with ops =comments=, =pullreq=, =write= and =verdict= documented in its docstring. The default implementation returns nothing for reads and signals for writes, so with it import skips everything and leaves comments as drafts, visibly (a message names the missing API). Closing the gap means either a small public data API in code-review (=code-review-comments=, =code-review-comment-upsert=, =code-review-verdict-set=), or a seam implementation here that wraps the interactive commands or the =code-review-db-search= plus =oref=/=oset= plus =code-review-db-update= path above. The choice is the user's and is not made; the default seam implements none of them.
+A comment GitHub owns (status =sent= or =pending=, origin =github=, or any of =remote_id=, =gh_thread_id=, =gh_comment_id=) is never upserted as a draft: only its unpublished replies are stored, and a comment code-review does not hold is skipped with a message, so a sent thread is never duplicated as a draft.
+
+** Viewed state
+
+Seam ops =viewed= (a table of path to ={"blob", "viewed"}= for the stored diff) and =set-viewed= (a table of path to blob; returns =set=, =unchanged= or =stale= per path). code-review's =reviewed= table has no blob column, so its viewed flag follows the file's diff block: a content change that keeps the hunk headers leaves the mark set. Never trust the flag alone: =magit-dash-review-json-viewed-agreement= keeps a diff-review mark only when code-review says viewed /and/ the blobs match (prefix match, at least 7 characters, since code-review stores the index line's abbreviated hash); a mismatch counts as not viewed. =set-viewed= passes the blob so code-review refuses a stale one. These marks are local to code-review: its GitHub seeding overwrites them on the next fetch, and nothing here pushes them to GitHub (the viewed-sync task must). Setting a mark signals =user-error= while a GitHub sync of that path is pending.
+
+** Analysis
+
+Seam op =analysis= returns the nested table exported under =code_review.analysis= (path, then =@@= ranges text, then =rank=, =tags=, =criteria=), only when =code-review-api-analysis-available-p= (the PR and its diff are stored and an existing worktree is found); otherwise nil with a message, because without the engines the data lacks NO-TEST, RISK, INCIDENT and criteria. The call is synchronous and can run worktree-wide =git grep= and =git blame=, and it writes code-review's shared analysis caches, so it is never called on the UI thread or in the live daemon and export only runs it on request. Ranks depend on engine settings, and the heat tag appears only after a history harvest, so results can differ between calls.

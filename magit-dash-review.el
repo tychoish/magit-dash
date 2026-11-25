@@ -73,13 +73,33 @@ for human verification and sign-off."
 
 (defcustom magit-dash-review-use-code-review-adapter nil
   "When non-nil, mirror review JSON into code-review after a pr open or sync.
-Calls `magit-dash-review-json-import' on the merged file.  Off by default:
-`magit-dash-review-submit' keeps its GraphQL mutations until submit is routed
-through code-review, and code-review's own comment API is reached only
-through `magit-dash-review-json-code-review-function'.  The merge itself
-(unknown-key preserving) is always the adapter's."
+Calls `magit-dash-review-json-import' on the merged file, which creates or
+updates local draft comments (and the pending verdict) on the PR's stored
+code-review record through code-review's public `code-review-api-*' functions,
+then writes the cr_ids it assigned back into the review file.  The PR must
+already be in code-review's database (open it there once), otherwise every
+comment is skipped with a message.  Resolved state and GitHub-owned comments
+are read-only in code-review and are never written.  Off by default: it is
+undecided whether the mirror should be on, and `magit-dash-review-submit'
+keeps its GraphQL mutations until submit is routed through code-review.
+To see what turning it on would do for a PR without persisting anything, run
+`magit-dash-review-json-import-dry-run'.  The merge itself (unknown-key
+preserving) is always the adapter's."
   :type 'boolean
   :group 'magit-dash-review)
+
+(defun magit-dash-review-worktree-resolver (repo-dir number)
+  "Return the existing magit-dash review worktree of PR NUMBER in REPO-DIR, or nil.
+For `code-review-worktree-resolver', which the user's config sets to this
+function.  Looks for the pr-N or cr-N worktree
+with `magit-dash-pr--find-existing-worktree' only: it never creates one and
+never prompts, and any failure yields nil so code-review falls back to its own
+worktree."
+  (ignore-errors
+    (when-let* ((dir (magit-dash-pr--find-existing-worktree
+                      (directory-file-name (expand-file-name repo-dir))
+                      (if (stringp number) (string-to-number number) number))))
+      (directory-file-name (expand-file-name dir)))))
 
 (defun magit-dash-review--maybe-mirror (merged file)
   "Import MERGED into code-review when `magit-dash-review-use-code-review-adapter'.
