@@ -78,7 +78,6 @@
 (declare-function magit-anything-modified-p "magit-status")
 (declare-function magit-dash-worktree-for-branch "magit-dash-worktree")
 (declare-function magit-worktree-checkout "magit-worktree")
-(declare-function magit-worktree-delete "magit-worktree")
 (declare-function magit-stash-clear "magit-stash")
 (declare-function agent-shell-switch-buffer "agent-shell")
 (declare-function agent-shell-new-shell "agent-shell")
@@ -4880,22 +4879,6 @@ prompts among the registered repositories when neither applies."
       (user-error "Cannot add a worktree from a worktree entry"))
     (magit-dash--with-repo repo
       (call-interactively #'magit-worktree-checkout))
-    (magit-dash-refresh)))
-
-(defun magit-dash-worktree-delete ()
-  "Delete the worktree at point via magit.
-Signals `user-error' when the current row is not a worktree,
-or when the worktree contains uncommitted changes."
-  (interactive)
-  (let ((repo (magit-dash--repo-at-point)))
-    (unless (magit-dash-repo-worktree repo)
-      (user-error "Not a worktree row; use 'k' only on worktree entries"))
-    (let ((path (magit-dash-repo-path repo)))
-      (when (and (fboundp 'magit-dash-worktree-uncommitted-changes-p)
-                 (magit-dash-worktree-uncommitted-changes-p path))
-        (user-error "Cannot delete worktree %s: contains uncommitted changes" path)))
-    (magit-dash--with-repo repo
-      (magit-worktree-delete (magit-dash-repo-path repo)))
     (magit-dash-refresh)))
 
 (defun magit-dash-agent-shell ()

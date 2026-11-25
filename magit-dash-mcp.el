@@ -245,11 +245,20 @@ or `pr_number' (.wt/pr-<n>)."
               (_ (unless (and (stringp wt-path) (not (string-empty-p (string-trim wt-path))))
                    (error "Argument `worktree_path' is required when action is \"delete\""))))
          (setq wt-path (magit-dash-mcp--resolve-worktree-path repo-dir wt-path))
-         (magit-dash-pr-delete-worktree wt-path repo-dir)
-         (list :repo_dir repo-dir
-               :action "delete"
-               :worktree_path wt-path
-               :deleted t)))
+         (condition-case err
+             (let ((magit-dash-worktree-unattended t))
+               (magit-dash-pr-delete-worktree wt-path repo-dir)
+               (list :repo_dir repo-dir
+                     :action "delete"
+                     :worktree_path wt-path
+                     :deleted t))
+           (user-error
+            (list :repo_dir repo-dir
+                  :action "delete"
+                  :worktree_path wt-path
+                  :deleted :false
+                  :refused t
+                  :reason (error-message-string err))))))
       ("move"
        (let* ((old (plist-get args :worktree_path))
               (_ (unless (and (stringp old) (not (string-empty-p (string-trim old))))
@@ -458,6 +467,7 @@ or `pr_number' (.wt/pr-<n>)."
           :candidate_branches (vconcat branch-names)
           :deleted_count (if dry-run 0 (or (plist-get del-res :deleted) 0))
           :skipped_count (if dry-run 0 (or (plist-get del-res :skipped) 0))
+          :skipped_details (vconcat (and (not dry-run) (plist-get del-res :details)))
           :worktrees_cleaned (if wt-res (or (plist-get wt-res :deleted) 0) 0))))
 
 ;;;; Tool 5: magit_dash_pr_status

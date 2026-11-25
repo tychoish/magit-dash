@@ -32,6 +32,9 @@
 (declare-function magit-dash-gh-actions-fetch "magit-dash-gh-actions")
 (declare-function magit-dash-gh-workflow-run "magit-dash-gh-actions")
 (declare-function magit-dash-pr-fetch "magit-dash-pr")
+(declare-function magit-dash-pr--confirm-delete "magit-dash-pr")
+(declare-function magit-dash-worktree-risks "magit-dash-worktree")
+(declare-function magit-dash-worktree-uncommitted-changes-p "magit-dash-worktree")
 (declare-function magit-dash-open "magit-dash")
 (declare-function magit-dash-open-repo "magit-dash-open")
 (declare-function yaml-encode "yaml")
@@ -415,7 +418,7 @@ TABLE defaults to the on-disk cache for the current repo.
 Uses a single gh call fetching up to `magit-dash-prune-pr-limit' PRs."
   (let* ((default-directory (magit-dash-gh--repo-dir))
 	 (table (or table (magit-dash-gh--prune-load-cache)))
-	 (cmd (format "gh pr list --state all --limit %d --json number,state,headRefName,title"
+	 (cmd (format "gh pr list --state all --limit %d --json number,state,headRefName,headRefOid,title"
 		      magit-dash-prune-pr-limit))
 	 (output (with-magit-gh-account (magit-dash-gh--repo-account default-directory)
                    (string-trim (shell-command-to-string cmd)))))
@@ -438,6 +441,46 @@ Uses a single gh call fetching up to `magit-dash-prune-pr-limit' PRs."
                         (setf (map-elt table (concat "wt/" pr-tag)) pr))))))))
     (magit-dash-gh--prune-save-cache table)
     table))
+
+(defun magit-dash-gh--git-ok-p (path &rest args)
+  "Return non-nil when git ARGS run in PATH exit 0.  Output is discarded."
+  (zerop (apply #'call-process "git" nil nil nil "-C" (expand-file-name path) args)))
+
+(defun magit-dash-gh--branch-tip (branch path)
+  "Return the commit hash of local BRANCH in PATH, or nil."
+  (with-temp-buffer
+    (when (zerop (call-process "git" nil (list (current-buffer) nil) nil
+                               "-C" (expand-file-name path)
+                               "rev-parse" "--verify" "--quiet"
+                               (concat "refs/heads/" branch "^{commit}")))
+      (string-trim (buffer-string)))))
+
+(defun magit-dash-gh--commit-verified (oid pr path default-branch)
+  "Return why commit OID in PATH is safe to discard, or nil.
+The symbol is `head-oid' when OID is the head of closed PR (its
+`headRefOid'), `merged' when OID is reachable from DEFAULT-BRANCH, or
+`remote' when some remote-tracking ref contains it.  A name match alone
+proves nothing, so nil means the commits may exist nowhere else."
+  (let ((pr-oid (and (or (listp pr) (hash-table-p pr)) (map-elt pr 'headRefOid))))
+    (cond
+     ((not (and (stringp oid) (not (string-empty-p oid)))) nil)
+     ((and (stringp pr-oid) (equal pr-oid oid)) 'head-oid)
+     ((and default-branch
+           (magit-dash-gh--git-ok-p path "merge-base" "--is-ancestor" oid default-branch))
+      'merged)
+     ((with-temp-buffer
+        (and (zerop (call-process "git" nil (list (current-buffer) nil) nil
+                                  "-C" (expand-file-name path)
+                                  "for-each-ref" "--count=1" "--format=%(refname)"
+                                  "--contains" oid "refs/remotes"))
+             (not (string-empty-p (string-trim (buffer-string))))))
+      'remote))))
+
+(defun magit-dash-gh--branch-verified (branch pr path default-branch)
+  "Return why local BRANCH in PATH is safe to delete, or nil.
+PR and DEFAULT-BRANCH are as for `magit-dash-gh--commit-verified'."
+  (magit-dash-gh--commit-verified
+   (magit-dash-gh--branch-tip branch path) pr path default-branch))
 
 (defun magit-dash-gh--prune-scan ()
   "Re-scan all local branches against the closed/merged PR cache and git merged status.
@@ -467,30 +510,40 @@ Stale marked branches are dropped from `:marked'. Returns new candidates."
                               all-wts))
          (candidates nil)
          (merged-worktrees nil))
-    ;; 1. Collect candidate branches
+    ;; 1. Collect candidate branches: a closed PR matched by name only counts
+    ;; when the branch tip is that PR's head, merged, or on a remote.
     (dolist (branch (magit-list-local-branch-names))
       (unless (member branch protected)
         (let ((pr (or (map-elt closed-prs branch)
                       (when (string-prefix-p "wt/" branch)
-                        (map-elt closed-prs (substring branch 3)))
-                      (when (member branch git-merged)
-                        '((number . nil) (state . "MERGED") (title . "merged into default branch (git)"))))))
-          (when pr
-            (push (cons branch pr) candidates)))))
+                        (map-elt closed-prs (substring branch 3))))))
+          (cond
+           ((and pr (magit-dash-gh--branch-verified branch pr path def-branch))
+            (push (cons branch pr) candidates))
+           ((member branch git-merged)
+            (push (cons branch '((number . nil) (state . "MERGED")
+                                 (title . "merged into default branch (git)")))
+                  candidates))))))
     (setq candidates (nreverse candidates))
-    ;; 2. Collect merged worktrees
+    ;; 2. Collect merged worktrees, verified the same way by their HEAD.
     (dolist (wt sub-wts)
       (let* ((wt-path (alist-get 'path wt))
              (wt-branch (alist-get 'branch wt))
-             (matched-pr (or (when wt-branch (map-elt closed-prs wt-branch))
-                             (when (and wt-branch (string-prefix-p "wt/" wt-branch))
-                               (map-elt closed-prs (substring wt-branch 3)))
-                             (when (and wt-branch (member wt-branch git-merged))
-                               '((number . nil) (state . "MERGED") (title . "branch merged in git")))
-                             (let ((name (file-name-nondirectory (directory-file-name wt-path))))
-                               (or (map-elt closed-prs name)
-                                   (when (string-prefix-p "wt/" name)
-                                     (map-elt closed-prs (substring name 3))))))))
+             (name (file-name-nondirectory (directory-file-name wt-path)))
+             (named-pr (or (when wt-branch (map-elt closed-prs wt-branch))
+                           (when (and wt-branch (string-prefix-p "wt/" wt-branch))
+                             (map-elt closed-prs (substring wt-branch 3)))
+                           (map-elt closed-prs name)
+                           (when (string-prefix-p "wt/" name)
+                             (map-elt closed-prs (substring name 3)))))
+             (matched-pr (cond
+                          ((and named-pr
+                                (magit-dash-gh--commit-verified
+                                 (alist-get 'head wt) named-pr path def-branch))
+                           named-pr)
+                          ((and wt-branch (member wt-branch git-merged))
+                           '((number . nil) (state . "MERGED")
+                             (title . "branch merged in git"))))))
         (when matched-pr
           (push (cons wt-path (cons wt-branch matched-pr)) merged-worktrees))))
     (setq merged-worktrees (nreverse merged-worktrees))
@@ -571,15 +624,40 @@ Branch entries are labeled `prune: BRANCH' with optional ` [marked]' or
                candidates))
      '(hash-table :test equal))))
 
+(defun magit-dash-gh--prune-delete-risks (branch wt-path path)
+  "Return (VERIFIED . RISKS) for deleting BRANCH (and WT-PATH) in PATH.
+VERIFIED is the reason from `magit-dash-gh--branch-verified', or nil.  RISKS
+lists the worktree risks of WT-PATH plus, when VERIFIED is nil, a note that
+the branch tip is merged nowhere, on no remote and not its PR's head."
+  (let* ((pr (alist-get branch (plist-get (magit-dash-gh--cache-get path :prune-state)
+                                          :candidates)
+                        nil nil #'equal))
+         (pr-oid (and (listp pr) (map-elt pr 'headRefOid)))
+         (verified (magit-dash-gh--branch-verified
+                    branch pr path (ignore-errors (magit-dash-gh--default-branch)))))
+    (cons verified
+          (append (when wt-path
+                    (magit-dash-worktree-risks wt-path pr-oid))
+                  (unless verified
+                    (list (format "branch %s is not merged, on no remote and not its closed PR's head"
+                                  branch)))))))
+
 (defun magit-dash-gh--prune-delete-branches (branches path &optional prompt-p)
   "Delete each branch in BRANCHES for repo at PATH, prompting only when PROMPT-P.
-If a branch has an attached clean worktree, removes the worktree before deleting
-the branch. Refuses deletion if the worktree contains uncommitted changes.
+A branch with an attached worktree has that worktree removed first.  Nothing
+is deleted when the worktree has uncommitted changes.  Before any removal
+`magit-dash-worktree-risks' (unpublished commits, ignored files that are not
+build output, in-progress merges...) and a branch-level check (tip merged,
+on a remote or its closed PR's head) run.  An item with risks is skipped
+\(and listed in `:details') without PROMPT-P; with PROMPT-P it needs an
+explicit yes even in yes-to-all mode.  The branch is deleted with `-D' only
+when verified, otherwise with `-d'.
 After deletion, re-scan the cache for PATH.
-Returns a plist (:deleted N :skipped M :quit BOOL).
+Returns a plist (:deleted N :skipped M :quit BOOL :details STRINGS).
 With PROMPT-P, the user is prompted y/n/q/! per branch; `!' enables
 yes-to-all for the remainder, `q' terminates the loop."
-  (require 'magit-dash-worktree nil t)
+  (require 'magit-dash-worktree)
+  (require 'magit-dash-pr)
   (let ((result
          (seq-reduce
           (lambda (state branch)
@@ -592,29 +670,49 @@ yes-to-all for the remainder, `q' terminates the loop."
                                    (format "Delete %s? (y/n/q/!) " branch)))
                      (answer (if (plist-get state :yes-to-all)
                                  ?y
-                               (read-char-choice prompt-msg '(?y ?n ?q ?!)))))
+                               (read-char-choice prompt-msg '(?y ?n ?q ?!))))
+                     (skip (lambda (why)
+                             (message "magit-gh prune: skipping %s: %s" branch why)
+                             (setq state (plist-put state :details
+                                                    (append (plist-get state :details)
+                                                            (list (format "%s: %s" branch why)))))
+                             (plist-put state :skipped (1+ (plist-get state :skipped))))))
                 (pcase answer
                   ((or ?y ?!)
                    (when (eq answer ?!)
                      (setq state (plist-put state :yes-to-all t)))
-                   (if (and wt-path
-                            (fboundp 'magit-dash-worktree-uncommitted-changes-p)
-                            (magit-dash-worktree-uncommitted-changes-p wt-path))
-                       (progn
-                         (message "magit-gh prune: branch %s has worktree with uncommitted changes at %s; skipping"
-                                  branch wt-path)
-                         (plist-put state :skipped (1+ (plist-get state :skipped))))
-                     ;; If clean worktree exists, remove it first so git allows branch deletion
-                     (when wt-path
-                       (call-process "git" nil nil nil "-C" path "worktree" "remove" wt-path)
-                       (call-process "git" nil nil nil "-C" path "worktree" "prune"))
-                     (magit-dash-gh--with-repo-dir path
-                       (with-no-warnings (magit-branch-delete (list branch) t)))
-                     (plist-put state :deleted (1+ (plist-get state :deleted)))))
+                   (if (and wt-path (magit-dash-worktree-uncommitted-changes-p wt-path))
+                       (funcall skip (format "worktree %s has uncommitted changes" wt-path))
+                     (let* ((checked (magit-dash-gh--prune-delete-risks branch wt-path path))
+                            (verified (car checked))
+                            (risks (cdr checked))
+                            (confirmed nil))
+                       (cond
+                        ((and risks
+                              (not (setq confirmed
+                                         (magit-dash-pr--confirm-delete
+                                          (or wt-path (expand-file-name path))
+                                          prompt-p branch risks))))
+                         (funcall skip (string-join risks "; ")))
+                        ((and wt-path
+                              (not (magit-dash-gh--git-ok-p path "worktree" "remove" wt-path)))
+                         (funcall skip (format "git could not remove worktree %s" wt-path)))
+                        (t
+                         (when wt-path
+                           (magit-dash-gh--git-ok-p path "worktree" "prune"))
+                         (if (or verified (magit-dash-gh--git-ok-p path "branch" "-d" branch))
+                             (progn
+                               (when verified
+                                 (magit-dash-gh--with-repo-dir path
+                                   (with-no-warnings (magit-branch-delete (list branch) t))))
+                               (plist-put state :deleted (1+ (plist-get state :deleted))))
+                           (funcall skip (if confirmed
+                                             "worktree removed; git refused -d for the unmerged branch"
+                                           "git refused -d for the unmerged branch"))))))))
                   (?n (plist-put state :skipped (1+ (plist-get state :skipped))))
                   (?q (plist-put state :quit t))))))
           branches
-          (list :deleted 0 :skipped 0 :yes-to-all (not prompt-p) :quit nil))))
+          (list :deleted 0 :skipped 0 :yes-to-all (not prompt-p) :quit nil :details nil))))
     (magit-dash-gh--prune-scan)
     (message "magit-gh prune: deleted %d, skipped %d%s"
              (plist-get result :deleted)
@@ -622,7 +720,8 @@ yes-to-all for the remainder, `q' terminates the loop."
              (if (plist-get result :quit) " (quit)" ""))
     (list :deleted (plist-get result :deleted)
           :skipped (plist-get result :skipped)
-          :quit (plist-get result :quit))))
+          :quit (plist-get result :quit)
+          :details (plist-get result :details))))
 
 (defun magit-dash-gh--prune-toggle-mark (path)
   "Prompt for a branch from the cache for repo at PATH and toggle its mark.

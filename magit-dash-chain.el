@@ -207,8 +207,12 @@ whole tree when the caller knows what changed."
     (and (zerop (car r)) (split-string (cdr r) "\n" t))))
 
 (defun magit-dash-chain--dirty-p (dir)
-  "Return non-nil when DIR has uncommitted changes to tracked files."
-  (let ((r (magit-dash-chain--git dir "status" "--porcelain" "-uno")))
+  "Return non-nil when DIR has uncommitted changes, untracked files included.
+Forces `status.showUntrackedFiles=all' and `status.ignoreSubmodules=none' so
+a local config cannot hide changes."
+  (let ((r (magit-dash-chain--git dir "-c" "status.showUntrackedFiles=all"
+                                  "-c" "status.ignoreSubmodules=none"
+                                  "status" "--porcelain")))
     (or (not (zerop (car r))) (not (string-empty-p (cdr r))))))
 
 (defun magit-dash-chain--head (dir)

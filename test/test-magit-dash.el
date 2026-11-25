@@ -2402,12 +2402,14 @@ they are not consulted even when their own auto-* flags are set."
     (should-error (magit-dash-worktree-delete) :type 'user-error)))
 
 (ert-deftest magit-dash/worktree-delete-uses-row-path ()
-  "Delete passes the selected path to Magit without selecting another worktree."
+  "Delete passes the selected path to the risk-checked deleter, not to Magit."
   (let ((repo (magit-dash-repo--make :name "wt" :path "/tmp/wt" :worktree t))
         deleted)
     (cl-letf (((symbol-function 'magit-dash--repo-at-point) (lambda () repo))
-              ((symbol-function 'magit-dash-worktree-uncommitted-changes-p) (lambda (_) nil))
-              ((symbol-function 'magit-worktree-delete) (lambda (path) (setq deleted path)))
+              ((symbol-function 'magit-worktree-delete)
+               (lambda (&rest _) (error "must not bypass the risk check")))
+              ((symbol-function 'magit-dash-pr-delete-worktree)
+               (lambda (path &rest _) (setq deleted path)))
               ((symbol-function 'magit-dash-refresh) #'ignore))
       (magit-dash-worktree-delete)
       (should (equal deleted "/tmp/wt")))))
