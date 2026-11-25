@@ -872,5 +872,218 @@ When A2-FAIL, o/a#2 has a failing check run."
       (should (equal "nil" (match-string 2 out)))
       (should (equal "nil" (match-string 1 out))))))
 
+;;;; fetch-one
+
+(cl-defun magit-dash-pr-status-test/fetch-one-with-fake-gh
+    (failures &key body (stderr "gh: HTTP 504") (slug magit-dash-pr-status-test/slug)
+              (number 9921) on-success on-error (attempts 3) (wait 40))
+  "Run `fetch-one' for fixture PR 9921 against a fake `gh'.
+The fake exits with STDERR FAILURES times, then prints BODY (default: the
+fixture node).  ON-SUCCESS and ON-ERROR are extra callbacks called after
+recording.  Return a plist of :result :error :calls :successes :errors."
+  (let* ((dir (make-temp-file "fetch-one" t))
+         (counter (expand-file-name "count" dir))
+         (node (car (map-nested-elt (magit-dash-pr-status-test/response)
+                                    '(data search nodes))))
+         (body (or body
+                   (json-encode `((data . ((repository . ((pullRequest . ,node))))))))))
+    (unwind-protect
+        (progn
+          (with-temp-file (expand-file-name "body.json" dir) (insert body))
+          (with-temp-file (expand-file-name "gh" dir)
+            (insert (format "#!/bin/sh
+n=$(cat %s 2>/dev/null || echo 0); n=$((n+1)); echo $n > %s
+if [ $n -le %d ]; then echo '%s' >&2; exit 1; fi
+cat %s
+" counter counter failures stderr (expand-file-name "body.json" dir))))
+          (set-file-modes (expand-file-name "gh" dir) #o755)
+          (let ((exec-path (cons dir exec-path))
+                (process-environment (cons (concat "PATH=" dir ":" (getenv "PATH"))
+                                           process-environment))
+                (magit-dash-gh-retry-delay 0)
+                (magit-dash-gh-retry-attempts attempts)
+                (magit-dash-pr-status-required-approvals 3)
+                (successes nil)
+                (errors nil)
+                (tries 0))
+            (cl-letf (((symbol-function 'magit-dash-gh--repo-account) #'ignore))
+              (magit-dash-pr-status-fetch-one
+               slug number dir
+               (lambda (r)
+                 (push r successes)
+                 (when on-success (funcall on-success r)))
+               (lambda (e)
+                 (push e errors)
+                 (when on-error (funcall on-error e))))
+              (while (and (not successes) (not errors) (< tries wait))
+                (setq tries (1+ tries))
+                (accept-process-output nil 0.05))
+              ;; Let any stray duplicate callback arrive.
+              (accept-process-output nil 0.2))
+            (list :result (car successes)
+                  :error (car errors)
+                  :successes successes
+                  :errors errors
+                  :calls (if (file-exists-p counter)
+                             (string-to-number
+                              (string-trim (with-temp-buffer
+                                             (insert-file-contents counter)
+                                             (buffer-string))))
+                           0))))
+      (delete-directory dir t))))
+
+(ert-deftest magit-dash-pr-status/fetch-one-returns-status-plist ()
+  (let* ((out (magit-dash-pr-status-test/fetch-one-with-fake-gh 0))
+         (result (plist-get out :result))
+         (expected (magit-dash-pr-status-test/pr 9921)))
+    (should result)
+    (should-not (plist-get out :error))
+    (should (= 1 (plist-get out :calls)))
+    (should (= 1 (length (plist-get out :successes))))
+    (seq-do (lambda (key) (should (plist-member result key)))
+            '(:ci :approvals :required :requested :changes-requested
+              :threads-open :threads-outdated :failing :truncated :bucket))
+    (should (equal (plist-get expected :ci) (plist-get result :ci)))
+    (should (= (plist-get expected :approvals) (plist-get result :approvals)))
+    (should (= (plist-get expected :threads-open) (plist-get result :threads-open)))
+    (should (equal (plist-get expected :requested) (plist-get result :requested)))
+    (should (= (plist-get expected :changes-requested)
+               (plist-get result :changes-requested)))
+    (should (equal (plist-get expected :failing) (plist-get result :failing)))
+    (should (= (plist-get expected :threads-outdated)
+               (plist-get result :threads-outdated)))
+    (should (= 3 (plist-get result :required)))
+    (should (eq (magit-dash-pr-status--bucket expected 3) (plist-get result :bucket)))))
+
+(ert-deftest magit-dash-pr-status/fetch-one-retries-504 ()
+  (let ((out (magit-dash-pr-status-test/fetch-one-with-fake-gh 1)))
+    (should (plist-get out :result))
+    (should-not (plist-get out :error))
+    (should (= 2 (plist-get out :calls)))
+    (should (plist-get (plist-get out :result) :bucket))))
+
+(ert-deftest magit-dash-pr-status/fetch-one-retries-exhausted ()
+  (let ((out (magit-dash-pr-status-test/fetch-one-with-fake-gh 99 :attempts 2)))
+    (should-not (plist-get out :result))
+    (should (= 2 (plist-get out :calls)))
+    (should (= 1 (length (plist-get out :errors))))
+    (should (string-match-p "HTTP 504" (plist-get out :error)))))
+
+(ert-deftest magit-dash-pr-status/fetch-one-non-5xx-failure ()
+  (let ((out (magit-dash-pr-status-test/fetch-one-with-fake-gh
+              99 :stderr "gh: HTTP 401 Bad credentials")))
+    (should-not (plist-get out :result))
+    (should (= 1 (plist-get out :calls)))
+    (should (= 1 (length (plist-get out :errors))))
+    (should (string-match-p "Bad credentials" (plist-get out :error)))))
+
+(ert-deftest magit-dash-pr-status/fetch-one-graphql-errors ()
+  (let ((out (magit-dash-pr-status-test/fetch-one-with-fake-gh
+              0 :body "{\"errors\":[{\"message\":\"boom\"}]}")))
+    (should-not (plist-get out :result))
+    (should (= 1 (length (plist-get out :errors))))
+    (should (string-match-p "boom" (plist-get out :error)))))
+
+(ert-deftest magit-dash-pr-status/fetch-one-null-pull-request ()
+  (let ((out (magit-dash-pr-status-test/fetch-one-with-fake-gh
+              0 :body "{\"data\":{\"repository\":{\"pullRequest\":null}}}")))
+    (should-not (plist-get out :result))
+    (should (= 1 (length (plist-get out :errors))))
+    (should (string-match-p "not found" (plist-get out :error)))))
+
+(ert-deftest magit-dash-pr-status/fetch-one-malformed-json ()
+  (let ((out (magit-dash-pr-status-test/fetch-one-with-fake-gh 0 :body "not json {")))
+    (should-not (plist-get out :result))
+    (should (= 1 (length (plist-get out :errors))))
+    (should (string-match-p "JSON\\|pars" (plist-get out :error)))))
+
+(ert-deftest magit-dash-pr-status/fetch-one-truncated-flag ()
+  (let* ((node (copy-tree (car (map-nested-elt (magit-dash-pr-status-test/response)
+                                               '(data search nodes)))))
+         (page-info (copy-tree (alist-get 'pageInfo (alist-get 'reviewThreads node)))))
+    (setf (alist-get 'hasNextPage page-info) t)
+    (setf (alist-get 'pageInfo (alist-get 'reviewThreads node)) page-info)
+    (let ((out (magit-dash-pr-status-test/fetch-one-with-fake-gh
+                0 :body (json-encode
+                         `((data . ((repository . ((pullRequest . ,node))))))))))
+      (should (plist-get out :result))
+      (should (eq t (plist-get (plist-get out :result) :truncated))))))
+
+(ert-deftest magit-dash-pr-status/fetch-one-errors-alongside-data ()
+  ;; Matches `--validate-response': a GraphQL errors key is a hard failure.
+  (let* ((node (car (map-nested-elt (magit-dash-pr-status-test/response)
+                                    '(data search nodes))))
+         (out (magit-dash-pr-status-test/fetch-one-with-fake-gh
+               0 :body (json-encode
+                        `((data . ((repository . ((pullRequest . ,node)))))
+                          (errors . [((message . "partial boom"))]))))))
+    (should-not (plist-get out :result))
+    (should (= 1 (length (plist-get out :errors))))
+    (should (string-match-p "partial boom" (plist-get out :error)))))
+
+(ert-deftest magit-dash-pr-status/fetch-one-non-positive-number ()
+  (seq-do (lambda (n)
+            (let ((out (magit-dash-pr-status-test/fetch-one-with-fake-gh 0 :number n)))
+              (should-not (plist-get out :result))
+              (should (= 0 (plist-get out :calls)))
+              (should (= 1 (length (plist-get out :errors))))
+              (should (string-match-p "positive integer" (plist-get out :error)))))
+          '(0 -1)))
+
+(ert-deftest magit-dash-pr-status/fetch-one-invalid-slug-and-number ()
+  (let ((out (magit-dash-pr-status-test/fetch-one-with-fake-gh 0 :slug "nonsense")))
+    (should-not (plist-get out :result))
+    (should (= 0 (plist-get out :calls)))
+    (should (= 1 (length (plist-get out :errors))))
+    (should (string-match-p "slug" (plist-get out :error))))
+  (let ((out (magit-dash-pr-status-test/fetch-one-with-fake-gh 0 :number "12")))
+    (should-not (plist-get out :result))
+    (should (= 0 (plist-get out :calls)))
+    (should (= 1 (length (plist-get out :errors))))
+    (should (string-match-p "integer" (plist-get out :error)))))
+
+(ert-deftest magit-dash-pr-status/fetch-one-callbacks-fire-once ()
+  ;; A signalling success callback must not trigger on-error.
+  (let* ((node (car (map-nested-elt (magit-dash-pr-status-test/response)
+                                    '(data search nodes))))
+         (body (json-encode `((data . ((repository . ((pullRequest . ,node))))))))
+         (errors nil)
+         (successes 0))
+    (cl-letf (((symbol-function 'magit-dash-gh--run-process)
+               (lambda (_args _dir on-success &rest _) (funcall on-success body))))
+      (should-error
+       (magit-dash-pr-status-fetch-one
+        magit-dash-pr-status-test/slug 9921 "/tmp"
+        (lambda (_) (setq successes (1+ successes)) (error "callback boom"))
+        (lambda (e) (push e errors)))))
+    (should (= 1 successes))
+    (should-not errors))
+  ;; A signalling on-error after a bad payload runs once.
+  (let ((count 0))
+    (cl-letf (((symbol-function 'magit-dash-gh--run-process)
+               (lambda (_args _dir on-success &rest _) (funcall on-success "not json {"))))
+      (should-error
+       (magit-dash-pr-status-fetch-one
+        magit-dash-pr-status-test/slug 9921 "/tmp" #'ignore
+        (lambda (_) (setq count (1+ count)) (error "callback boom")))))
+    (should (= 1 count)))
+  ;; A signalling error callback must not run on-error a second time.
+  (let ((count 0))
+    (condition-case nil
+        (magit-dash-pr-status-test/fetch-one-with-fake-gh
+         0 :slug "nonsense"
+         :on-error (lambda (_) (setq count (1+ count)) (error "callback boom")))
+      (error nil))
+    (should (= 1 count)))
+  ;; Synchronous on-error from a missing directory, callback signals.
+  (let ((count 0))
+    (cl-letf (((symbol-function 'magit-dash-gh--repo-account) #'ignore))
+      (should-error
+       (magit-dash-pr-status-fetch-one
+        magit-dash-pr-status-test/slug 1 "/nonexistent-dir-xyz"
+        #'ignore
+        (lambda (_) (setq count (1+ count)) (error "callback boom")))))
+    (should (= 1 count))))
+
 (provide 'test-magit-dash-pr-status)
 ;;; test-magit-dash-pr-status.el ends here

@@ -104,14 +104,9 @@ GitHub's gateway timeout (502) deterministically; keep this small.")
 
 ;;;; Collection
 
-(defun magit-dash-pr-status--query ()
-  "Return the GraphQL query that fetches every open PR matching a search."
-  (format "query($q:String! $first:Int! $after:String){
-  search(query:$q type:ISSUE first:$first after:$after){
-    pageInfo{ hasNextPage endCursor }
-    nodes{
-      ... on PullRequest{
-        number title url state isDraft headRefName baseRefName
+(defun magit-dash-pr-status--pr-fields ()
+  "Return the GraphQL selection set shared by every PullRequest query."
+  (format "number title url state isDraft headRefName baseRefName
         repository{ nameWithOwner }
         reviewDecision mergeStateStatus
         reviews(last:%d){ pageInfo{ hasPreviousPage } nodes{ state author{ login __typename } } }
@@ -134,13 +129,23 @@ GitHub's gateway timeout (502) deterministically; keep this small.")
         reviewThreads(first:%d){
           pageInfo{ hasNextPage }
           nodes{ isResolved isOutdated }
-        }
+        }"
+          magit-dash-pr-status-review-limit
+          magit-dash-pr-status-context-limit
+          (min magit-dash-pr-thread-limit 50)))
+
+(defun magit-dash-pr-status--query ()
+  "Return the GraphQL query that fetches every open PR matching a search."
+  (format "query($q:String! $first:Int! $after:String){
+  search(query:$q type:ISSUE first:$first after:$after){
+    pageInfo{ hasNextPage endCursor }
+    nodes{
+      ... on PullRequest{
+        %s
       }
     }
   }
-}" magit-dash-pr-status-review-limit
-   magit-dash-pr-status-context-limit
-   (min magit-dash-pr-thread-limit 50)))
+}" (magit-dash-pr-status--pr-fields)))
 
 (defconst magit-dash-pr-status--slug-re
   "\\`[A-Za-z0-9][A-Za-z0-9-]*/\\(?:[A-Za-z0-9_-]\\|\\.[A-Za-z0-9_-]\\|[A-Za-z0-9_-]\\.\\)[A-Za-z0-9_.-]*\\'"
@@ -535,6 +540,84 @@ failing check is never ready.  A PR with requested changes is handled as
    (t 'ready)))
 
 ;;;; Entry points
+
+(defun magit-dash-pr-status-fetch-one (slug number dir on-success on-error)
+  "Asynchronously fetch the status of PR NUMBER in repository SLUG from DIR.
+Call ON-SUCCESS with a plist of :ci :approvals :required :requested
+:changes-requested :threads-open :threads-outdated :failing :truncated
+:bucket.  :truncated is non-nil when GitHub returned more review
+threads, reviews or checks than one page holds, so the counts may be low.
+Call ON-ERROR with a message string on any failure, including a
+malformed SLUG, a NUMBER that is not a positive integer, a failed `gh'
+run, a response that is not valid JSON, any GraphQL `errors' entry
+\(even alongside partial data, like the bulk path) and a missing PR.
+Transient 5xx failures are retried by `magit-dash-gh--run-process'.
+
+Exactly one of the callbacks runs, once; a callback that signals is
+never followed by the other callback.  On the synchronous paths (setup
+failures) such an error propagates to the caller; on the asynchronous
+path the callback runs in a process sentinel, so Emacs reports the
+error there instead of the caller seeing it."
+  (let ((fired nil)
+        (setup-error nil))
+    (condition-case err
+        (progn
+          (magit-dash-pr-status--check-slug slug)
+          (unless (and (natnump number) (> number 0))
+            (user-error "PR number must be a positive integer: %S" number))
+          (let ((parts (split-string slug "/")))
+            (magit-dash-gh--run-process
+             (list "api" "graphql"
+                   "-f" (format "query=query($owner:String! $name:String! $number:Int!){
+  repository(owner:$owner name:$name){
+    pullRequest(number:$number){
+      %s
+    }
+  }
+}" (magit-dash-pr-status--pr-fields))
+                   "-f" (concat "owner=" (car parts))
+                   "-f" (concat "name=" (cadr parts))
+                   "-F" (format "number=%d" number))
+             dir
+             (lambda (out)
+               (let ((outcome
+                      (condition-case err
+                          (let* ((response (magit-dash-pr-status--parse-json out))
+                                 (node (map-nested-elt response '(data repository pullRequest))))
+                            (when-let* ((errors (map-elt response 'errors)))
+                              (user-error "GitHub GraphQL error: %s"
+                                          (mapconcat (lambda (e) (or (map-elt e 'message) "unknown"))
+                                                     errors "; ")))
+                            (unless node
+                              (user-error "PR %s#%s not found" slug number))
+                            (let* ((pr (magit-dash-pr-status--node-to-pr node))
+                                   (required (magit-dash-pr-status--required-approvals slug dir)))
+                              (cons 'ok
+                                    (list :ci (plist-get pr :ci)
+                                          :approvals (plist-get pr :approvals)
+                                          :required required
+                                          :requested (plist-get pr :requested)
+                                          :changes-requested (plist-get pr :changes-requested)
+                                          :threads-open (plist-get pr :threads-open)
+                                          :threads-outdated (plist-get pr :threads-outdated)
+                                          :failing (plist-get pr :failing)
+                                          :truncated (plist-get pr :truncated)
+                                          :bucket (magit-dash-pr-status--bucket pr required)))))
+                        (error (cons 'error (error-message-string err))))))
+                 (setq fired t)
+                 (if (eq (car outcome) 'ok)
+                     (funcall on-success (cdr outcome))
+                   (funcall on-error (cdr outcome)))))
+             (lambda (out code)
+               (setq fired t)
+               (funcall on-error
+                        (format "gh api graphql failed (%s): %s" code (string-trim out)))))))
+      (error
+       (if fired
+           (signal (car err) (cdr err))
+         (setq setup-error (error-message-string err)))))
+    (when setup-error
+      (funcall on-error setup-error))))
 
 (defun magit-dash-pr-status-collect (slug dir)
   "Return PR plists for the author's open PRs in repository SLUG, run from DIR.
