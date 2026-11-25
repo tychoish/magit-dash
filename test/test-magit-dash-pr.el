@@ -2262,5 +2262,186 @@
         (should (= 1 (length fetches)))
         (should (= 2 (length views)))))))
 
+;;;; New since last review
+
+(defun magit-dash-pr-test/write-review (file &optional verdict md)
+  "Write review JSON FILE with the alists VERDICT and MD (magit_dash)."
+  (with-temp-file file
+    (insert (json-serialize
+             (append (list :format "diff-review/1")
+                     (and verdict (list :verdict verdict))
+                     (and md (list :magit_dash md)))))))
+
+(defvar magit-dash-pr-test/review-file-calls 0)
+(defvar magit-dash-pr-test/local-path-calls 0)
+(defvar magit-dash-pr-test/process-calls 0)
+
+(defmacro magit-dash-pr-test/with-review (head file-var &rest body)
+  "Run BODY with a temp review file FILE-VAR and cached head HEAD for o/r#7.
+Counts calls to `find-local-path', `magit-dash-review-file' and process
+spawns (which also error, so no network)."
+  (declare (indent 2))
+  `(magit-dash-pr-test/with-cache
+     (let ((,file-var (make-temp-file "nsr-review-" nil ".json")))
+       (setq magit-dash-pr-test/review-file-calls 0
+             magit-dash-pr-test/local-path-calls 0
+             magit-dash-pr-test/process-calls 0)
+       (unwind-protect
+           (cl-letf (((symbol-function 'magit-dash-pr-dashboard--find-local-path)
+                      (lambda (_repo)
+                        (cl-incf magit-dash-pr-test/local-path-calls)
+                        "/tmp/nsr-root"))
+                     ((symbol-function 'magit-dash-review-file)
+                      (lambda (&rest _)
+                        (cl-incf magit-dash-pr-test/review-file-calls)
+                        ,file-var))
+                     ((symbol-function 'call-process)
+                      (lambda (&rest _)
+                        (cl-incf magit-dash-pr-test/process-calls)
+                        (error "no process allowed")))
+                     ((symbol-function 'make-process)
+                      (lambda (&rest _)
+                        (cl-incf magit-dash-pr-test/process-calls)
+                        (error "no process allowed"))))
+             (clrhash magit-dash-pr-dashboard--reviewed-heads)
+             (when ,head
+               (magit-dash-pr-cache-put "o/r" 7 `((number . 7) (state . "OPEN")
+                                                  (headRefOid . ,,head))))
+             ,@body)
+         (ignore-errors (delete-file ,file-var))))))
+
+(defun magit-dash-pr-test/new-cell (head)
+  "Return the new-column cell for o/r#7 at HEAD."
+  (magit-dash-pr-dashboard--format-new "o/r" 7 head))
+
+(ert-deftest magit-dash-pr/new-column-registered-and-off-by-default ()
+  (should (memq 'new magit-dash-pr--all-columns))
+  (should (assq 'new magit-dash-pr--column-defs))
+  (should-not (cdr (assq 'new magit-dash-pr--default-columns))))
+
+(ert-deftest magit-dash-pr/new-column-new-when-heads-differ ()
+  (magit-dash-pr-test/with-review "bbbb2222" file
+    (magit-dash-pr-test/write-review file '((state . "changes") (head . "aaaa1111")))
+    (let ((cell (magit-dash-pr-test/new-cell "bbbb2222")))
+      (should (equal "new" (substring-no-properties cell)))
+      (should (string-match-p "New commits since last review"
+                              (get-text-property 0 'help-echo cell))))))
+
+(ert-deftest magit-dash-pr/new-column-blank-when-unchanged ()
+  (magit-dash-pr-test/with-review "aaaa1111" file
+    (magit-dash-pr-test/write-review file '((state . "approved") (head . "aaaa1111")))
+    (let ((cell (magit-dash-pr-test/new-cell "aaaa1111")))
+      (should (equal " " (substring-no-properties cell)))
+      (should (string-match-p "Unchanged since last review"
+                              (get-text-property 0 'help-echo cell))))))
+
+(ert-deftest magit-dash-pr/new-column-abbreviated-head-is-not-new ()
+  (magit-dash-pr-test/with-review "abcdef1234567890" file
+    (magit-dash-pr-test/write-review file '((head . "abcdef1")))
+    (should (equal " " (substring-no-properties
+                        (magit-dash-pr-test/new-cell "abcdef1234567890")))))
+  (magit-dash-pr-test/with-review "abcdef1234567890" file
+    (magit-dash-pr-test/write-review file '((head . "abcd")))
+    (should (equal "new" (substring-no-properties
+                          (magit-dash-pr-test/new-cell "abcdef1234567890"))))))
+
+(ert-deftest magit-dash-pr/new-column-blank-when-never-reviewed ()
+  (magit-dash-pr-test/with-review "aaaa1111" file
+    (magit-dash-pr-test/write-review file)
+    (let ((cell (magit-dash-pr-test/new-cell "aaaa1111")))
+      (should (equal " " (substring-no-properties cell)))
+      (should (equal "Never reviewed" (get-text-property 0 'help-echo cell)))))
+  (magit-dash-pr-test/with-review "aaaa1111" file
+    (delete-file file)
+    (should (equal "Never reviewed"
+                   (get-text-property 0 'help-echo (magit-dash-pr-test/new-cell "aaaa1111"))))))
+
+(ert-deftest magit-dash-pr/new-column-empty-without-head ()
+  (magit-dash-pr-test/with-review nil file
+    (magit-dash-pr-test/write-review file '((head . "aaaa1111")))
+    (should (equal "" (magit-dash-pr-test/new-cell nil)))
+    (should (equal "" (magit-dash-pr-test/new-cell "")))))
+
+(ert-deftest magit-dash-pr/new-column-head-fallbacks ()
+  (magit-dash-pr-test/with-review "bbbb2222" file
+    (magit-dash-pr-test/write-review file '((submitted_head . "aaaa1111")))
+    (should (equal "new" (substring-no-properties (magit-dash-pr-test/new-cell "bbbb2222")))))
+  ;; head_oid alone is a sync, not a review: neutral whether or not heads match.
+  (seq-do (lambda (current)
+            (magit-dash-pr-test/with-review current file
+              (magit-dash-pr-test/write-review file nil '((head_oid . "bbbb2222")))
+              (let ((cell (magit-dash-pr-test/new-cell current)))
+                (should (equal " " (substring-no-properties cell)))
+                (should (equal "synced review file, no verdict recorded"
+                               (get-text-property 0 'help-echo cell))))))
+          '("bbbb2222" "cccc3333"))
+  (magit-dash-pr-test/with-review "bbbb2222" file
+    (magit-dash-pr-test/write-review file '((head . "aaaa1111")) '((head_oid . "bbbb2222")))
+    (should (equal "new" (substring-no-properties (magit-dash-pr-test/new-cell "bbbb2222")))))
+  (magit-dash-pr-test/with-review "bbbb2222" file
+    (magit-dash-pr-test/write-review file '((head . "bbbb2222")) '((head_oid . "aaaa1111")))
+    (should (string-match-p "Unchanged"
+                            (get-text-property 0 'help-echo (magit-dash-pr-test/new-cell "bbbb2222"))))))
+
+(ert-deftest magit-dash-pr/new-column-malformed-json-is-unreadable-once ()
+  (magit-dash-pr-test/with-review "aaaa1111" file
+    (with-temp-file file (insert "{not json"))
+    (let ((messages nil)
+          (native-comp-enable-subr-trampolines nil))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (fmt &rest args) (push (apply #'format fmt args) messages))))
+        (should (equal "review file unreadable"
+                       (get-text-property 0 'help-echo (magit-dash-pr-test/new-cell "aaaa1111"))))
+        (magit-dash-pr-test/new-cell "aaaa1111")
+        (should (= 1 (seq-count (lambda (m) (string-match-p "unreadable" m)) messages)))))))
+
+(ert-deftest magit-dash-pr/new-column-reads-cached-until-mtime-changes ()
+  (magit-dash-pr-test/with-review "bbbb2222" file
+    (magit-dash-pr-test/write-review file '((head . "aaaa1111")))
+    (set-file-times file (seconds-to-time 1000000))
+    (should (equal "aaaa1111" (plist-get (magit-dash-pr-dashboard--reviewed "o/r" 7) :head)))
+    (magit-dash-pr-test/write-review file '((head . "cccc3333")))
+    (set-file-times file (seconds-to-time 1000000))
+    (should (equal "aaaa1111" (plist-get (magit-dash-pr-dashboard--reviewed "o/r" 7) :head)))
+    (set-file-times file (seconds-to-time 2000000))
+    (should (equal "cccc3333" (plist-get (magit-dash-pr-dashboard--reviewed "o/r" 7) :head)))
+    ;; Disappearing file: evicted and re-resolved to none.
+    (delete-file file)
+    (should-not (plist-get (magit-dash-pr-dashboard--reviewed "o/r" 7) :head))
+    (should (eq 'none (plist-get (magit-dash-pr-dashboard--reviewed "o/r" 7) :state)))))
+
+(ert-deftest magit-dash-pr/new-column-negative-result-is-cached ()
+  (magit-dash-pr-test/with-review "aaaa1111" file
+    (delete-file file)
+    (magit-dash-pr-test/new-cell "aaaa1111")
+    (magit-dash-pr-test/new-cell "aaaa1111")
+    (magit-dash-pr-test/new-cell "aaaa1111")
+    (should (= 1 magit-dash-pr-test/local-path-calls))
+    (should (= 1 magit-dash-pr-test/review-file-calls))
+    (should (= 0 magit-dash-pr-test/process-calls))
+    ;; Past the TTL it is resolved again.
+    (let ((magit-dash-pr-dashboard--reviewed-negative-ttl -1))
+      (magit-dash-pr-test/new-cell "aaaa1111"))
+    (should (= 2 magit-dash-pr-test/review-file-calls))))
+
+(ert-deftest magit-dash-pr/new-column-row-cell-exact-and-stale-face ()
+  (magit-dash-pr-test/with-review "bbbb2222" file
+    (magit-dash-pr-test/write-review file '((head . "aaaa1111")))
+    (let ((magit-dash-pr-columns '((new . t) (pr . t))))
+      (with-temp-buffer
+        (magit-dash-pr-dashboard-mode)
+        (let* ((i (seq-position (magit-dash-pr--active-columns) 'new))
+               (fresh (cadr (magit-dash-pr-dashboard--build-entry '((number . 7)) "o/r")))
+               (stale (cadr (magit-dash-pr-dashboard--build-entry '((number . 7)) "o/r" 1.0)))
+               (live (cadr (magit-dash-pr-dashboard--build-entry
+                            '((number . 7) (headRefOid . "aaaa1111")) "o/r"))))
+          ;; Columns: pr, new.
+          (should (equal "new" (substring-no-properties (aref fresh i))))
+          (should (equal "new" (substring-no-properties (aref stale i))))
+          (should-not (memq 'magit-dash-stale (ensure-list (get-text-property 0 'face (aref fresh i)))))
+          (should (memq 'magit-dash-stale (ensure-list (get-text-property 0 'face (aref stale i)))))
+          ;; The row's own headRefOid wins over the cache record.
+          (should (equal " " (substring-no-properties (aref live i)))))))))
+
 (provide 'test-magit-dash-pr)
 ;;; test-magit-dash-pr.el ends here

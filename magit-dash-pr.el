@@ -64,6 +64,7 @@
 (declare-function magit-dash-worktree-symlink-worktree "magit-dash-worktree")
 (declare-function magit-dash-worktree-main-dir "magit-dash-worktree")
 (declare-function magit-dash-gh-actions-fetch-for-pr "magit-dash-gh-actions")
+(declare-function magit-dash-review-file "magit-dash-review" (root pr-number &optional repo))
 (declare-function magit-dash-review-pr "magit-dash-review" (&optional pr-number-or-url repo-dir))
 (declare-function code-review-start "code-review" (url))
 
@@ -421,7 +422,7 @@ Can be:
   :group 'magit-dash)
 
 (defconst magit-dash-pr--default-columns
-  '((org . nil) (repo . t) (pr . t) (author . t) (ci . t) (title . t) (base . nil) (worktree . t) (updated . t) (age . nil) (comments . t) (review . t) (approvals . t) (threads . t))
+  '((org . nil) (repo . t) (pr . t) (author . t) (ci . t) (title . t) (base . nil) (worktree . t) (updated . t) (age . nil) (comments . t) (review . t) (approvals . t) (threads . t) (new . nil))
   "Default enabled state of each PR dashboard column.
 Columns missing from a persisted `magit-dash-pr-columns' fall back to this.")
 
@@ -432,7 +433,7 @@ Persisted across sessions via `savehist-additional-variables'.")
 
 
 (defconst magit-dash-pr--all-columns
-  '(org repo pr author ci title base worktree updated age comments review approvals threads)
+  '(org repo pr author ci title base worktree updated age comments review approvals threads new)
   "All available PR dashboard columns in display order.")
 
 (defconst magit-dash-pr--column-defs
@@ -449,7 +450,8 @@ Persisted across sessions via `savehist-additional-variables'.")
     (comments . ("Cmts"    4  nil))
     (review   . ("Review"  14 t))
     (approvals . ("Appr"   6  t))
-    (threads  . ("Thr"     3  t)))
+    (threads  . ("Thr"     3  t))
+    (new      . ("New"     4  t)))
   "Alist of COLUMN-SYMBOL to default (LABEL WIDTH SORTABLE) for PR columns.
 Org and Repo widths are computed dynamically in
 `magit-dash-pr-dashboard--build-format'.")
@@ -862,6 +864,112 @@ help text.  Blank without a valid STATUS."
                                        open (or (plist-get status :threads-outdated) 0)))
       "")))
 
+;;;; New since last review
+
+(defconst magit-dash-pr-dashboard--reviewed-negative-ttl 60
+  "Seconds a no-review-file result is reused before the path is resolved again.")
+
+(defvar magit-dash-pr-dashboard--reviewed-heads (make-hash-table :test #'equal)
+  "Map of (REPO . NUMBER) to a plist describing that PR's review file.
+Keys: `:file' (resolved path or nil), `:mtime', `:state' (`ok', `none' or
+`unreadable'), `:head', `:source' (`verdict' or `head_oid') and `:checked'.
+A `none' entry is reused for `magit-dash-pr-dashboard--reviewed-negative-ttl'
+seconds, so a render of unreviewed rows spawns no process after the first;
+an `ok' or `unreadable' entry is reused until the file's mtime changes.
+Growth is bounded by the PRs shown: it is emptied on every dashboard refresh.")
+
+(defun magit-dash-pr-dashboard--reviewed (repo number)
+  "Return a plist (:state :head :source) for the review file of REPO and NUMBER.
+:state is `ok' (a head was found), `none' (no file, no head, or no local
+checkout) or `unreadable' (malformed JSON, messaged once per file mtime).
+Local and read only: no network.  Cached per (REPO . NUMBER); see
+`magit-dash-pr-dashboard--reviewed-heads'."
+  (let* ((key (magit-dash-pr-dashboard--norm-key repo number))
+         (entry (map-elt magit-dash-pr-dashboard--reviewed-heads key))
+         (now (float-time))
+         (fresh-none (and entry
+                          (eq (plist-get entry :state) 'none)
+                          (< (- now (plist-get entry :checked))
+                             magit-dash-pr-dashboard--reviewed-negative-ttl)))
+         (file (and entry (plist-get entry :file)))
+         (mtime (and file (file-attribute-modification-time (file-attributes file)))))
+    (cond
+     (fresh-none
+      entry)
+     ((and mtime (time-equal-p mtime (plist-get entry :mtime)))
+      entry)
+     (t
+      (when (and file (null mtime))
+        (setf (map-elt magit-dash-pr-dashboard--reviewed-heads key) nil))
+      (let* ((root (magit-dash-pr-dashboard--find-local-path repo))
+             (file (when root
+                     (require 'magit-dash-review)
+                     (magit-dash-review-file root number repo)))
+             (mtime (and file (file-attribute-modification-time (file-attributes file))))
+             (result (list :file (and mtime file) :mtime mtime :state 'none
+                           :head nil :source nil :checked now)))
+        (when mtime
+          (condition-case err
+              (let* ((data (magit-dash-review-json-read-file file))
+                     (verdict (and (hash-table-p data) (map-elt data "verdict")))
+                     (md (and (hash-table-p data) (map-elt data "magit_dash")))
+                     (usable (lambda (value)
+                               (and (stringp value) (not (string-empty-p value)))))
+                     (head (seq-find usable
+                                     (list (and (hash-table-p verdict) (map-elt verdict "head"))
+                                           (and (hash-table-p verdict)
+                                                (map-elt verdict "submitted_head"))
+                                           (and (hash-table-p md) (map-elt md "head_oid")))))
+                     (from-verdict (and (hash-table-p verdict)
+                                        (or (funcall usable (map-elt verdict "head"))
+                                            (funcall usable
+                                                     (map-elt verdict "submitted_head"))))))
+                (unless (hash-table-p data)
+                  (signal 'json-error (list "not a JSON object")))
+                (setq result
+                      (plist-put
+                       (plist-put
+                        (plist-put result :head head)
+                        :state (if head 'ok 'none))
+                       :source (if from-verdict 'verdict 'head_oid))))
+            ((json-error file-error)
+             (message "magit-dash-pr: review file %s is unreadable: %s"
+                      file (error-message-string err))
+             (setq result (plist-put result :state 'unreadable)))))
+        (setf (map-elt magit-dash-pr-dashboard--reviewed-heads key) result)
+        result)))))
+
+(defun magit-dash-pr-dashboard--format-new (repo number head)
+  "Format the new-since-review cell for REPO and NUMBER given the PR's HEAD.
+\"new\" when the last-reviewed head differs from HEAD.  Blank otherwise,
+with help text saying whether the PR was never reviewed, was reviewed and
+is unchanged, or has an unreadable review file; fully empty when HEAD is
+unknown.  A head that comes only from `magit_dash.head_oid' (synced, no
+verdict) is not a review: it gives a neutral blank cell, never new or
+unchanged.  Heads match when one is a prefix of the other (both at least 7
+characters), so an abbreviated hash never reads as new."
+  (if (not (and (stringp head) (not (string-empty-p head))))
+      ""
+    (let* ((info (magit-dash-pr-dashboard--reviewed repo number))
+           (reviewed (plist-get info :head)))
+      (cond
+       ((eq (plist-get info :state) 'unreadable)
+        (propertize " " 'help-echo "review file unreadable"))
+       ((null reviewed)
+        (propertize " " 'help-echo "Never reviewed"))
+       ((eq (plist-get info :source) 'head_oid)
+        (propertize " " 'help-echo "synced review file, no verdict recorded"))
+       ((or (equal reviewed head)
+            (and (>= (min (length reviewed) (length head)) 7)
+                 (or (string-prefix-p reviewed head)
+                     (string-prefix-p head reviewed))))
+        (propertize " " 'help-echo "Unchanged since last review"))
+       (t
+        (propertize "new" 'face 'warning
+                    'help-echo (format "New commits since last review (was %s, now %s)"
+                                       (substring reviewed 0 (min 8 (length reviewed)))
+                                       (substring head 0 (min 8 (length head))))))))))
+
 (defun magit-dash-pr-dashboard--format-age (updated-at)
   "Format UPDATED-AT ISO timestamp as a human-readable age string."
   (when (and updated-at (not (equal updated-at "")))
@@ -1080,6 +1188,12 @@ marks freshly fetched data and is never dimmed."
                               (magit-dash-pr-dashboard--format-approvals status))
                              ('threads
                               (magit-dash-pr-dashboard--format-threads status))
+                             ('new
+                              (magit-dash-pr-dashboard--format-new
+                               repo-name number
+                               (or (map-elt pr 'headRefOid)
+                                   (plist-get (magit-dash-pr-cache-get repo-name number)
+                                              :head-sha))))
                              ('updated
                               (or (magit-dash-pr-dashboard--format-age (map-elt pr 'updatedAt)) "?"))
                              ('age
@@ -1572,6 +1686,7 @@ other buffers."
               (user-error "Buffer is not in magit-dash-pr-dashboard-mode")))
         (when (called-interactively-p 'interactive)
           (user-error "No PR dashboard buffer exists")))
+    (clrhash magit-dash-pr-dashboard--reviewed-heads)
     (let* ((filters magit-dash-pr-dashboard--filters)
            (args (magit-dash-pr-dashboard--build-args
                   filters magit-dash-pr-dashboard--limit))
