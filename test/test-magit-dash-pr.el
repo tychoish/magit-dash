@@ -654,9 +654,9 @@
     (should (eq (lookup-key m (kbd "c w")) #'magit-dash-pr-dashboard-create-worktree))
     (should (eq (lookup-key m (kbd "c a")) #'magit-dash-pr-dashboard-create-all-worktrees))
     (should (eq (lookup-key m (kbd "c i")) #'magit-dash-pr-dashboard-fetch-ci))
+    (should (eq (lookup-key m (kbd "c r")) #'magit-dash-pr-dashboard-diff-review))
     (when (magit-dash-pr-code-review-available-p)
-      (should-not (eq (lookup-key m (kbd "R")) #'magit-dash-pr-dashboard-code-review))
-      (should (eq (lookup-key m (kbd "c r")) #'magit-dash-pr-dashboard-code-review)))
+      (should (eq (lookup-key m (kbd "c b")) #'magit-dash-pr-dashboard-code-review)))
     (should (eq (lookup-key m (kbd "b"))   #'magit-dash-pr-dashboard-open-browser))
     (should (eq (lookup-key m (kbd "m m")) #'magit-dash-pr-dashboard-menu))
     (should (eq (lookup-key m (kbd "m t")) #'magit-dash-pr-dashboard-toggle-mark))
@@ -682,6 +682,21 @@
       (should (string-match-p "magit-dash-pr-dashboard-unmark-all" flat))
       (should (string-match-p ":key \"wm\" :description \"Resume chain\" :command magit-dash-chain-resume" flat))
       (should-not (string-match-p ":key \"wC\"" flat)))))
+
+(ert-deftest magit-dash-pr/dashboard-menu-keys-bound-and-unique ()
+  "The transient binds cr and cb to the review commands, and every key is unique."
+  (let* ((flat (format "%S" (get 'magit-dash-pr-dashboard-menu 'transient--layout)))
+         (case-fold-search nil)
+         (keys nil)
+         (start 0))
+    (should (string-match-p ":key \"cr\" :description \"[^\"]*\" :command magit-dash-pr-dashboard-diff-review" flat))
+    (should (string-match-p ":key \"cb\" :description \"[^\"]*\" :command magit-dash-pr-dashboard-code-review" flat))
+    (should (string-match-p "magit-dash-pr-dashboard-code-review[^]]*:if magit-dash-pr-code-review-available-p" flat))
+    (while (string-match ":key \"\\([^\"]+\\)\"" flat start)
+      (push (match-string 1 flat) keys)
+      (setq start (match-end 0)))
+    (should keys)
+    (should (equal (length keys) (length (delete-dups (copy-sequence keys)))))))
 
 (ert-deftest magit-dash-pr/dashboard-pr-url-extraction ()
   "magit-dash-pr-dashboard--pr-url resolves URLs from strings, plists, and alists."
@@ -740,11 +755,13 @@
         ;; When unavailable
         (cl-letf (((symbol-function 'magit-dash-pr-code-review-available-p) (lambda () nil)))
           (magit-dash-pr-dashboard--setup-code-review-keys)
-          (should-not (lookup-key magit-dash-pr-dashboard-mode-map (kbd "c r"))))
+          (should-not (lookup-key magit-dash-pr-dashboard-mode-map (kbd "c b")))
+          (should (eq (lookup-key magit-dash-pr-dashboard-mode-map (kbd "c r"))
+                      #'magit-dash-pr-dashboard-diff-review)))
         ;; When available
         (cl-letf (((symbol-function 'magit-dash-pr-code-review-available-p) (lambda () t)))
           (magit-dash-pr-dashboard--setup-code-review-keys)
-          (should (eq (lookup-key magit-dash-pr-dashboard-mode-map (kbd "c r"))
+          (should (eq (lookup-key magit-dash-pr-dashboard-mode-map (kbd "c b"))
                       #'magit-dash-pr-dashboard-code-review))))
     (magit-dash-pr-dashboard--setup-code-review-keys)))
 

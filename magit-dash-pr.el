@@ -595,16 +595,18 @@ Uses active columns.  WIDTH is available window width; when nil,
   (when (boundp 'magit-dash-pr-dashboard-mode-map)
     (keymap-set magit-dash-pr-dashboard-mode-map "c v" #'magit-dash-pr-dashboard-diff-review)
     (keymap-set magit-dash-pr-dashboard-mode-map "v v" #'magit-dash-pr-dashboard-diff-review)
+    (keymap-set magit-dash-pr-dashboard-mode-map "c r" #'magit-dash-pr-dashboard-diff-review)
     (if (magit-dash-pr-code-review-available-p)
-        (keymap-set magit-dash-pr-dashboard-mode-map "c r" #'magit-dash-pr-dashboard-code-review)
-      (keymap-unset magit-dash-pr-dashboard-mode-map "c r" t))))
+        (keymap-set magit-dash-pr-dashboard-mode-map "c b" #'magit-dash-pr-dashboard-code-review)
+      (keymap-unset magit-dash-pr-dashboard-mode-map "c b" t))))
 
 (defvar magit-dash-pr-dashboard-mode-map
   (let ((m (make-sparse-keymap)))
     (keymap-set m "RET" #'magit-dash-pr-dashboard-open-browser)
     (keymap-set m "b"   #'magit-dash-pr-dashboard-open-browser)
+    (keymap-set m "c r" #'magit-dash-pr-dashboard-diff-review)
     (when (magit-dash-pr-code-review-available-p)
-      (keymap-set m "c r" #'magit-dash-pr-dashboard-code-review))
+      (keymap-set m "c b" #'magit-dash-pr-dashboard-code-review))
     (keymap-set m "c v" #'magit-dash-pr-dashboard-diff-review)
     (keymap-set m "w"   #'magit-dash-pr-dashboard-open-worktree)
     (keymap-set m "c w" #'magit-dash-pr-dashboard-create-worktree)
@@ -2321,7 +2323,8 @@ Key groups mirror `magit-dash-menu': w worktree, c CI, f filter, m mark."
   [["Pull Request"
     ("b"   "Open in browser"          magit-dash-pr-dashboard-open-browser)
     ("cv"  "Open in diff-review"      magit-dash-pr-dashboard-diff-review)
-    ("cr"  "Open in code-review"      magit-dash-pr-dashboard-code-review
+    ("cr"  "Review (diff-review)"     magit-dash-pr-dashboard-diff-review)
+    ("cb"  "Open in code-review"      magit-dash-pr-dashboard-code-review
      :if magit-dash-pr-code-review-available-p)]
    ["Mark / Bulk"
     ("mt"  "Toggle mark"              magit-dash-pr-dashboard-toggle-mark)
