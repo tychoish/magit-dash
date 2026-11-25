@@ -184,6 +184,7 @@ MAX-CHARS (default 1000)."
                                  :body (magit-dash-pr--truncate-text
                                         (map-elt c 'body) max-chars)
                                  :created_at (or (map-elt c 'createdAt) "")
+                                 :database_id (map-elt c 'databaseId)
                                  :commit_oid (map-nested-elt c '(commit oid))))
                          comments-nodes))
               (body (magit-dash-pr--truncate-text
@@ -218,7 +219,7 @@ Returns a list of plists."
         nodes{
           id isResolved isOutdated path line startLine diffSide originalLine originalStartLine
           comments(first:50){
-            nodes{ id author{login} body createdAt commit{oid} }
+            nodes{ id databaseId author{login} body createdAt commit{oid} }
           }
         }
       }

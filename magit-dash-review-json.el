@@ -196,7 +196,7 @@ resolved flag is read-only in code-review and never written."
      (t
       (let ((stored (seq-keep
                      (lambda (reply)
-                       (when (magit-dash-review-json--empty-p (map-elt reply "gh_comment_id"))
+                       (unless (magit-dash-review-json-published-reply-p reply)
                          (code-review-api-upsert-comment
                           repo number
                           (list :id (or (map-elt reply "cr_id")
@@ -628,7 +628,8 @@ Hash tables are modified in place."
 
 (defun magit-dash-review-json-find-match (comment candidates)
   "Return the member of CANDIDATES that is the same thread as COMMENT, or nil.
-Tiers, first hit wins: GitHub node id (remote_id or gh_comment_id), cr_id
+Tiers, first hit wins: GitHub node id (remote_id or gh_comment_id), the REST
+id gh_database_id (set when a send was acknowledged without a node id), cr_id
 \(also the id `magit-dash-review-json-draft-id' derives for a comment
 without one, in either direction), gh_thread_id, then content hash of path,
 line and body.  A candidate whose
@@ -655,6 +656,9 @@ locally authored comments are never absorbed by a GitHub thread."
              (seq-some (lambda (id) (member id (list (map-elt cand "remote_id")
                                                      (map-elt cand "gh_comment_id"))))
                        node-ids))
+           (lambda (cand)
+             (and (integerp (map-elt comment "gh_database_id"))
+                  (equal (map-elt comment "gh_database_id") (map-elt cand "gh_database_id"))))
            (lambda (cand) (and cr-id (equal cr-id (map-elt cand "cr_id"))))
            (lambda (cand)
              (or (and (not cr-id)
@@ -713,6 +717,9 @@ HEAD-SHA and BASE-SHA are the commit SHAs for resolving blob hashes."
                        (setf (map-elt r-ht "id") (magit-dash-review-json-make-id c-id))
                        (unless (string-empty-p c-id)
                          (setf (map-elt r-ht "gh_comment_id") c-id))
+                       (when-let* ((db (or (map-elt c 'databaseId) (map-elt c :database_id)))
+                                   ((integerp db)))
+                         (setf (map-elt r-ht "gh_database_id") db))
                        (setf (map-elt r-ht "author") (or (map-nested-elt c '(author login))
                                                          (map-elt c :author)
                                                          "unknown"))
@@ -724,6 +731,9 @@ HEAD-SHA and BASE-SHA are the commit SHAs for resolving blob hashes."
     (setf (map-elt comment-ht "id") (magit-dash-review-json-make-id thread-id))
     (setf (map-elt comment-ht "gh_thread_id") thread-id)
     (setf (map-elt comment-ht "gh_comment_id") first-id)
+    (when-let* ((db (or (map-elt first-c 'databaseId) (map-elt first-c :database_id)))
+                ((integerp db)))
+      (setf (map-elt comment-ht "gh_database_id") db))
     (setf (map-elt comment-ht "gh_resolved")
           (if is-resolved
               t
@@ -754,6 +764,14 @@ HEAD-SHA and BASE-SHA are the commit SHAs for resolving blob hashes."
       (setf (map-elt comment-ht "outdated") t))
     (setf (map-elt comment-ht "replies") (vconcat replies))
     comment-ht))
+
+(defun magit-dash-review-json-published-reply-p (reply)
+  "Return non-nil when the REPLY table is already on GitHub.
+It has a gh_comment_id, or was sent (status \"sent\") with a REST
+gh_database_id, which is all a send acknowledged without a node id leaves."
+  (or (not (magit-dash-review-json--empty-p (map-elt reply "gh_comment_id")))
+      (and (equal (map-elt reply "status") "sent")
+           (integerp (map-elt reply "gh_database_id")))))
 
 (defun magit-dash-review-json-merge-thread (local remote)
   "Merge the REMOTE thread into a copy of the LOCAL thread and return it.
@@ -794,13 +812,20 @@ shares nothing with LOCAL or REMOTE."
      ((eq (map-elt local "gh_resolved") t)
       (map-delete merged "local_resolved")
       (setf (map-elt merged "gh_reopened") t)))
-    (let* ((remote-ids (seq-map (lambda (reply) (map-elt reply "gh_comment_id"))
-                                (map-elt remote "replies")))
+    (let* ((remote-ids (seq-remove #'magit-dash-review-json--empty-p
+                                   (seq-map (lambda (reply) (map-elt reply "gh_comment_id"))
+                                            (map-elt remote "replies"))))
+           (remote-db-ids (seq-remove #'null
+                                      (seq-map (lambda (reply) (map-elt reply "gh_database_id"))
+                                               (map-elt remote "replies"))))
            (local-replies (append (map-elt local "replies") nil))
            (missing (seq-filter
                      (lambda (reply)
-                       (and (not (magit-dash-review-json--empty-p (map-elt reply "gh_comment_id")))
-                            (not (member (map-elt reply "gh_comment_id") remote-ids))))
+                       (and (magit-dash-review-json-published-reply-p reply)
+                            (not (and (not (magit-dash-review-json--empty-p (map-elt reply "gh_comment_id")))
+                                      (member (map-elt reply "gh_comment_id") remote-ids)))
+                            (not (and (map-elt reply "gh_database_id")
+                                      (member (map-elt reply "gh_database_id") remote-db-ids)))))
                      local-replies))
            (flagged (seq-map (lambda (reply)
                                (let ((copy (magit-dash-review-json-deep-copy reply)))
@@ -810,9 +835,7 @@ shares nothing with LOCAL or REMOTE."
       (setf (map-elt merged "replies")
             (magit-dash-review-json-deep-copy
              (vconcat (map-elt remote "replies")
-                      (seq-filter (lambda (reply)
-                                    (magit-dash-review-json--empty-p (map-elt reply "gh_comment_id")))
-                                  local-replies)
+                      (seq-remove #'magit-dash-review-json-published-reply-p local-replies)
                       flagged))))
     merged))
 
@@ -998,13 +1021,14 @@ on the UI thread or in a live daemon."
 
 (defun magit-dash-review-json--reply-content (comment)
   "Return the bodies of the unpublished replies of COMMENT as a list.
-A reply with a gh_comment_id is on GitHub, where code-review's API lists it as
-its own comment rather than a reply, so only unpublished replies (code-review
-drafts, which have no gh_comment_id) are comparable.  Bodies alone are
+A reply that is published (see `magit-dash-review-json-published-reply-p')
+is on GitHub, where code-review's API lists it as its own comment rather than
+a reply, so only unpublished replies (code-review drafts, which have no
+gh_comment_id) are comparable.  Bodies alone are
 compared: code-review stamps its own author and time on a draft."
   (thread-last (append (map-elt comment "replies") nil)
                (seq-filter (lambda (reply)
-                             (magit-dash-review-json--empty-p (map-elt reply "gh_comment_id"))))
+                             (not (magit-dash-review-json-published-reply-p reply))))
                (seq-map (lambda (reply) (map-elt reply "body")))))
 
 (defun magit-dash-review-json-apply-assigned (table result)
@@ -1123,23 +1147,28 @@ with its own message), and return the import result plist."
              (plist-get result :skipped) (plist-get result :verdict-failed))
     result))
 
+(defun magit-dash-review-json-viewed-blob-match-p (a b)
+  "Return non-nil when blob hashes A and B name the same blob.
+Both must be strings of at least 7 characters, and one must be a prefix of
+the other, since code-review stores the index line's abbreviated hash."
+  (and (stringp a) (stringp b)
+       (>= (min (length a) (length b)) 7)
+       (or (string-prefix-p a b) (string-prefix-p b a))))
+
 (defun magit-dash-review-json-viewed-agreement (local api)
   "Return the entries of LOCAL that code-review's API also marks viewed.
 LOCAL is the diff-review viewed table (path to blob); API is the seam
 `viewed' table.  An entry counts only when API says viewed and the blobs
-match (prefix match, at least 7 characters, since code-review stores the
-index line's abbreviated hash): code-review marks follow the diff block, not
-the blob, so its own viewed flag alone is not trusted.  API marks are local
-to code-review, never pushed to GitHub."
+match (`magit-dash-review-json-viewed-blob-match-p'): code-review marks
+follow the diff block, not the blob, so its own viewed flag alone is not
+trusted.  API marks are local to code-review, never pushed to GitHub."
   (let ((agreed (make-hash-table :test #'equal)))
     (map-do (lambda (path blob)
-              (let* ((info (map-elt api path))
-                     (theirs (and info (map-elt info "blob"))))
+              (let ((info (map-elt api path)))
                 (when (and info
                            (eq (map-elt info "viewed") t)
-                           (stringp blob) (stringp theirs)
-                           (>= (min (length blob) (length theirs)) 7)
-                           (or (string-prefix-p theirs blob) (string-prefix-p blob theirs)))
+                           (magit-dash-review-json-viewed-blob-match-p
+                            blob (map-elt info "blob")))
                   (setf (map-elt agreed path) blob))))
             local)
     agreed))

@@ -1163,5 +1163,67 @@
                          '(:added 0 :updated 0 :skipped 1))))))
    t))
 
+(ert-deftest magit-dash-review-json/viewed-blob-match-p ()
+  (should (magit-dash-review-json-viewed-blob-match-p "abcdef1234" "abcdef1"))
+  (should (magit-dash-review-json-viewed-blob-match-p "abcdef1" "abcdef1234"))
+  (should-not (magit-dash-review-json-viewed-blob-match-p "abcdef1" "abcdef2"))
+  (should-not (magit-dash-review-json-viewed-blob-match-p "abcde" "abcde"))
+  (should-not (magit-dash-review-json-viewed-blob-match-p nil "abcdef1")))
+
+(ert-deftest magit-dash-review-json/merge-thread-nil-ids-never-match ()
+  "A sent reply without a node id is not \"on the remote\" because a remote reply has none."
+  (let* ((local (magit-dash-review-json-deep-copy
+                 (let ((h (make-hash-table :test #'equal)))
+                   (setf (map-elt h "id") "t")
+                   (setf (map-elt h "replies")
+                         (vector (let ((r (make-hash-table :test #'equal)))
+                                   (setf (map-elt r "id") "r1")
+                                   (setf (map-elt r "body") "mine")
+                                   (setf (map-elt r "status") "sent")
+                                   (setf (map-elt r "gh_database_id") 5)
+                                   r)))
+                   h)))
+         (remote (let ((h (make-hash-table :test #'equal)))
+                   (setf (map-elt h "replies")
+                         (vector (let ((r (make-hash-table :test #'equal)))
+                                   (setf (map-elt r "body") "other")
+                                   r)))
+                   h))
+         (merged (magit-dash-review-json-merge-thread local remote))
+         (replies (append (map-elt merged "replies") nil)))
+    (should (= 2 (length replies)))
+    (should (eq t (map-elt (car (last replies)) "gh_missing")))))
+
+(ert-deftest magit-dash-review-json/find-match-uses-the-rest-id-before-content ()
+  (let* ((mk (lambda (&rest kv)
+               (let ((h (make-hash-table :test #'equal)))
+                 (seq-do (lambda (pair) (setf (map-elt h (car pair)) (cadr pair)))
+                         (seq-partition kv 2))
+                 h)))
+         (comment (funcall mk "id" "x" "gh_database_id" 5 "body" "same" "path" "a.el" "lines" [1 1]))
+         (same-content (funcall mk "id" "b" "body" "same" "path" "a.el" "lines" [1 1]))
+         (same-rest-id (funcall mk "id" "a" "gh_database_id" 5 "body" "different" "path" "z.el")))
+    (should (eq same-rest-id
+                (magit-dash-review-json-find-match comment (list same-content same-rest-id))))))
+
+(ert-deftest magit-dash-review-json/op-write-never-upserts-a-sent-reply-with-only-a-rest-id ()
+  (let* ((mk (lambda (&rest kv)
+               (let ((h (make-hash-table :test #'equal)))
+                 (seq-do (lambda (pair) (setf (map-elt h (car pair)) (cadr pair)))
+                         (seq-partition kv 2))
+                 h)))
+         (comment (funcall mk "id" "t" "cr_id" 77 "origin" "github" "gh_thread_id" "T1"
+                           "path" "a.el"
+                           "replies" (vector (funcall mk "id" "r1" "body" "sent" "status" "sent"
+                                                      "gh_database_id" 5)
+                                             (funcall mk "id" "r2" "body" "draft reply"))))
+         (bodies nil))
+    (cl-letf (((symbol-function 'code-review-api-upsert-comment)
+               (lambda (_repo _number plist &rest _)
+                 (push (plist-get plist :body) bodies)
+                 plist)))
+      (magit-dash-review-json--op-write '("o/r" . 1) comment))
+    (should (equal '("draft reply") bodies))))
+
 (provide 'test-magit-dash-review-json)
 ;;; test-magit-dash-review-json.el ends here
