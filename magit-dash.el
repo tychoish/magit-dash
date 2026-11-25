@@ -3058,6 +3058,7 @@ Dimming means \"old, press refresh\".  A stale row whose HEAD is unchanged
 is not auto-refreshed, and staleness is only evaluated when a row is
 rebuilt (`magit-dash--build-entry'), not on a timer."
   (and (numberp (plist-get stats :fetched-at))
+       (not (magit-dash-pr-cache-future-p stats now))
        (magit-dash-pr-cache-stale-p stats now)))
 
 (defun magit-dash--dim-cells (cells)
