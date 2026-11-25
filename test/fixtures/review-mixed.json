@@ -1,0 +1,45 @@
+{
+  "format": "diff-review/1",
+  "root": "/tmp/wt/cr-42/",
+  "base": "main",
+  "head": "topic",
+  "x_foo": "top-level unknown",
+  "magit_dash": {"provider": "github", "repo": "owner/repo", "number": 42},
+  "code_review": {"pullreq_id": "PR_kwDOabc123", "account": "tychoish"},
+  "viewed": {"src/a.ts": "bbbb2222"},
+  "comments": [
+    {
+      "id": "gh-t1",
+      "gh_thread_id": "PRRT_kwDOabc1",
+      "gh_comment_id": "PRRC_kwDOabc1",
+      "gh_resolved": false,
+      "origin": "github",
+      "path": "src/a.ts",
+      "lines": [3, 5],
+      "author": "octocat",
+      "at": "2026-11-18T10:00:00+13:00",
+      "body": "Why not use a map here?",
+      "resolved": true,
+      "cr_id": 101,
+      "remote_id": "PRRC_kwDOnode1",
+      "status": "sent",
+      "x_bar": "local-only key",
+      "replies": [
+        {"author": "tychoish", "at": "2026-11-19T09:00:00+13:00", "body": "Unpublished local reply."}
+      ]
+    },
+    {
+      "id": "l1",
+      "path": "src/c.ts",
+      "lines": [1, 2],
+      "author": "tychoish",
+      "at": "2026-11-19T10:00:00+13:00",
+      "body": "Local-only thread.",
+      "origin": "local",
+      "cr_id": 9,
+      "status": "draft",
+      "x_bar": "kept",
+      "replies": []
+    }
+  ]
+}

@@ -1,0 +1,74 @@
+{
+  "format": "diff-review/1",
+  "root": "/tmp/wt/cr-42/",
+  "base": "main",
+  "head": "topic",
+  "magit_dash": {
+    "provider": "github",
+    "repo": "owner/repo",
+    "number": 42,
+    "url": "https://github.com/owner/repo/pull/42",
+    "worktree": "/tmp/wt/cr-42/",
+    "head_oid": "0123456789abcdef0123456789abcdef01234567",
+    "base_oid": "76543210fedcba9876543210fedcba9876543210",
+    "synced_at": "2026-11-20T09:00:00+13:00"
+  },
+  "x_foo": {"keep": ["me"]},
+  "code_review": {
+    "pullreq_id": "PR_kwDOabc123",
+    "account": "tychoish",
+    "analysis": {
+      "src/a.ts": {
+        "0": {"rank": 1, "tags": ["NO-TEST"], "criteria": ["c1", "c2"]}
+      }
+    }
+  },
+  "viewed": {"src/b.ts": "dddd4444"},
+  "comments": [
+    {
+      "id": "gh-t1",
+      "gh_thread_id": "PRRT_kwDOabc1",
+      "gh_comment_id": "PRRC_kwDOabc1",
+      "gh_resolved": true,
+      "origin": "github",
+      "path": "src/a.ts",
+      "lines": [3, 5],
+      "blob": "bbbb2222",
+      "author": "octocat",
+      "at": "2026-11-18T10:00:00+13:00",
+      "body": "Why not use a map here?",
+      "resolved": false,
+      "outdated": true,
+      "cr_id": 101,
+      "remote_id": "PRRC_kwDOnode1",
+      "x_bar": 1,
+      "status": "sent",
+      "replies": [
+        {
+          "id": "gh-r1",
+          "gh_comment_id": "PRRC_kwDOabc2",
+          "author": "tychoish",
+          "at": "2026-11-18T11:00:00+13:00",
+          "body": "Order matters."
+        }
+      ]
+    },
+    {
+      "id": "gh-t2",
+      "gh_thread_id": "PRRT_kwDOabc2",
+      "gh_comment_id": "PRRC_kwDOabc3",
+      "gh_resolved": true,
+      "origin": "github",
+      "path": "src/b.ts",
+      "lines": [9, 9],
+      "author": "octocat",
+      "at": "2026-11-18T12:00:00+13:00",
+      "body": "Nit: rename.",
+      "resolved": true,
+      "cr_id": 102,
+      "remote_id": "PRRC_kwDOabc3",
+      "status": "sent",
+      "replies": []
+    }
+  ]
+}

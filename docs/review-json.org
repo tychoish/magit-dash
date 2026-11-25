@@ -1,0 +1,79 @@
+#+title: diff-review/1 interchange contract
+
+The review JSON file is the interchange format between =diff-review= (the review front end), magit-dash, and code-review. Core fields are defined by [[https://github.com/xiaoxinghu/diff-review][diff-review]] and never change here. Extension keys are optional additions; consumers must ignore keys they do not know, and writers must preserve keys they do not understand.
+
+Fixtures: =test/fixtures/review-plain.json=, =review-remote-threads.json=, =review-draft.json=, =review-mixed.json=. Round-trip tests: =test/test-magit-dash-review-contract.el=.
+
+* Core fields (=diff-review/1=)
+
+| Key        | Type   | Meaning                                                                                  |
+|------------+--------+------------------------------------------------------------------------------------------|
+| =format=   | string | Always ="diff-review/1"=.                                                                |
+| =root=     | string | Worktree directory, with trailing slash.                                                 |
+| =base=     | string | Base ref.                                                                                |
+| =head=     | string | Branch followed, or a commit for a fixed range. Omitted means review the live worktree.  |
+| =viewed=   | object | Path to blob hash at which the file was viewed. A mark clears when the blob changes.     |
+| =comments= | array  | Comment threads (below).                                                                 |
+| =verdict=  | object | Optional. =state= (=changes= or =approved=), =head= (full hash), =by=, =at=.             |
+
+Each comment is a thread:
+
+| Key        | Type            | Meaning                                                                    |
+|------------+-----------------+----------------------------------------------------------------------------|
+| =id=       | string          | Local id.                                                                  |
+| =path=     | string          | Optional; absent means a comment on the whole review.                      |
+| =lines=    | array of 2 ints | Optional. First and last line, inclusive, counted in the content =blob= names.       |
+| =blob=     | string          | Blob hash of =path= when the comment was written.                          |
+| =author=   | string          |                                                                            |
+| =at=       | string          | ISO 8601 timestamp.                                                        |
+| =body=     | string          |                                                                            |
+| =replies=  | array           | Optional. Flat list of =author=, =at=, =body= (plus =id=, =gh_comment_id= from magit-dash). |
+| =resolved= | boolean         | Optional. JSON =true= or =false=. Parsed with =:false-object :false=.                |
+| =outdated= | boolean         | Optional; set when GitHub reports the thread outdated.                     |
+
+* magit-dash keys (already in use)
+
+Written by =magit-dash-review--transcode-thread= and =--merge-json=.
+
+- Top level =magit_dash=: =provider= (="github"=), =repo=, =number=, =url=, =worktree=, =head_oid=, =base_oid=, =synced_at=. Rebuilt on every merge.
+- Per comment: =gh_thread_id=, =gh_comment_id=, =gh_resolved=, =origin=. =gh_comment_id= is a string and may be ="" when the first comment has no id; replies carry it once published.
+- =origin= values written by the code: =github= (transcoded or submitted threads), =agent= (agent-created comments), =code-review= (comments imported from code-review). =local= is only /read/ by =--merge-json= (to retain a thread); the code does not currently write it, so treat it as reserved for locally authored threads.
+
+* Extension keys
+
+All optional.
+
+| Where                    | Key                   | Type / meaning                                                       |
+|--------------------------+-----------------------+----------------------------------------------------------------------|
+| top level                | =code_review=         | Object: =pullreq_id= (string), =account=, =analysis=.                |
+| =code_review.analysis=   | by path, then by hunk | =rank= (integer), =tags= (strings such as =NO-TEST=), =criteria= (ids). |
+| each comment             | =cr_id=               | Integer; code-review's comment id.                                   |
+| each comment             | =remote_id=           | String; GitHub node id once sent. May differ from =gh_comment_id=.   |
+| each comment             | =status=              | =draft=, =pending= or =sent=.                                        |
+
+=pullreq_id= is the chosen spelling (snake_case, like every other JSON key). =cr_id= is an integer while =remote_id= and =pullreq_id= are strings.
+
+Proposed convention, to be confirmed by the json-adapter task: the hunk key under =code_review.analysis.<path>= is the zero-based hunk index as a string (="0"=, ="1"=, ...).
+
+Distinct from the core =resolved= flag, =gh_resolved= records GitHub's state and =resolved= may be changed locally, so they can differ.
+
+* Merge behaviour
+
+** Current (=magit-dash-review--merge-json=)
+
+- Matching: only by =gh_thread_id=. Comments without one never match.
+- The result is a freshly built table. Only =format=, =root=, =base=, =head=, =magit_dash= (rebuilt), =viewed=, =verdict= (if present) and =comments= are written. Unknown top-level keys and =code_review= from the existing file are dropped.
+- A matched thread is built by copying the /remote/ thread, then overriding =id= (local id kept), =resolved= and =replies=. Local-only keys on it (=cr_id=, =remote_id=, =status=, and any unknown key such as =x_bar=) are dropped unless the remote thread carries them.
+- Sticky-resolved: =resolved= becomes =true= if either the remote or the local thread is resolved, otherwise =false=. A thread resolved locally is never reopened by a sync.
+- Replies: all remote replies, followed by local replies that have no =gh_comment_id= (missing or empty), i.e. unpublished ones. Published local replies are replaced by their remote copies.
+- Unmatched remote threads are added as they are. Existing comments with no =gh_thread_id=, or =origin= of =local= or =agent=, or not seen during matching, are kept whole (unknown keys included).
+
+** Target (json-adapter task; not yet implemented)
+
+- Preserve unknown keys: top-level keys such as =code_review= and =x_foo=, and per-comment keys, survive a merge.
+- Matching order: =remote_id=, then =cr_id=, then a hash of path, line and body, falling back to =gh_thread_id= semantics where applicable.
+- Sticky-resolved and the reply rule above are unchanged.
+
+* Encoding
+
+Parse with =:object-type 'hash-table :array-type 'array :null-object nil :false-object :false=; serialize with the matching =:null-object nil :false-object :false=. Empty =viewed= is ={}=, empty =replies= is =[]=.

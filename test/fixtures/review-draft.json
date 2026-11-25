@@ -1,0 +1,43 @@
+{
+  "format": "diff-review/1",
+  "root": "/tmp/wt/cr-7/",
+  "base": "main",
+  "head": "topic",
+  "code_review": {"pullreq_id": "PR_kwDOdef456", "account": "tychoish",
+    "analysis": {"src/a.ts": {"1": {"rank": 2, "tags": [], "criteria": ["c3"]}}}},
+  "viewed": {"src/a.ts": "cccc3333"},
+  "comments": [
+    {
+      "id": "d1",
+      "path": "src/a.ts",
+      "lines": [20, 22],
+      "blob": "cccc3333",
+      "author": "tychoish",
+      "at": "2026-11-21T08:00:00+13:00",
+      "body": "Draft: handle the nil case.",
+      "origin": "local",
+      "cr_id": 7,
+      "status": "draft",
+      "replies": []
+    },
+    {
+      "id": "d2",
+      "path": "src/a.ts",
+      "lines": [30, 30],
+      "blob": "cccc3333",
+      "author": "tychoish",
+      "at": "2026-11-21T08:05:00+13:00",
+      "body": "Queued for the next submit.",
+      "origin": "local",
+      "cr_id": 8,
+      "status": "pending",
+      "replies": []
+    }
+  ],
+  "verdict": {
+    "state": "approved",
+    "head": "0123456789abcdef0123456789abcdef01234567",
+    "by": "tychoish",
+    "at": "2026-11-21T08:10:00+13:00"
+  }
+}
