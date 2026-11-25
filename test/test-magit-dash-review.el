@@ -1177,5 +1177,20 @@ returns an alist response, or (CODE . OUTPUT) for a failure."
                (data (magit-dash-review--read-json-file rf)))
           (should (equal (map-elt data "root") (file-name-as-directory wt-dir))))))))
 
+(ert-deftest magit-dash-review/fetch-threads-never-sends-slug-through-F ()
+  "Owner and repo are raw `-f' fields so `-F' cannot read local files."
+  (let ((seen nil))
+    (cl-letf (((symbol-function 'magit-dash-gh--call-process)
+               (lambda (args &rest _)
+                 (setq seen args)
+                 (cons 0 "{\"data\":{\"repository\":{\"pullRequest\":{\"reviewThreads\":{\"nodes\":[]}}}}}"))))
+      (magit-dash-pr-fetch-threads-graphql "@secret/@repo" 5))
+    (should seen)
+    (seq-do (lambda (pair)
+              (when (string-match-p "\\`\\(owner\\|repo\\)=" (cadr pair))
+                (should (equal "-f" (car pair)))))
+            (seq-partition seen 2))
+    (should (member "owner=@secret" seen))))
+
 (provide 'test-magit-dash-review)
 ;;; test-magit-dash-review.el ends here

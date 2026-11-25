@@ -230,8 +230,8 @@ Returns a list of plists."
                   (magit-dash-gh--call-process
                    (list "api" "graphql"
                          "-f" (concat "query=" query)
-                         "-F" (concat "owner=" owner)
-                         "-F" (concat "repo=" repo)
+                         "-f" (concat "owner=" owner)
+                         "-f" (concat "repo=" repo)
                          "-F" (format "number=%d" number)
                          "-F" (format "first=%d" first-count))
                    (or dir default-directory))))
@@ -323,9 +323,9 @@ Returns a list of plists."
     (magit-dash-gh--run-process
      (list "api" "graphql"
            "-f" (format "query=%s" (magit-dash-pr--graphql-query))
-           "-F" (format "owner=%s" owner)
-           "-F" (format "repo=%s"  repo)
-           "-F" (format "number=%s" pr-num))
+           "-f" (format "owner=%s" owner)
+           "-f" (format "repo=%s" repo)
+           "-F" (format "number=%d" (string-to-number (format "%s" pr-num))))
      repo-dir
      (lambda (output)
        (let* ((file    "pr-review-threads.json")
