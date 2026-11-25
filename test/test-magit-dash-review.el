@@ -362,6 +362,59 @@
           (should (equal (map-elt wt-data "base") "HEAD"))
           (should-not (map-elt wt-data "head")))))))
 
+(defun magit-dash-review-test/sync-fixture (file)
+  "Write a minimal synced review FILE for owner/repo#12."
+  (let ((data (make-hash-table :test #'equal))
+        (md (make-hash-table :test #'equal)))
+    (setf (map-elt md "repo") "owner/repo")
+    (setf (map-elt md "number") 12)
+    (setf (map-elt md "worktree") (file-name-directory file))
+    (setf (map-elt data "magit_dash") md)
+    (setf (map-elt data "comments") [])
+    (magit-dash-review--write-json-file file data)))
+
+(defmacro magit-dash-review-test/with-sync-stubs (on-threads &rest body)
+  "Run BODY with network stubbed; ON-THREADS is called during the threads fetch."
+  (declare (indent 1))
+  `(cl-letf (((symbol-function 'magit-dash-review--fetch-pr-metadata)
+              (lambda (&rest _) '((headRefName . "h") (baseRefName . "main"))))
+             ((symbol-function 'magit-dash-pr-fetch-threads-graphql)
+              (lambda (&rest _) ,on-threads nil)))
+     ,@body))
+
+(ert-deftest magit-dash-review/sync-merges-against-fresh-read ()
+  "Edits made to the file during the network calls survive the sync."
+  (magit-dash-review-test/with-temp-dir
+    (let ((file (expand-file-name "review/pr-12.json" default-directory)))
+      (magit-dash-review-test/sync-fixture file)
+      (magit-dash-review-test/with-sync-stubs
+          (let ((data (magit-dash-review--read-json-file file))
+                (c (make-hash-table :test #'equal)))
+            (setf (map-elt c "id") "late")
+            (setf (map-elt c "body") "added meanwhile")
+            (setf (map-elt data "comments") (vector c))
+            (magit-dash-review--write-json-file file data))
+        (magit-dash-review-sync file))
+      (should (equal '("added meanwhile")
+                     (seq-map (lambda (c) (map-elt c "body"))
+                              (map-elt (magit-dash-review--read-json-file file) "comments")))))))
+
+(ert-deftest magit-dash-review/sync-skips-when-buffer-has-unsaved-edits ()
+  (magit-dash-review-test/with-temp-dir
+    (let ((file (expand-file-name "review/pr-12.json" default-directory)))
+      (magit-dash-review-test/sync-fixture file)
+      (let ((buf (find-file-noselect file))
+            (before (with-temp-buffer (insert-file-contents file) (buffer-string))))
+        (unwind-protect
+            (progn
+              (with-current-buffer buf (goto-char (point-max)) (insert " "))
+              (magit-dash-review-test/with-sync-stubs nil
+                (should-not (magit-dash-review-sync file)))
+              (should (buffer-modified-p buf))
+              (should (equal before (with-temp-buffer (insert-file-contents file) (buffer-string)))))
+          (with-current-buffer buf (set-buffer-modified-p nil))
+          (kill-buffer buf))))))
+
 (ert-deftest magit-dash-review/graphql-delta-submit ()
   "magit-dash-review-submit publishes non-draft threads, replies, resolutions, and stamps IDs."
   (magit-dash-review-test/with-temp-dir

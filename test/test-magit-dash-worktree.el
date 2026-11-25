@@ -190,5 +190,58 @@
       (magit-dash-worktree-review-prs "/tmp/test-repo")
       (should (equal (list "/tmp/test-repo" t nil) review-called)))))
 
+
+(defmacro magit-dash-worktree-test--with-linked (vars &rest body)
+  "Bind (REPO WT) of VARS to a repo and a linked worktree on branch feat; run BODY."
+  (declare (indent 1))
+  `(let* ((,(car vars) (magit-dash-test--make-repo))
+          (,(cadr vars) (expand-file-name "wt-feat/" (make-temp-file "mdtest-wt-" t))))
+     (unwind-protect
+         (progn
+           (magit-dash-test--git ,(car vars) "worktree" "add" "-q" "-b" "feat" ,(cadr vars) "HEAD")
+           ,@body)
+       (delete-directory ,(car vars) t)
+       (delete-directory (file-name-directory (directory-file-name ,(cadr vars))) t))))
+
+(defun magit-dash-worktree-test--track (repo)
+  "Make branch feat of REPO track an up-to-date origin/feat."
+  (magit-dash-test--git repo "config" "remote.origin.url" "/nonexistent")
+  (magit-dash-test--git repo "config" "remote.origin.fetch" "+refs/heads/*:refs/remotes/origin/*")
+  (magit-dash-test--git repo "update-ref" "refs/remotes/origin/feat" "HEAD")
+  (magit-dash-test--git repo "config" "branch.feat.remote" "origin")
+  (magit-dash-test--git repo "config" "branch.feat.merge" "refs/heads/feat"))
+
+(ert-deftest magit-dash-worktree/risks-none-for-pushed-branch-with-build-dir ()
+  (magit-dash-worktree-test--with-linked (repo wt)
+    (magit-dash-worktree-test--track repo)
+    (make-directory (expand-file-name "node_modules" wt))
+    (with-temp-file (expand-file-name "node_modules/x" wt) (insert "x"))
+    (should-not (magit-dash-worktree-risks wt))))
+
+(ert-deftest magit-dash-worktree/risks-flag-ignored-non-build-file ()
+  (magit-dash-worktree-test--with-linked (repo wt)
+    (magit-dash-worktree-test--track repo)
+    (with-temp-file (expand-file-name "keep.secret" wt) (insert "s"))
+    (let ((risks (magit-dash-worktree-risks wt)))
+      (should (= 1 (length risks)))
+      (should (string-match-p "keep\\.secret" (car risks))))
+    (let ((magit-dash-worktree-ignorable-regexps '("keep\\.secret\\'")))
+      (should-not (magit-dash-worktree-risks wt)))))
+
+(ert-deftest magit-dash-worktree/risks-flag-unpushed-commits-and-detached-head ()
+  (magit-dash-worktree-test--with-linked (repo wt)
+    (magit-dash-worktree-test--track repo)
+    (let ((tip (magit-dash-test--commit wt "new.txt")))
+      (should (string-match-p "1 commit(s) ahead" (car (magit-dash-worktree-risks wt))))
+      (should-not (magit-dash-worktree-risks wt tip))
+      (magit-dash-test--git wt "checkout" "-q" "--detach" "HEAD")
+      (magit-dash-test--git repo "branch" "-D" "feat")
+      (should (string-match-p "detached HEAD" (car (magit-dash-worktree-risks wt)))))))
+
+(ert-deftest magit-dash-worktree/risks-flag-branch-without-upstream ()
+  (magit-dash-worktree-test--with-linked (repo wt)
+    (magit-dash-test--commit wt "new.txt")
+    (should (string-match-p "no upstream" (car (magit-dash-worktree-risks wt))))))
+
 (provide 'test-magit-dash-worktree)
 ;;; test-magit-dash-worktree.el ends here

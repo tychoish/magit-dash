@@ -107,12 +107,50 @@ FILE, so editing one later updates it instead of adding a second copy."
               (buffer-string)))
            default-directory))))))
 
-(defun magit-dash-review-file (root pr-number)
+(defun magit-dash-review-file (root pr-number &optional repo)
   "Return path to the review JSON file for PR-NUMBER in repository at ROOT.
-The file is located under <git-common-dir>/review/pr-<num>.json."
+The file is under <git-common-dir>/review/.  Without REPO it is pr-<num>.json.
+With REPO (owner/name) it is pr-<owner>_<name>-<num>.json so the same PR
+number in two repos sharing a git directory (forks) never collides; an
+existing legacy pr-<num>.json is still returned when it belongs to REPO or
+records no repo."
   (let* ((common-dir (magit-dash-review--common-dir root))
-         (review-dir (expand-file-name "review" common-dir)))
-    (expand-file-name (format "pr-%s.json" pr-number) review-dir)))
+         (review-dir (expand-file-name "review" common-dir))
+         (legacy (expand-file-name (format "pr-%s.json" pr-number) review-dir)))
+    (cond
+     ((null repo) legacy)
+     ((and (file-readable-p legacy)
+           (let ((stored (ignore-errors
+                           (map-elt (map-elt (magit-dash-review--read-json-file legacy)
+                                             "magit_dash")
+                                    "repo"))))
+             (or (member stored '(nil ""))
+                 (equal stored repo))))
+      legacy)
+     (t (expand-file-name (format "pr-%s-%s.json"
+                                  (replace-regexp-in-string "[^A-Za-z0-9._-]" "_" repo)
+                                  pr-number)
+                          review-dir)))))
+
+(defun magit-dash-review--trusted-worktree (file wt-dir)
+  "Return WT-DIR when it is a directory of the repository that owns review FILE.
+FILE lives in <git-common-dir>/review/.  The worktree recorded inside a
+review file is untrusted: when it is missing or belongs to another
+repository, message and return the main checkout of FILE's repository."
+  (let* ((common (file-name-directory
+                  (directory-file-name (file-name-directory (expand-file-name file)))))
+         (main (if (equal (file-name-nondirectory (directory-file-name common)) ".git")
+                   (file-name-directory (directory-file-name common))
+                 common)))
+    (cond
+     ((and (stringp wt-dir) (file-directory-p wt-dir)
+           (equal (file-truename (magit-dash-review--common-dir wt-dir))
+                  (file-truename (file-name-as-directory common))))
+      wt-dir)
+     (t
+      (message "magit-dash-review: worktree %s in %s is not a worktree of this repository; using %s"
+               wt-dir file main)
+      main))))
 
 (defalias 'magit-dash-review--resolve-blob #'magit-dash-review-json-resolve-blob)
 
@@ -380,10 +418,10 @@ Returns a plist (:review-file :root :base :head :path :line :end-line :hunk
 (defun magit-dash-review--parse-pr-target (pr-number-or-url &optional repo-dir)
   "Normalize PR-NUMBER-OR-URL and REPO-DIR into `(:number :repo :repo-dir :pr)'."
   (let* ((dir (expand-file-name
-               (or repo-dir
-                   (and (fboundp 'magit-dash-worktree-main-dir)
-                        (ignore-errors (magit-dash-worktree-main-dir default-directory)))
-                   default-directory)))
+               (magit-dash-worktree-main-dir
+                (or repo-dir
+                    (ignore-errors (magit-dash-worktree-main-dir default-directory))
+                    default-directory))))
          (slug nil)
          (num nil)
          (pr-data nil))
@@ -450,10 +488,12 @@ PR metadata and GraphQL reviewThreads, performs a three-way merge into
          (url (map-elt pr-info 'url))
          (existing-wt (magit-dash-pr--find-existing-worktree dir pr-num head-ref))
          (wt-dir (or existing-wt
-                     (ignore-errors
-                       (magit-dash-pr--create-worktree-for-entry
-                        (list :number pr-num :repo slug :pr pr-info) nil))
-                     dir))
+                     (condition-case err
+                         (magit-dash-pr--create-worktree-for-entry
+                          (list :number pr-num :repo slug :pr pr-info :repo-dir dir) nil)
+                       (error
+                        (user-error "Cannot create a worktree for PR #%d (%s); not reviewing in the main checkout"
+                                    pr-num (error-message-string err))))))
          (raw-threads (or (ignore-errors
                             (magit-dash-pr-fetch-threads-graphql slug pr-num 50 4000 dir t))
                           nil))
@@ -461,7 +501,7 @@ PR metadata and GraphQL reviewThreads, performs a three-way merge into
                       (lambda (node)
                         (magit-dash-review--transcode-thread node wt-dir head-oid base-oid))
                       raw-threads))
-         (review-file (magit-dash-review-file dir pr-num))
+         (review-file (magit-dash-review-file dir pr-num slug))
          (existing-ht (and (file-exists-p review-file)
                            (magit-dash-review--read-json-file review-file)))
          (remote-meta (list :repo slug
@@ -517,9 +557,11 @@ so `diff-review' compares the live working tree against BASE-REF (default
          (md (map-elt existing-ht "magit_dash"))
          (slug (and md (map-elt md "repo")))
          (pr-num (and md (map-elt md "number")))
-         (wt-dir (or (and md (map-elt md "worktree"))
-                     (map-elt existing-ht "root")
-                     default-directory)))
+         (wt-dir (magit-dash-review--trusted-worktree
+                  file
+                  (or (and md (map-elt md "worktree"))
+                      (map-elt existing-ht "root")
+                      default-directory))))
     (unless (and slug pr-num)
       (user-error "Review file %s has no `magit_dash' PR metadata to sync" file))
     (let* ((pr-info (magit-dash-review--fetch-pr-metadata slug pr-num wt-dir))
@@ -538,15 +580,26 @@ so `diff-review' compares the live working tree against BASE-REF (default
                               :base-ref (or (map-elt pr-info 'baseRefName) (map-elt existing-ht "base"))
                               :head_oid head-oid
                               :base_oid base-oid))
-           (merged (magit-dash-review--merge-json existing-ht remote-meta transcoded)))
-      (magit-dash-review--write-json-file file merged)
-      (magit-dash-review--maybe-mirror merged file)
-      (when-let* ((live-buf (find-buffer-visiting file)))
-        (with-current-buffer live-buf
-          (if (fboundp 'diff-review-refresh)
-              (diff-review-refresh)
-            (revert-buffer t t t))))
-      file)))
+           (live-buf (find-buffer-visiting file)))
+      (cond
+       ((and live-buf (buffer-modified-p live-buf))
+        (message "magit-dash-review-sync: %s has unsaved edits; save or revert it, then sync again"
+                 (buffer-name live-buf))
+        nil)
+       (t
+        ;; Merge against a fresh read: the file may have changed while the
+        ;; network calls above ran.
+        (let ((merged (magit-dash-review--merge-json
+                       (magit-dash-review--read-json-file file) remote-meta transcoded)))
+          (magit-dash-review--write-json-file file merged)
+          (magit-dash-review--maybe-mirror merged file)
+          (when (and live-buf (buffer-live-p live-buf) (not (buffer-modified-p live-buf)))
+            (with-current-buffer live-buf
+              (cond
+               ((fboundp 'diff-review-refresh)
+                (diff-review-refresh))
+               (t (revert-buffer t t t)))))
+          file))))))
 
 ;;; GraphQL Delta Submission
 
@@ -611,9 +664,11 @@ node IDs back into REVIEW-FILE."
          (md (map-elt data "magit_dash"))
          (slug (and md (map-elt md "repo")))
          (pr-num (and md (map-elt md "number")))
-         (dir (or (and md (map-elt md "worktree"))
-                  (map-elt data "root")
-                  default-directory))
+         (dir (magit-dash-review--trusted-worktree
+               file
+               (or (and md (map-elt md "worktree"))
+                   (map-elt data "root")
+                   default-directory)))
          (comments (append (or (map-elt data "comments") []) nil))
          (verdict-ht (map-elt data "verdict"))
          (new-threads (magit-dash-review--collect-unsynced-threads comments))

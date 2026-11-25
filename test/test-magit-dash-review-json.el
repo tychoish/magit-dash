@@ -13,6 +13,7 @@
 (require 'seq)
 (require 'test-helper)
 (require 'magit-dash-review-json)
+(require 'magit-dash-review)
 
 (defconst magit-dash-review-json-test/fixture-dir
   (expand-file-name "fixtures" (file-name-directory (or load-file-name buffer-file-name))))
@@ -290,8 +291,8 @@
                     (magit-dash-review-json-test/table agent) nil (list remote)))
            (comments (map-elt merged "comments")))
       (should (= 2 (length comments)))
-      (should (equal '("github" "agent") (seq-map (lambda (c) (map-elt c "origin")) comments)))
-      (should-not (map-elt (aref comments 1) "gh_thread_id")))))
+      (should (equal '("agent" "github") (seq-map (lambda (c) (map-elt c "origin")) comments)))
+      (should-not (map-elt (aref comments 0) "gh_thread_id")))))
 
 (ert-deftest magit-dash-review-json/export-nil-source-fills-pr-key ()
   (magit-dash-review-json-test/with-stub
@@ -342,8 +343,8 @@
       (setf (map-elt (map-elt merged "viewed") "f") "h")
       (setf (map-elt (map-elt merged "verdict") "state") "approved")
       (setf (map-elt (map-elt merged "code_review") "pullreq_id") "P")
-      (setf (map-elt (aref (map-elt merged "comments") 1) "body") "mutated")
-      (setf (map-elt (aref (map-elt (aref (map-elt merged "comments") 0) "replies") 0) "body") "mutated")
+      (setf (map-elt (aref (map-elt merged "comments") 0) "body") "mutated")
+      (setf (map-elt (aref (map-elt (aref (map-elt merged "comments") 1) "replies") 0) "body") "mutated")
       (should (equal before-existing (magit-dash-review-json-test/plain existing)))
       (should (equal before-remote (magit-dash-review-json-test/plain remote))))))
 
@@ -366,6 +367,160 @@
 (ert-deftest magit-dash-review-json/import-requires-pr-key ()
   (should-error (magit-dash-review-json-import (make-hash-table :test #'equal))
                 :type 'user-error))
+
+(defmacro magit-dash-review-json-test/with-temp-dir (&rest body)
+  "Run BODY with DIR bound to a fresh temporary directory."
+  (declare (indent 0))
+  `(let ((dir (make-temp-file "mdrj-test-" t)))
+     (unwind-protect
+         (progn ,@body)
+       (delete-directory dir t))))
+
+(defun magit-dash-review-json-test/unicode-table ()
+  "A table with non-ASCII body, author and path."
+  (let ((c (magit-dash-review-json-test/comment nil "é日😀"))
+        (table (magit-dash-review-json-test/table)))
+    (setf (map-elt c "author") "Zoë")
+    (setf (map-elt c "path") "src/日本.el")
+    (setf (map-elt table "comments") (vector c))
+    table))
+
+(ert-deftest magit-dash-review-json/write-file-utf-8-round-trip ()
+  (magit-dash-review-json-test/with-temp-dir
+    (let ((file (expand-file-name "pr-1.json" dir)))
+      (magit-dash-review-json-write-file file (magit-dash-review-json-test/unicode-table))
+      (let ((c (aref (map-elt (magit-dash-review-json-read-file file) "comments") 0))
+            (raw (with-temp-buffer
+                   (set-buffer-multibyte nil)
+                   (insert-file-contents-literally file)
+                   (buffer-string))))
+        (should (equal "é日😀" (map-elt c "body")))
+        (should (equal "Zoë" (map-elt c "author")))
+        (should (equal "src/日本.el" (map-elt c "path")))
+        (should-not (string-match-p "\\\\[0-9][0-9][0-9]" raw))
+        (should (string-match-p (regexp-quote (encode-coding-string "é日😀" 'utf-8)) raw))))))
+
+(ert-deftest magit-dash-review-json/write-file-failure-leaves-original-intact ()
+  (magit-dash-review-json-test/with-temp-dir
+    (let ((file (expand-file-name "pr-1.json" dir)))
+      (magit-dash-review-json-write-file file (magit-dash-review-json-test/table))
+      (let ((before (with-temp-buffer (insert-file-contents file) (buffer-string))))
+        (cl-letf (((symbol-function 'rename-file)
+                   (lambda (&rest _) (error "disk full"))))
+          (should-error (magit-dash-review-json-write-file
+                         file (magit-dash-review-json-test/unicode-table))))
+        (should (equal before (with-temp-buffer (insert-file-contents file) (buffer-string))))
+        (should (equal '("pr-1.json" "pr-1.json.bak")
+                       (directory-files dir nil "\\`[^.]")))))))
+
+(ert-deftest magit-dash-review-json/read-file-falls-back-to-backup ()
+  (magit-dash-review-json-test/with-temp-dir
+    (let ((file (expand-file-name "pr-1.json" dir)))
+      (magit-dash-review-json-write-file file (magit-dash-review-json-test/table))
+      (magit-dash-review-json-write-file file (magit-dash-review-json-test/unicode-table))
+      (with-temp-file file (insert "{\"truncat"))
+      (let ((table (magit-dash-review-json-read-file file)))
+        (should (hash-table-p table)))
+      (delete-file (concat file ".bak"))
+      (should-error (magit-dash-review-json-read-file file)))))
+
+(ert-deftest magit-dash-review-json/merge-ignores-other-repo-with-same-number ()
+  (let* ((existing (magit-dash-review-json-test/table
+                    (magit-dash-review-json-test/comment nil "repo A comment")))
+         (remote (magit-dash-review-json-test/comment nil "repo B remote")))
+    (setf (map-elt (map-elt existing "magit_dash") "repo") "a/proj")
+    (setf (map-elt remote "path") "z.el")
+    (let ((merged (magit-dash-review-json-merge
+                   existing (list :repo "b/proj" :number 42) (list remote))))
+      (should (equal "b/proj" (map-elt (map-elt merged "magit_dash") "repo")))
+      (should (equal '("repo B remote")
+                     (seq-map (lambda (c) (map-elt c "body")) (map-elt merged "comments")))))))
+
+(ert-deftest magit-dash-review-json/merge-preserves-local-order-and-appends-new ()
+  (let* ((a (magit-dash-review-json-test/comment nil "a"))
+         (b (magit-dash-review-json-test/comment nil "b"))
+         (new (magit-dash-review-json-test/comment nil "new"))
+         (rb (magit-dash-review-json-test/comment nil "b")))
+    (setf (map-elt a "origin") "local")
+    (setf (map-elt a "lines") [1 1])
+    (setf (map-elt b "gh_thread_id") "T")
+    (setf (map-elt rb "gh_thread_id") "T")
+    (setf (map-elt new "path") "n.el")
+    (let ((merged (magit-dash-review-json-merge
+                   (magit-dash-review-json-test/table a b) nil (list new rb))))
+      (should (equal '("a" "b" "new")
+                     (seq-map (lambda (c) (map-elt c "body")) (map-elt merged "comments")))))))
+
+(ert-deftest magit-dash-review-json/content-hash-covers-all-lines-and-make-id-is-stable ()
+  (let ((a (magit-dash-review-json-test/comment nil "x"))
+        (b (magit-dash-review-json-test/comment nil "x")))
+    (setf (map-elt a "lines") [3 4])
+    (setf (map-elt b "lines") [3 9])
+    (should-not (equal (magit-dash-review-json-content-hash a)
+                       (magit-dash-review-json-content-hash b))))
+  (should (equal (magit-dash-review-json-make-id "PRRT_abc")
+                 (substring (secure-hash 'sha1 "PRRT_abc") 0 12))))
+
+(ert-deftest magit-dash-review-json/merge-keeps-published-reply-missing-from-remote ()
+  (let* ((local (magit-dash-review-json-test/comment nil "t"))
+         (remote (magit-dash-review-json-test/comment nil "t"))
+         (reply (make-hash-table :test #'equal)))
+    (setf (map-elt local "gh_thread_id") "T")
+    (setf (map-elt remote "gh_thread_id") "T")
+    (setf (map-elt reply "gh_comment_id") "R1")
+    (setf (map-elt reply "body") "published")
+    (setf (map-elt local "replies") (vector reply))
+    (setf (map-elt remote "replies") [])
+    (let* ((merged (magit-dash-review-json-merge
+                    (magit-dash-review-json-test/table local) nil (list remote)))
+           (replies (map-elt (aref (map-elt merged "comments") 0) "replies")))
+      (should (= 1 (length replies)))
+      (should (eq t (map-elt (aref replies 0) "gh_missing"))))))
+
+(ert-deftest magit-dash-review-json/transcode-without-created-at-omits-at ()
+  (let ((c (magit-dash-review-json-transcode-thread
+            '((id . "T") (path . "") (comments . ((nodes . (((id . "C") (body . "b")))))))
+            nil nil nil)))
+    (should-not (map-contains-key c "at"))))
+
+(ert-deftest magit-dash-review-json/export-status-follows-seam-and-vectorizes ()
+  (magit-dash-review-json-test/with-stub
+    (let ((local (magit-dash-review-json-test/comment 7 "same"))
+          (stored (magit-dash-review-json-test/comment 7 "same")))
+      (setf (map-elt local "status") "draft")
+      (setf (map-elt stored "status") "sent")
+      (setf (map-elt stored "lines") (list 3 3))
+      (setq magit-dash-review-json-test/store (list stored))
+      (setq magit-dash-review-json-test/source (magit-dash-review-json-test/table local))
+      (let ((table (magit-dash-review-json-export '("owner/repo" . 42))))
+        (should (equal "sent" (map-elt (aref (map-elt table "comments") 0) "status"))))
+      (setq magit-dash-review-json-test/source nil)
+      (let ((c (aref (map-elt (magit-dash-review-json-export '("owner/repo" . 42)) "comments") 0)))
+        (should (equal [3 3] (map-elt c "lines")))))))
+
+(ert-deftest magit-dash-review-json/import-survives-seam-read-error ()
+  (let ((magit-dash-review-json-code-review-function
+         (lambda (op &rest _) (when (eq op 'comments) (error "boom")))))
+    (let ((result (magit-dash-review-json-import
+                   (magit-dash-review-json-test/table
+                    (magit-dash-review-json-test/comment nil "x")))))
+      (should (= 1 (plist-get result :skipped)))
+      (should (= 0 (plist-get result :added))))))
+
+(ert-deftest magit-dash-review-file/keyed-by-repo-with-legacy-fallback ()
+  (magit-dash-review-json-test/with-temp-dir
+    (let ((default-directory (file-name-as-directory dir)))
+      (call-process "git" nil nil nil "init" "-q" ".")
+      (let ((legacy (magit-dash-review-file dir 5))
+            (a (magit-dash-review-file dir 5 "a/proj"))
+            (b (magit-dash-review-file dir 5 "b/proj")))
+        (should-not (equal a b))
+        (should (equal a (magit-dash-review-file dir 5 "a/proj")))
+        (let ((table (magit-dash-review-json-test/table)))
+          (setf (map-elt (map-elt table "magit_dash") "repo") "a/proj")
+          (magit-dash-review-json-write-file legacy table))
+        (should (equal legacy (magit-dash-review-file dir 5 "a/proj")))
+        (should (equal b (magit-dash-review-file dir 5 "b/proj")))))))
 
 (provide 'test-magit-dash-review-json)
 ;;; test-magit-dash-review-json.el ends here

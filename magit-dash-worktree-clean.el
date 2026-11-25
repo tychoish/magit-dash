@@ -19,17 +19,14 @@
 
 ;;; Code:
 
-(require 'cl-lib)
 (require 'seq)
 (require 'subr-x)
 (require 'map)
 (require 'hitl-plan)
 (require 'magit-dash-pr)
+(require 'magit-dash-worktree)
 
 (declare-function hitl-plan-review "hitl-plan-ui")
-(declare-function magit-dash-worktree-main-dir "magit-dash-worktree")
-(declare-function magit-dash-worktree-dirty-many "magit-dash-worktree")
-(declare-function magit-dash-worktree-uncommitted-changes-p "magit-dash-worktree")
 (declare-function magit-dash-pr--fetch-repo-prs "magit-dash-pr")
 (declare-function magit-dash-pr--fetch-pr "magit-dash-pr")
 (declare-function magit-dash-pr--git-worktrees "magit-dash-pr")
@@ -55,10 +52,6 @@ When nil, a subdirectory of `hitl-plan-directory'."
   :type '(choice (const :tag "Under hitl-plan-directory" nil) directory)
   :group 'magit-dash-worktree-clean)
 
-(defconst magit-dash-worktree-clean--number-regexp
-  "\\(?:\\`\\|-\\)\\(?:pr\\|cr\\)-\\(?:[[:alnum:]]+-\\)*\\([0-9]+\\)\\'"
-  "Regexp extracting a PR number from a worktree directory name.")
-
 ;;;; Discovery
 
 (defun magit-dash-worktree-clean--closed-state (pr slug number repo-dir)
@@ -70,22 +63,10 @@ When nil, a subdirectory of `hitl-plan-directory'."
     "closed")))
 
 (defun magit-dash-worktree-clean--match (wt prs slug repo-dir)
-  "Return the PR matching worktree WT among PRS, fetching when needed, or nil."
-  (let* ((wt-name (file-name-nondirectory
-                   (directory-file-name (alist-get 'path wt))))
-         (number (when (string-match magit-dash-worktree-clean--number-regexp wt-name)
-                   (string-to-number (match-string 1 wt-name))))
-         (open-prs (seq-filter (lambda (pr)
-                                 (equal (upcase (or (map-elt pr 'state) "")) "OPEN"))
-                               prs)))
-    (or (magit-dash-pr--match-worktree-by-branch wt prs slug repo-dir)
-        (magit-dash-pr--match-worktree-to-pr wt open-prs)
-        (when number
-          (when-let* ((pr (or (seq-find (lambda (pr) (equal (map-elt pr 'number) number)) prs)
-                              (magit-dash-pr--fetch-pr slug number repo-dir)))
-                      ((magit-dash-pr--worktree-corroborates-pr-p wt pr number)))
-            pr))
-        (magit-dash-pr--match-worktree-to-pr wt prs))))
+  "Return the PR matching worktree WT among PRS, fetching when needed, or nil.
+Every match must be corroborated by the worktree's branch; see
+`magit-dash-pr--match-worktree-corroborated'."
+  (magit-dash-pr--match-worktree-corroborated wt prs slug repo-dir))
 
 (defun magit-dash-worktree-clean--target (wt pr state slug repo-dir)
   "Return the plan target plist for worktree WT, matched to PR in STATE."
@@ -95,15 +76,26 @@ When nil, a subdirectory of `hitl-plan-directory'."
           :slug slug
           :number (map-elt pr 'number)
           :branch (alist-get 'branch wt)
+          :head (alist-get 'head wt)
+          :pr-head-oid (map-elt pr 'headRefOid)
           :state state)))
 
 (defun magit-dash-worktree-clean--mark-dirty (targets)
-  "Return TARGETS with `:dirty' set from one concurrent `git status' sweep."
+  "Return TARGETS with `:dirty' and `:risks' set.
+`:dirty' comes from one concurrent `git status' sweep.  `:risks' lists
+`magit-dash-worktree-risks' for each clean worktree: unpublished commits and
+ignored files that are not build output."
   (let ((dirty (magit-dash-worktree-dirty-many
                 (seq-map (lambda (target) (plist-get target :worktree)) targets))))
     (seq-map (lambda (target)
-               (plist-put (copy-sequence target) :dirty
-                          (and (cdr (assoc (plist-get target :worktree) dirty)) t)))
+               (let ((is-dirty (and (cdr (assoc (plist-get target :worktree) dirty)) t)))
+                 (thread-first (copy-sequence target)
+                               (plist-put :dirty is-dirty)
+                               (plist-put :risks
+                                          (unless is-dirty
+                                            (magit-dash-worktree-risks
+                                             (plist-get target :worktree)
+                                             (plist-get target :pr-head-oid)))))))
              targets)))
 
 (defun magit-dash-worktree-clean-scan (repo-dir)
@@ -135,15 +127,12 @@ Open PRs are not candidates, so nil is returned for them too."
               (repo-dir (expand-file-name local-path))
               (number (plist-get entry :number))
               (pr-data (plist-get entry :pr))
-              (path (magit-dash-pr--find-existing-worktree
-                     repo-dir number (map-elt pr-data 'headRefName)))
-              ((file-directory-p path))
+              (wt (magit-dash-pr--find-corroborated-worktree repo-dir number pr-data))
+              ((file-directory-p (alist-get 'path wt)))
               (state (magit-dash-worktree-clean--closed-state
                       pr-data repo number repo-dir)))
     (car (magit-dash-worktree-clean--mark-dirty
-          (list (magit-dash-worktree-clean--target
-                 `((path . ,path) (branch . ,(map-elt pr-data 'headRefName)))
-                 pr-data state repo repo-dir))))))
+          (list (magit-dash-worktree-clean--target wt pr-data state repo repo-dir))))))
 
 ;;;; Domain and operation
 
@@ -157,10 +146,16 @@ Open PRs are not candidates, so nil is returned for them too."
 (defun magit-dash-worktree-clean--format-target (target)
   "Return (FILE . LABEL) columns for TARGET."
   (cons (abbreviate-file-name (plist-get target :worktree))
-        (format "PR #%s %s%s"
+        (format "PR #%s %s%s%s"
                 (or (plist-get target :number) "?")
                 (plist-get target :state)
-                (if (plist-get target :dirty) ", uncommitted changes" ""))))
+                (if (plist-get target :dirty)
+                    ", uncommitted changes"
+                  "")
+                (if (plist-get target :risks)
+                    (format ", NEEDS CONFIRMATION: %s"
+                            (string-join (plist-get target :risks) "; "))
+                  ""))))
 
 (defun magit-dash-worktree-clean--visit-target (target &optional other-window)
   "Visit TARGET's worktree in Dired, in another window when OTHER-WINDOW."
@@ -182,13 +177,45 @@ Open PRs are not candidates, so nil is returned for them too."
                     (hitl-plan-step-message step) "uncommitted changes")))
           steps))
 
+(defun magit-dash-worktree-clean--verify-target (target)
+  "Return nil when TARGET still names the planned worktree, else the reason.
+A plan can sit for days.  The path must still be a linked worktree of the
+same repository, on the planned `:branch' at the planned `:head', and the
+PR must still be merged or closed."
+  (let* ((path (plist-get target :worktree))
+         (repo-dir (plist-get target :repo-dir))
+         (wt (seq-find (lambda (wt)
+                         (magit-dash-pr--path-equal-p (alist-get 'path wt) path))
+                       (magit-dash-pr--git-worktrees repo-dir)))
+         (number (plist-get target :number)))
+    (cond
+     ((or (null wt) (magit-dash-pr--path-equal-p path repo-dir))
+      (format "%s is no longer a linked worktree of %s" path repo-dir))
+     ((not (equal (alist-get 'branch wt) (plist-get target :branch)))
+      (format "branch changed from %s to %s since the plan"
+              (plist-get target :branch) (alist-get 'branch wt)))
+     ((not (equal (alist-get 'head wt) (plist-get target :head)))
+      "HEAD moved since the plan")
+     ((null number)
+      "the plan names no PR")
+     ((not (magit-dash-worktree-clean--closed-state
+            (magit-dash-pr--fetch-pr (plist-get target :slug) number repo-dir)
+            (plist-get target :slug) number repo-dir))
+      (format "PR #%s is no longer known to be merged or closed" number)))))
+
 (defun magit-dash-worktree-clean--apply ()
-  "Delete the current step's worktree, refusing when it became dirty."
+  "Delete the current step's worktree after re-verifying the plan target.
+A target that no longer matches is refused with the reason, which the plan
+records on the step.  A worktree that became dirty is refused too, and one
+with unpublished commits or non-build ignored files needs a confirmation."
   (let* ((target hitl-plan-current-target)
          (path (plist-get target :worktree)))
+    (when-let* ((problem (magit-dash-worktree-clean--verify-target target)))
+      (error "Skipped %s: %s" path problem))
     (when (magit-dash-worktree-uncommitted-changes-p path)
       (error "Worktree %s has uncommitted changes" path))
-    (magit-dash-pr-delete-worktree path (plist-get target :repo-dir))))
+    (magit-dash-pr-delete-worktree path (plist-get target :repo-dir)
+                                   (plist-get target :pr-head-oid))))
 
 (defun magit-dash-worktree-clean--after-apply (_file _steps plan)
   "Refresh a live PR dashboard once cleanup PLAN has run."

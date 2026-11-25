@@ -25,7 +25,7 @@
 (require 'seq)
 (require 'subr-x)
 
-(declare-function magit-dash-review-file "magit-dash-review" (root pr-number))
+(declare-function magit-dash-review-file "magit-dash-review" (root pr-number &optional repo))
 (declare-function magit-dash-worktree-main-dir "magit-dash-worktree" (&optional directory))
 
 (defgroup magit-dash-review-json nil
@@ -46,7 +46,8 @@ and OP is one of:
   `verdict'   with ARG, store the verdict table ARG and return non-nil or
               signal; without ARG, return the stored verdict table or nil.
 Tables passed and returned are diff-review/1 JSON values: hash tables
-\(equal test), vectors, lists, strings, numbers, t, nil and :false.
+\(equal test), vectors, strings, numbers, t, nil and :false.  Lists are
+tolerated in what the seam returns: export turns them into vectors.
 `magit-dash-review-json-deep-copy' accepts exactly these shapes.
 The default reports that code-review exposes no supported data API."
   :type 'function
@@ -83,7 +84,7 @@ repo is not (car PR-KEY)."
   (condition-case err
       (when-let* ((dir (and (fboundp 'magit-dash-worktree-main-dir)
                             (magit-dash-worktree-main-dir default-directory)))
-                  (file (magit-dash-review-file dir (cdr pr-key)))
+                  (file (magit-dash-review-file dir (cdr pr-key) (car pr-key)))
                   ((file-readable-p file))
                   (table (magit-dash-review-json-read-file file)))
         (cond
@@ -99,27 +100,102 @@ repo is not (car PR-KEY)."
 
 ;;; File I/O and small helpers
 
-(defun magit-dash-review-json-read-file (review-file)
-  "Parse REVIEW-FILE as a diff-review/1 JSON hash table."
-  (unless (and review-file (file-readable-p review-file))
-    (error "Review file not readable: %s" review-file))
+(defun magit-dash-review-json--parse-file (file)
+  "Parse FILE as UTF-8 JSON into a hash table."
   (with-temp-buffer
-    (insert-file-contents review-file)
+    (let ((coding-system-for-read 'utf-8))
+      (insert-file-contents file))
     (json-parse-string (buffer-string)
                        :object-type 'hash-table
                        :array-type 'array
                        :null-object nil
                        :false-object :false)))
 
+(defun magit-dash-review-json-read-file (review-file)
+  "Parse REVIEW-FILE as a diff-review/1 JSON hash table.
+When REVIEW-FILE is unparsable and the REVIEW-FILE.bak left by
+`magit-dash-review-json-write-file' parses, message and return the backup."
+  (unless (and review-file (file-readable-p review-file))
+    (error "Review file not readable: %s" review-file))
+  (let ((backup (concat review-file ".bak")))
+    (condition-case err
+        (magit-dash-review-json--parse-file review-file)
+      (error
+       (cond
+        ((file-readable-p backup)
+         (message "magit-dash-review-json: %s is corrupt (%s); falling back to %s"
+                  review-file (error-message-string err) backup)
+         (magit-dash-review-json--parse-file backup))
+        (t (signal (car err) (cdr err))))))))
+
 (defun magit-dash-review-json-write-file (review-file data)
-  "Serialize DATA hash table to REVIEW-FILE as pretty-printed JSON."
-  (make-directory (file-name-directory (expand-file-name review-file)) t)
-  (let ((json (json-serialize data :null-object nil :false-object :false)))
-    (with-temp-file review-file
-      (insert json)
-      (json-pretty-print-buffer)
-      (insert "\n")))
+  "Serialize DATA hash table to REVIEW-FILE as pretty-printed UTF-8 JSON.
+The write is atomic: the JSON goes to a temporary file in the same
+directory which is renamed over REVIEW-FILE, so a failure leaves the old
+file intact.  The previous file is first copied to REVIEW-FILE.bak."
+  (let* ((file (expand-file-name review-file))
+         (temp nil)
+         (json (decode-coding-string
+                (json-serialize data :null-object nil :false-object :false)
+                'utf-8)))
+    (make-directory (file-name-directory file) t)
+    (unwind-protect
+        (progn
+          (setq temp (make-temp-file (concat file ".tmp-")))
+          (with-temp-buffer
+            (insert json)
+            (json-pretty-print-buffer)
+            (insert "\n")
+            (let ((coding-system-for-write 'utf-8-unix))
+              (write-region (point-min) (point-max) temp nil 'silent)))
+          (when (file-exists-p file)
+            (copy-file file (concat file ".bak") t))
+          (rename-file temp file t)
+          (setq temp nil))
+      (when (and temp (file-exists-p temp))
+        (delete-file temp))))
   review-file)
+
+(defun magit-dash-review-json-relocate-worktree (repo-dir old-path new-path)
+  "Point the review files of REPO-DIR that name OLD-PATH at NEW-PATH.
+Rewrites the root and magit_dash.worktree of every <git-common-dir>/review
+JSON file whose value is OLD-PATH, after a worktree was moved.  Unreadable
+files are left alone.  Return the number of files rewritten."
+  (let* ((common (with-temp-buffer
+                   (when (zerop (call-process "git" nil (list (current-buffer) nil) nil
+                                              "-C" (expand-file-name repo-dir)
+                                              "rev-parse" "--path-format=absolute"
+                                              "--git-common-dir"))
+                     (string-trim (buffer-string)))))
+         (review-dir (and common (not (string-empty-p common))
+                          (expand-file-name "review" common)))
+         (old (file-name-as-directory (expand-file-name old-path)))
+         (new (file-name-as-directory (expand-file-name new-path)))
+         (same (lambda (value)
+                 (and (stringp value) (not (string-empty-p value))
+                      (equal (file-name-as-directory (expand-file-name value)) old)))))
+    (if (not (and review-dir (file-directory-p review-dir)))
+        0
+      (length
+       (seq-filter
+        (lambda (file)
+          (condition-case err
+              (let* ((table (magit-dash-review-json-read-file file))
+                     (md (map-elt table "magit_dash"))
+                     (hit nil))
+                (when (funcall same (map-elt table "root"))
+                  (setf (map-elt table "root") new)
+                  (setq hit t))
+                (when (and (hash-table-p md) (funcall same (map-elt md "worktree")))
+                  (setf (map-elt md "worktree") new)
+                  (setq hit t))
+                (when hit
+                  (magit-dash-review-json-write-file file table))
+                hit)
+            (error (message "magit-dash-review-json: cannot relocate %s: %s"
+                            file (error-message-string err))
+                   nil)))
+        (directory-files review-dir t "\\.json\\'"))))))
 
 (defun magit-dash-review-json-deep-copy (value)
   "Return a deep copy of VALUE.
@@ -141,10 +217,13 @@ recursively; numbers, symbols (t, nil, :false) are returned as is."
    (t value)))
 
 (defun magit-dash-review-json-make-id (thread-id)
-  "Generate a deterministic 6-character hex comment id from THREAD-ID string."
+  "Generate a comment id from THREAD-ID string.
+For a non-empty THREAD-ID the id is the first 12 hex digits (48 bits) of
+its SHA-1, stable across sessions and Emacs versions (`sxhash' is neither).
+Otherwise it is 12 random hex digits."
   (if (and thread-id (not (string-empty-p thread-id)))
-      (format "%06x" (logand (sxhash thread-id) #xFFFFFF))
-    (format "%06x" (random #x1000000))))
+      (substring (secure-hash 'sha1 thread-id) 0 12)
+    (format "%012x" (random (ash 1 48)))))
 
 (defun magit-dash-review-json-resolve-blob (root rev path)
   "Resolve the git blob SHA for PATH at REV in repository at ROOT, or nil."
@@ -157,6 +236,28 @@ recursively; numbers, symbols (t, nil, :false) are returned as is."
 (defun magit-dash-review-json--empty-p (value)
   "Return non-nil when VALUE is nil or the empty string."
   (or (null value) (equal value "")))
+
+(defun magit-dash-review-json--vectorize (value)
+  "Return VALUE with every non-empty proper list below it turned into a vector.
+The top level of a list VALUE (the comments list) is kept as a list; JSON
+only serializes vectors, so export normalizes whatever the seam returned.
+Hash tables are modified in place."
+  (cond
+   ((hash-table-p value)
+    (map-do (lambda (key val)
+              (setf (map-elt value key) (magit-dash-review-json--vectorize-nested val)))
+            value)
+    value)
+   ((proper-list-p value) (seq-map #'magit-dash-review-json--vectorize value))
+   (t value)))
+
+(defun magit-dash-review-json--vectorize-nested (value)
+  "Vectorize VALUE, turning a non-empty proper list into a vector."
+  (cond
+   ((and value (proper-list-p value))
+    (vconcat (seq-map #'magit-dash-review-json--vectorize-nested value)))
+   ((vectorp value) (vconcat (seq-map #'magit-dash-review-json--vectorize-nested value)))
+   (t (magit-dash-review-json--vectorize value))))
 
 (defun magit-dash-review-json--comments (table)
   "Return the comments of TABLE as a list."
@@ -171,14 +272,15 @@ recursively; numbers, symbols (t, nil, :false) are returned as is."
 ;;; Matching
 
 (defun magit-dash-review-json-content-hash (comment)
-  "Return a hash of the path, first line and body of COMMENT."
-  (let ((lines (map-elt comment "lines")))
-    (secure-hash 'sha1
-                 (mapconcat (lambda (part) (format "%s" part))
-                            (list (or (map-elt comment "path") "")
-                                  (if (> (length lines) 0) (elt lines 0) "")
-                                  (or (map-elt comment "body") ""))
-                            "\0"))))
+  "Return a hash of the path, all line numbers and body of COMMENT."
+  (secure-hash 'sha1
+               (mapconcat (lambda (part) (format "%s" part))
+                          (list (or (map-elt comment "path") "")
+                                (mapconcat (lambda (n) (format "%s" n))
+                                           (append (map-elt comment "lines") nil)
+                                           ",")
+                                (or (map-elt comment "body") ""))
+                          "\0")))
 
 (defun magit-dash-review-json-find-match (comment candidates)
   "Return the member of CANDIDATES that is the same thread as COMMENT, or nil.
@@ -261,16 +363,18 @@ HEAD-SHA and BASE-SHA are the commit SHAs for resolving blob hashes."
                        (setf (map-elt r-ht "author") (or (map-nested-elt c '(author login))
                                                          (map-elt c :author)
                                                          "unknown"))
-                       (setf (map-elt r-ht "at") (or (map-elt c 'createdAt)
-                                                     (map-elt c :created_at)
-                                                     (format-time-string "%FT%T%:z")))
+                       (when-let* ((at (or (map-elt c 'createdAt) (map-elt c :created_at))))
+                         (setf (map-elt r-ht "at") at))
                        (setf (map-elt r-ht "body") (or (map-elt c 'body) (map-elt c :body) ""))
                        r-ht))
                    (cdr comments-list))))
     (setf (map-elt comment-ht "id") (magit-dash-review-json-make-id thread-id))
     (setf (map-elt comment-ht "gh_thread_id") thread-id)
     (setf (map-elt comment-ht "gh_comment_id") first-id)
-    (setf (map-elt comment-ht "gh_resolved") (if is-resolved t :false))
+    (setf (map-elt comment-ht "gh_resolved")
+          (if is-resolved
+              t
+            :false))
     (setf (map-elt comment-ht "origin") "github")
     (unless (string-empty-p path)
       (setf (map-elt comment-ht "path") path))
@@ -282,14 +386,16 @@ HEAD-SHA and BASE-SHA are the commit SHAs for resolving blob hashes."
                                             (map-elt first-c :author)
                                             (map-elt node :author)
                                             "unknown"))
-    (setf (map-elt comment-ht "at") (or (map-elt first-c 'createdAt)
-                                        (map-elt first-c :created_at)
-                                        (format-time-string "%FT%T%:z")))
+    (when-let* ((at (or (map-elt first-c 'createdAt) (map-elt first-c :created_at))))
+      (setf (map-elt comment-ht "at") at))
     (setf (map-elt comment-ht "body") (or (map-elt first-c 'body)
                                           (map-elt first-c :body)
                                           (map-elt node :body)
                                           ""))
-    (setf (map-elt comment-ht "resolved") (if is-resolved t :false))
+    (setf (map-elt comment-ht "resolved")
+          (if is-resolved
+              t
+            :false))
     (when is-outdated
       (setf (map-elt comment-ht "outdated") t))
     (setf (map-elt comment-ht "replies") (vconcat replies))
@@ -301,8 +407,12 @@ Keys in `magit-dash-review-json--remote-keys' take the remote value, and are
 removed when REMOTE omits them (a thread that stops being outdated clears).
 Every other key keeps the local value (id, cr_id, remote_id, status and
 unknown keys), falling back to the remote one when local has none.  Resolved
-is sticky; replies are all remote replies plus unpublished local ones.  The
-result shares nothing with LOCAL or REMOTE."
+is sticky: once either side says resolved it stays resolved, so a thread
+re-opened on GitHub stays resolved locally until the local file is edited.
+Replies are all remote replies, then unpublished local ones (no
+gh_comment_id), then published local replies the remote list lacks, kept
+with gh_missing t because the remote fetch may be truncated.  The result
+shares nothing with LOCAL or REMOTE."
   (let ((merged (magit-dash-review-json-deep-copy local)))
     (seq-do (lambda (key)
               (unless (map-contains-key remote key)
@@ -318,12 +428,26 @@ result shares nothing with LOCAL or REMOTE."
                   (eq (map-elt local "resolved") t))
               t
             :false))
-    (setf (map-elt merged "replies")
-          (magit-dash-review-json-deep-copy
-           (vconcat (map-elt remote "replies")
-                    (seq-filter (lambda (reply)
-                                  (magit-dash-review-json--empty-p (map-elt reply "gh_comment_id")))
-                                (map-elt local "replies")))))
+    (let* ((remote-ids (seq-map (lambda (reply) (map-elt reply "gh_comment_id"))
+                                (map-elt remote "replies")))
+           (local-replies (append (map-elt local "replies") nil))
+           (missing (seq-filter
+                     (lambda (reply)
+                       (and (not (magit-dash-review-json--empty-p (map-elt reply "gh_comment_id")))
+                            (not (member (map-elt reply "gh_comment_id") remote-ids))))
+                     local-replies))
+           (flagged (seq-map (lambda (reply)
+                               (let ((copy (magit-dash-review-json-deep-copy reply)))
+                                 (setf (map-elt copy "gh_missing") t)
+                                 copy))
+                             missing)))
+      (setf (map-elt merged "replies")
+            (magit-dash-review-json-deep-copy
+             (vconcat (map-elt remote "replies")
+                      (seq-filter (lambda (reply)
+                                    (magit-dash-review-json--empty-p (map-elt reply "gh_comment_id")))
+                                  local-replies)
+                      flagged))))
     merged))
 
 (defun magit-dash-review-json-merge (existing-ht remote-metadata remote-threads)
@@ -332,20 +456,34 @@ Return a new diff-review/1 table.  Unknown top-level keys (code_review and
 others), unknown magit_dash keys, viewed and verdict are preserved.  Remote
 threads are matched to local ones with `magit-dash-review-json-find-match',
 each local thread at most once; unmatched remote threads are added and
-unmatched local threads are kept whole.  The result is fully independent
+unmatched local threads are kept whole.  Local order is preserved (a merged
+thread keeps its position) and new remote threads are appended.  When
+EXISTING-HT belongs to a different repo than REMOTE-METADATA, it is ignored
+\(message) and a fresh table is built.  The result is fully independent
 of EXISTING-HT and REMOTE-THREADS: mutating it changes neither."
-  (let* ((result (if existing-ht
-                     (magit-dash-review-json-deep-copy existing-ht)
-                   (make-hash-table :test #'equal)))
+  (let* ((incoming-repo (or (map-elt remote-metadata 'repo) (map-elt remote-metadata :repo)))
+         (existing-repo (map-elt (map-elt existing-ht "magit_dash") "repo"))
+         (foreign (and existing-ht
+                       (not (magit-dash-review-json--empty-p incoming-repo))
+                       (not (magit-dash-review-json--empty-p existing-repo))
+                       (not (equal incoming-repo existing-repo))))
+         (result (cond
+                  (foreign
+                   (message "magit-dash-review-json: existing review is for %s, not %s; starting fresh"
+                            existing-repo incoming-repo)
+                   (make-hash-table :test #'equal))
+                  (existing-ht (magit-dash-review-json-deep-copy existing-ht))
+                  (t (make-hash-table :test #'equal))))
          (md (if (hash-table-p (map-elt result "magit_dash"))
                  (map-elt result "magit_dash")
                (make-hash-table :test #'equal)))
          (state (seq-reduce
                  (lambda (acc remote-c)
                    (let ((local-c (magit-dash-review-json-find-match remote-c (cdr acc))))
-                     (cons (cons (if local-c
-                                     (magit-dash-review-json-merge-thread local-c remote-c)
-                                   (magit-dash-review-json-deep-copy remote-c))
+                     (cons (cons (cons local-c
+                                       (if local-c
+                                           (magit-dash-review-json-merge-thread local-c remote-c)
+                                         (magit-dash-review-json-deep-copy remote-c)))
                                  (car acc))
                            (seq-remove (lambda (c) (eq c local-c)) (cdr acc)))))
                  (seq-into remote-threads 'list)
@@ -375,7 +513,13 @@ of EXISTING-HT and REMOTE-THREADS: mutating it changes neither."
     (setf (map-elt result "magit_dash") md)
     (unless (hash-table-p (map-elt result "viewed"))
       (setf (map-elt result "viewed") (make-hash-table :test #'equal)))
-    (setf (map-elt result "comments") (vconcat (nreverse (car state)) (cdr state)))
+    (let ((pairs (nreverse (car state))))
+      (setf (map-elt result "comments")
+            (vconcat (seq-map (lambda (local-c)
+                                (or (cdr (seq-find (lambda (pair) (eq (car pair) local-c)) pairs))
+                                    local-c))
+                              (magit-dash-review-json--comments result))
+                     (seq-map #'cdr (seq-remove #'car pairs)))))
     result))
 
 ;;; Export and import
@@ -392,8 +536,10 @@ source table."
          (table (if source
                     (magit-dash-review-json-deep-copy source)
                   (make-hash-table :test #'equal)))
-         (stored (funcall magit-dash-review-json-code-review-function 'comments pr-key))
-         (pullreq (funcall magit-dash-review-json-code-review-function 'pullreq pr-key))
+         (stored (magit-dash-review-json--vectorize
+                  (funcall magit-dash-review-json-code-review-function 'comments pr-key)))
+         (pullreq (magit-dash-review-json--vectorize
+                   (funcall magit-dash-review-json-code-review-function 'pullreq pr-key)))
          (state (seq-reduce
                  (lambda (acc stored-c)
                    (let ((local-c (magit-dash-review-json-find-match stored-c (car acc))))
@@ -403,7 +549,10 @@ source table."
                                  (when (and (magit-dash-review-json--empty-p (map-elt local-c key))
                                             (map-elt stored-c key))
                                    (setf (map-elt local-c key) (map-elt stored-c key))))
-                               '("cr_id" "remote_id" "status"))
+                               '("cr_id" "remote_id"))
+                       (when (and (not (magit-dash-review-json--empty-p (map-elt stored-c "status")))
+                                  (not (equal (map-elt stored-c "status") (map-elt local-c "status"))))
+                         (setf (map-elt local-c "status") (map-elt stored-c "status")))
                        (cons (seq-remove (lambda (c) (eq c local-c)) (car acc)) (cdr acc)))
                       (t
                        (let ((new-c (magit-dash-review-json-deep-copy stored-c)))
@@ -478,7 +627,13 @@ is never mutated."
                      (user-error "Review JSON has no magit_dash repo and number")))
          (fn magit-dash-review-json-code-review-function)
          (counts (list :added 0 :updated 0 :skipped 0 :verdict-failed 0))
-         (remaining (funcall fn 'comments pr-key))
+         (fetch-failed nil)
+         (remaining (condition-case err
+                        (funcall fn 'comments pr-key)
+                      (error (message "magit-dash-review-json: cannot read comments: %s"
+                                      (error-message-string err))
+                             (setq fetch-failed t)
+                             nil)))
          (assigned nil))
     (seq-do-indexed
      (lambda (comment index)
@@ -492,7 +647,7 @@ is never mutated."
                                   (magit-dash-review-json--reply-content match)))
                       nil)
                      (t :updated)))
-              (written (when kind
+              (written (when (and kind (not fetch-failed))
                          (let ((payload (magit-dash-review-json-deep-copy comment)))
                            (when (and match (map-elt match "cr_id"))
                              (setf (map-elt payload "cr_id") (map-elt match "cr_id")))

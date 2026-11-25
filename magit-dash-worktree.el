@@ -71,6 +71,17 @@ Example:
   :type '(alist :key-type string :value-type (repeat string))
   :group 'magit-dash-worktree)
 
+(defcustom magit-dash-worktree-ignorable-regexps
+  '("\\(?:\\`\\|/\\)\\(?:node_modules\\|target\\|build\\|dist\\|out\\|__pycache__\\|\\.venv\\|venv\\|\\.cache\\|\\.pytest_cache\\|\\.mypy_cache\\|\\.tox\\|\\.gradle\\|\\.next\\|\\.direnv\\)\\(?:/\\|\\'\\)"
+    "\\.\\(?:elc\\|eln\\|pyc\\|o\\|class\\)\\'")
+  "Regexps for git-ignored paths that are safe to lose with a worktree.
+Each is matched against a path relative to the worktree root, as listed by
+`git status --ignored' (directories end in a slash).  Ignored files that
+match none of these, such as a local `.env' or `keep.secret', make
+`magit-dash-worktree-risks' report them."
+  :type '(repeat regexp)
+  :group 'magit-dash-worktree)
+
 (defcustom magit-dash-worktree-auto-symlink t
   "When non-nil, automatically create symlinks in new worktrees.
 Hooked via `magit-post-worktree-add-hook'."
@@ -331,6 +342,88 @@ via `git status --porcelain'."
         (if (zerop exit)
             (not (string-empty-p (string-trim (buffer-string))))
           t)))))
+
+(defun magit-dash-worktree--git-output (path &rest args)
+  "Run git ARGS in PATH; return (EXIT . OUTPUT-STRING)."
+  (with-temp-buffer
+    (let ((exit (apply #'call-process "git" nil (list (current-buffer) nil) nil
+                       "-C" (expand-file-name path) args)))
+      (cons exit (string-trim (buffer-string))))))
+
+(defun magit-dash-worktree--count (path &rest rev-list-args)
+  "Return the `git rev-list --count' of REV-LIST-ARGS in PATH, or nil on failure."
+  (let ((result (apply #'magit-dash-worktree--git-output path "rev-list" "--count" rev-list-args)))
+    (when (and (zerop (car result)) (string-match-p "\\`[0-9]+\\'" (cdr result)))
+      (string-to-number (cdr result)))))
+
+(defun magit-dash-worktree--unpublished-risk (path pushed-oid)
+  "Return a risk string when PATH holds commits that exist on no ref, or nil.
+Detached HEAD: commits reachable from no branch, tag or remote.  A branch:
+commits ahead of its upstream, or with no upstream, commits on no other
+branch, tag or remote.  Nothing is reported when HEAD is PUSHED-OID."
+  (let* ((head (cdr (magit-dash-worktree--git-output path "rev-parse" "HEAD")))
+         (branch (let ((result (magit-dash-worktree--git-output
+                                path "symbolic-ref" "-q" "--short" "HEAD")))
+                   (and (zerop (car result)) (cdr result)))))
+    (unless (and pushed-oid (equal head pushed-oid))
+      (cond
+       ((null branch)
+        (let ((n (magit-dash-worktree--count
+                  path "HEAD" "--not" "--branches" "--tags" "--remotes")))
+          (cond
+           ((null n) "cannot tell whether the detached HEAD is reachable from any ref")
+           ((> n 0) (format "detached HEAD with %d commit(s) reachable from no branch, tag or remote" n)))))
+       (t
+        (let ((upstream (magit-dash-worktree--git-output
+                         path "rev-parse" "--abbrev-ref" "--symbolic-full-name" "@{upstream}")))
+          (cond
+           ((zerop (car upstream))
+            (let ((n (magit-dash-worktree--count path "@{upstream}..HEAD")))
+              (cond
+               ((null n) (format "cannot compare %s with its upstream" branch))
+               ((> n 0) (format "branch %s has %d commit(s) ahead of %s" branch n (cdr upstream))))))
+           (t
+            (let ((n (magit-dash-worktree--count
+                      path "HEAD" "--not" "--remotes" "--tags"
+                      (concat "--exclude=" branch) "--branches")))
+              (cond
+               ((null n) (format "cannot tell whether branch %s has unique commits" branch))
+               ((> n 0) (format "branch %s has no upstream and %d commit(s) on no other ref"
+                                branch n))))))))))))
+
+(defun magit-dash-worktree--ignored-risk (path)
+  "Return a risk string for non-ignorable ignored files in PATH, or nil."
+  (let ((result (magit-dash-worktree--git-output path "status" "--porcelain" "--ignored")))
+    (cond
+     ((not (zerop (car result)))
+      "cannot list ignored files")
+     (t
+      (let ((kept (thread-last
+                    (split-string (cdr result) "\n" t)
+                    (seq-filter (lambda (line) (string-prefix-p "!! " line)))
+                    (seq-map (lambda (line) (string-remove-prefix "!! " line)))
+                    (seq-remove (lambda (rel)
+                                  (or (file-symlink-p (expand-file-name (directory-file-name rel) path))
+                                      (seq-some (lambda (re) (string-match-p re rel))
+                                                magit-dash-worktree-ignorable-regexps)))))))
+        (when kept
+          (format "%d ignored file(s) outside build directories (%s)"
+                  (length kept) (string-join (seq-take kept 3) ", "))))))))
+
+(defun magit-dash-worktree-risks (path &optional pushed-oid)
+  "Return a list of strings naming deletion risks of the worktree at PATH.
+These are beyond uncommitted changes: unpublished commits (see
+`magit-dash-worktree--unpublished-risk'; none are reported when HEAD is
+PUSHED-OID) and ignored files outside `magit-dash-worktree-ignorable-regexps'.
+Return nil when there are none."
+  (when (and path (file-directory-p path))
+    (delq nil (list (magit-dash-worktree--unpublished-risk path pushed-oid)
+                    (magit-dash-worktree--ignored-risk path)))))
+
+(defun magit-dash-worktree-confirm-risks (path risks)
+  "Ask whether to delete the worktree at PATH despite RISKS; return non-nil if yes."
+  (yes-or-no-p (format "Worktree %s has: %s.  Delete it anyway? "
+                       (abbreviate-file-name path) (string-join risks "; "))))
 
 ;;;###autoload
 (defun magit-dash-worktree-dirty-many (paths)
