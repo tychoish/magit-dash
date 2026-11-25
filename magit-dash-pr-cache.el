@@ -183,5 +183,24 @@ written."
               repo number (error-message-string err))
      nil)))
 
+(defun magit-dash-pr-cache-put-status (repo number status payload &optional prior)
+  "Store STATUS for REPO and NUMBER without refreshing the record's age.
+When a previous record exists (PRIOR, or read from disk) only its
+`:status' is replaced; `:fetched-at', `:payload', `:updated-at' and
+`:head-sha' are preserved so stale rows stay stale.  Without one, write
+PAYLOAD with a fresh stamp.  Return the record, or nil when it could not
+be written."
+  (condition-case err
+      (when-let* ((file (magit-dash-pr-cache--file repo number)))
+        (if-let* ((old (or prior (magit-dash-pr-cache-get repo number))))
+            (let ((record (plist-put (copy-sequence old) :status status)))
+              (magit-dash-pr-cache--write file record)
+              record)
+          (magit-dash-pr-cache-put repo number payload status)))
+    (error
+     (message "magit-dash-pr-cache: could not write %s#%s: %s"
+              repo number (error-message-string err))
+     nil)))
+
 (provide 'magit-dash-pr-cache)
 ;;; magit-dash-pr-cache.el ends here

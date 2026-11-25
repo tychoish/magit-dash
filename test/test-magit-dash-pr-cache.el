@@ -22,7 +22,9 @@
          (cl-letf (((symbol-function 'sprite-state-path)
                     (lambda (name) (expand-file-name name root)))
                    ((symbol-function 'magit-dash-gh--repo-dir)
-                    (lambda () root)))
+                    (lambda () root))
+                   ((symbol-function 'magit-dash-pr-dashboard--collect-statuses)
+                    #'ignore))
            ,@body)
        (delete-directory root t))))
 
@@ -276,6 +278,29 @@
     (magit-dash-pr-cache-put "o/r" 2 '((number . 2) (headRefOid . "abc123")))
     (should (equal (plist-get (magit-dash-pr-cache-get "o/r" 2) :head-sha)
                    "abc123"))))
+
+;; put-status
+
+(ert-deftest magit-dash-pr-cache/put-status-preserves-record-age ()
+  (magit-dash-pr-cache-test/with-state
+    (magit-dash-pr-cache-put "o/r" 1 '((number . 1) (updatedAt . "u") (headRefOid . "h")))
+    (magit-dash-pr-cache-test/age-file "o/r" 1 100000)
+    (let ((before (magit-dash-pr-cache-get "o/r" 1)))
+      (magit-dash-pr-cache-put-status "o/r" 1 '(:approvals 1) '((number . 99)))
+      (let ((after (magit-dash-pr-cache-get "o/r" 1)))
+        (should (equal '(:approvals 1) (plist-get after :status)))
+        (should (equal (plist-get before :fetched-at) (plist-get after :fetched-at)))
+        (should (equal (plist-get before :payload) (plist-get after :payload)))
+        (should (equal "h" (plist-get after :head-sha)))
+        (should (magit-dash-pr-cache-stale-p after))))))
+
+(ert-deftest magit-dash-pr-cache/put-status-without-prior-writes-payload ()
+  (magit-dash-pr-cache-test/with-state
+    (magit-dash-pr-cache-put-status "o/r" 2 '(:approvals 1) '((number . 2) (title . "t")))
+    (let ((record (magit-dash-pr-cache-get "o/r" 2)))
+      (should (equal '(:approvals 1) (plist-get record :status)))
+      (should (equal "t" (map-elt (plist-get record :payload) 'title)))
+      (should-not (magit-dash-pr-cache-stale-p record)))))
 
 (provide 'test-magit-dash-pr-cache)
 ;;; test-magit-dash-pr-cache.el ends here

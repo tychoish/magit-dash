@@ -370,7 +370,7 @@
   "When no entries exist, Repo column falls back to available window space (min 12)."
   (let* ((magit-dash-pr-columns (append '((author . nil)) magit-dash-pr-columns))
          (fmt (magit-dash-pr-dashboard--build-format 100 nil)))
-    (should (= (- 100 77) (cadr (aref fmt 0))))))
+    (should (= (- 100 77 9) (cadr (aref fmt 0))))))
 
 (ert-deftest magit-dash-pr/split-slug ()
   "Split slug correctly extracts owner and repo."
@@ -500,7 +500,7 @@
   (should (eq t (alist-get 'title magit-dash-pr-columns)))
   (should (eq t (alist-get 'worktree magit-dash-pr-columns)))
   (should (eq t (alist-get 'updated magit-dash-pr-columns)))
-  (should (equal '(repo pr author ci title worktree updated comments review)
+  (should (equal '(repo pr author ci title worktree updated comments review approvals threads)
                  (magit-dash-pr--active-columns)))
   (let ((was-on (bound-and-true-p magit-dash-global-mode)))
     (unwind-protect
@@ -525,7 +525,7 @@
 (ert-deftest magit-dash-pr/build-entry-respects-arbitrary-columns ()
   "build-entry outputs only the active columns."
   (let ((magit-dash-pr-columns
-         '((org . nil) (repo . t) (pr . t) (author . nil) (base . nil) (ci . nil) (title . nil) (worktree . nil) (updated . nil) (age . nil) (comments . nil) (review . nil)))
+         '((org . nil) (repo . t) (pr . t) (author . nil) (base . nil) (ci . nil) (title . nil) (worktree . nil) (updated . nil) (age . nil) (comments . nil) (review . nil) (approvals . nil) (threads . nil)))
         (pr '((number . 10) (title . "T") (updatedAt . "") (comments . 0))))
     (let* ((entry (magit-dash-pr-dashboard--build-entry pr "owner/repo"))
            (vec (cadr entry)))
@@ -1255,7 +1255,9 @@
       (cl-letf (((symbol-function 'magit-dash-gh--run-process)
                  (lambda (args _dir on-success &optional _on-error _attempt)
                    (push args calls)
-                   (funcall on-success "{\"number\":2,\"title\":\"two v2\",\"state\":\"OPEN\"}"))))
+                   (funcall on-success "{\"number\":2,\"title\":\"two v2\",\"state\":\"OPEN\"}")))
+                ((symbol-function 'magit-dash-pr-status-fetch-one)
+                 (lambda (&rest _) nil)))
         (magit-dash-pr-dashboard-refresh-entries
          (list (car (cadr tabulated-list-entries))))
         (should (= 1 (length calls)))
@@ -1455,6 +1457,362 @@
        t)
       (should (string-match-p "(branch 'feat/x')" (cadr prompts)))
       (should (string-match-p "(branch 'detached')" (car prompts))))))
+
+;;;; Status columns
+
+(require 'magit-dash-pr-cache)
+(require 'magit-dash-pr-status)
+
+(defmacro magit-dash-pr-test/with-cache (&rest body)
+  "Run BODY with a temp cache root, only approvals/threads/ci columns and no gh."
+  (declare (indent 0))
+  `(let* ((root (make-temp-file "magit-dash-pr-status-cols-" t))
+          (magit-dash-pr-columns '((approvals . t) (threads . t) (ci . t)
+                                   (comments . t) (pr . t))))
+     (unwind-protect
+         (cl-letf (((symbol-function 'sprite-state-path)
+                    (lambda (name) (expand-file-name name root)))
+                   ((symbol-function 'magit-dash-gh--repo-dir)
+                    (lambda () root)))
+           ,@body)
+       (delete-directory root t))))
+
+(defun magit-dash-pr-test/status (&rest overrides)
+  "Return a status plist with OVERRIDES applied."
+  (let ((status (list :ci "SUCCESS" :approvals 1 :required 2 :requested '("alice" "bob")
+                      :changes-requested 0 :threads-open 3 :threads-outdated 1
+                      :failing nil :bucket 'threads)))
+    (while overrides
+      (setq status (plist-put status (pop overrides) (pop overrides))))
+    status))
+
+(defun magit-dash-pr-test/cells (entry)
+  "Return ENTRY's cells keyed by active column."
+  (cl-mapcar #'cons (magit-dash-pr--active-columns) (append (cadr entry) nil)))
+
+(ert-deftest magit-dash-pr/status-columns-registered ()
+  (should (memq 'approvals magit-dash-pr--all-columns))
+  (should (memq 'threads magit-dash-pr--all-columns))
+  (should (assq 'approvals magit-dash-pr--column-defs))
+  (should (assq 'threads magit-dash-pr--column-defs)))
+
+(ert-deftest magit-dash-pr/status-row-from-cached-status ()
+  (magit-dash-pr-test/with-cache
+    (with-temp-buffer
+      (magit-dash-pr-dashboard-mode)
+      (magit-dash-pr-dashboard--set-status "o/r" 7 (magit-dash-pr-test/status))
+      (let* ((cells (magit-dash-pr-test/cells
+                     (magit-dash-pr-dashboard--build-entry
+                      '((number . 7) (title . "t") (commentsCount . 4)) "o/r")))
+             (appr (alist-get 'approvals cells)))
+        (should (equal "1/2" appr))
+        (should (string-match-p "alice, bob" (get-text-property 0 'help-echo appr)))
+        (should (equal "3" (alist-get 'threads cells)))
+        (should (equal "✓" (alist-get 'ci cells)))
+        (should (equal "4" (alist-get 'comments cells)))))))
+
+(ert-deftest magit-dash-pr/status-row-markers-and-blanks ()
+  (magit-dash-pr-test/with-cache
+    (with-temp-buffer
+      (magit-dash-pr-dashboard-mode)
+      (let ((pr '((number . 7) (title . "t"))))
+        (let ((cells (magit-dash-pr-test/cells
+                      (magit-dash-pr-dashboard--build-entry pr "o/r"))))
+          (should (equal "" (alist-get 'approvals cells)))
+          (should (equal "" (alist-get 'threads cells))))
+        (magit-dash-pr-dashboard--set-status
+         "o/r" 7 (magit-dash-pr-test/status :changes-requested 1 :threads-open 0))
+        (let ((cells (magit-dash-pr-test/cells
+                      (magit-dash-pr-dashboard--build-entry pr "o/r"))))
+          (should (equal "1/2!" (alist-get 'approvals cells)))
+          (should (equal "" (alist-get 'threads cells))))))))
+
+(ert-deftest magit-dash-pr/status-refresh-updates-threads-one-file ()
+  (magit-dash-pr-test/with-cache
+    (magit-dash-pr-cache-put "o/r" 1 '((number . 1) (title . "one")) (magit-dash-pr-test/status))
+    (magit-dash-pr-cache-put "o/r" 2 '((number . 2) (title . "two")) (magit-dash-pr-test/status))
+    (let ((other (magit-dash-pr-cache-get "o/r" 2)))
+      (with-temp-buffer
+        (magit-dash-pr-dashboard-mode)
+        (setq magit-dash-pr-dashboard--filters (list :state "open" :repo "o/r"))
+        (setq tabulated-list-entries
+              (magit-dash-pr-dashboard--cached-entries magit-dash-pr-dashboard--filters))
+        (cl-letf (((symbol-function 'magit-dash-gh--run-process) #'ignore)
+                  ((symbol-function 'magit-dash-pr-status-fetch-one)
+                   (lambda (_slug _number _dir on-success _on-error)
+                     (funcall on-success (magit-dash-pr-test/status :threads-open 0
+                                                                      :approvals 2)))))
+          (magit-dash-pr-dashboard-refresh-entries
+           (list (car (seq-find (lambda (e) (eql 1 (plist-get (car e) :number)))
+                                tabulated-list-entries)))))
+        (should (= 0 (plist-get (plist-get (magit-dash-pr-cache-get "o/r" 1) :status)
+                                :threads-open)))
+        (should (= 2 (plist-get (plist-get (magit-dash-pr-cache-get "o/r" 1) :status)
+                                :approvals)))
+        (should (equal "one" (map-elt (plist-get (magit-dash-pr-cache-get "o/r" 1) :payload)
+                                      'title)))
+        (should (equal other (magit-dash-pr-cache-get "o/r" 2)))
+        (should (equal "" (alist-get 'threads
+                                     (magit-dash-pr-test/cells
+                                      (seq-find (lambda (e) (eql 1 (plist-get (car e) :number)))
+                                                tabulated-list-entries)))))))))
+
+(ert-deftest magit-dash-pr/status-fetch-error-keeps-old-status ()
+  (magit-dash-pr-test/with-cache
+    (magit-dash-pr-cache-put "o/r" 1 '((number . 1) (title . "one")) (magit-dash-pr-test/status))
+    (with-temp-buffer
+      (magit-dash-pr-dashboard-mode)
+      (setq magit-dash-pr-dashboard--filters (list :state "open" :repo "o/r"))
+      (setq tabulated-list-entries
+            (magit-dash-pr-dashboard--cached-entries magit-dash-pr-dashboard--filters))
+      (let ((before (magit-dash-pr-cache-get "o/r" 1))
+            (entry (car (car tabulated-list-entries))))
+        (cl-letf (((symbol-function 'magit-dash-gh--run-process)
+                   (lambda (_args _dir on-success &rest _)
+                     (funcall on-success "{\"number\":1,\"title\":\"one v2\",\"state\":\"OPEN\"}")))
+                  ((symbol-function 'magit-dash-pr-status-fetch-one)
+                   (lambda (_slug _number _dir _on-success on-error)
+                     (funcall on-error "boom"))))
+          (magit-dash-pr-dashboard-refresh-entries (list entry)))
+        (let ((after (magit-dash-pr-cache-get "o/r" 1)))
+          (should (equal (plist-get before :status) (plist-get after :status)))
+          (should (equal "one v2" (map-elt (plist-get after :payload) 'title))))
+        (should (equal "3" (alist-get 'threads
+                                      (magit-dash-pr-test/cells
+                                       (car tabulated-list-entries)))))))))
+
+(ert-deftest magit-dash-pr/status-store-rejects-partial-over-good ()
+  (magit-dash-pr-test/with-cache
+    (magit-dash-pr-cache-put "o/r" 1 '((number . 1)) (magit-dash-pr-test/status))
+    (with-temp-buffer
+      (magit-dash-pr-dashboard-mode)
+      (should (null (magit-dash-pr-dashboard--store-status
+                     "o/r" 1 (magit-dash-pr-test/status :truncated t :threads-open 0) nil)))
+      (should (null (magit-dash-pr-dashboard--store-status "o/r" 1 "garbage" nil)))
+      (should (= 3 (plist-get (plist-get (magit-dash-pr-cache-get "o/r" 1) :status)
+                              :threads-open))))))
+
+(ert-deftest magit-dash-pr/status-collection-fills-matching-rows ()
+  (magit-dash-pr-test/with-cache
+    (with-temp-buffer
+      (magit-dash-pr-dashboard-mode)
+      (setq tabulated-list-entries
+            (list (magit-dash-pr-dashboard--build-entry '((number . 1) (title . "a")) "o/r")
+                  (magit-dash-pr-dashboard--build-entry '((number . 1) (title . "b")) "o/other")
+                  (magit-dash-pr-dashboard--build-entry '((number . 2) (title . "c")) "o/r")))
+      (magit-dash-pr-dashboard--fill-statuses
+       (current-buffer)
+       (list (append (list :repo "o/r" :number 1) (magit-dash-pr-test/status :threads-open 5))
+             (append (list :repo "o/r" :number 99) (magit-dash-pr-test/status))))
+      (should (equal '("5" "" "")
+                     (seq-map (lambda (e) (alist-get 'threads (magit-dash-pr-test/cells e)))
+                              tabulated-list-entries)))
+      (should (equal '("o/r/1.eld")
+                     (seq-map (lambda (f) (file-relative-name f (magit-dash-pr-cache--root)))
+                              (directory-files-recursively (magit-dash-pr-cache--root)
+                                                           "\\.eld\\'"))))
+      (should (= 5 (plist-get (plist-get (magit-dash-pr-cache-get "o/r" 1) :status)
+                              :threads-open))))))
+
+;;;; Status hardening
+
+(defun magit-dash-pr-test/stale-record (repo number)
+  "Return the fetched-at of the cache record for REPO and NUMBER."
+  (plist-get (magit-dash-pr-cache-get repo number) :fetched-at))
+
+(defun magit-dash-pr-test/age-to-one (repo number)
+  "Rewrite the record for REPO and NUMBER with :fetched-at 1.0."
+  (magit-dash-pr-cache--write
+   (magit-dash-pr-cache--file repo number)
+   (plist-put (magit-dash-pr-cache-get repo number) :fetched-at 1.0)))
+
+(ert-deftest magit-dash-pr/status-write-keeps-fetched-at-fill ()
+  (magit-dash-pr-test/with-cache
+    (magit-dash-pr-cache-put "o/r" 1 '((number . 1) (title . "one")) (magit-dash-pr-test/status))
+    (magit-dash-pr-test/age-to-one "o/r" 1)
+    (with-temp-buffer
+      (magit-dash-pr-dashboard-mode)
+      (setq tabulated-list-entries
+            (list (magit-dash-pr-dashboard--build-entry '((number . 1) (title . "a")) "o/r")))
+      (magit-dash-pr-dashboard--fill-statuses
+       (current-buffer)
+       (list (append (list :repo "o/r" :number 1)
+                     (magit-dash-pr-test/status :threads-open 9))))
+      (let ((record (magit-dash-pr-cache-get "o/r" 1)))
+        (should (= 9 (plist-get (plist-get record :status) :threads-open)))
+        (should (= 1.0 (plist-get record :fetched-at)))
+        (should (magit-dash-pr-cache-stale-p record))
+        (should (equal "one" (map-elt (plist-get record :payload) 'title)))))))
+
+(ert-deftest magit-dash-pr/status-write-keeps-fetched-at-refresh ()
+  (magit-dash-pr-test/with-cache
+    (magit-dash-pr-cache-put "o/r" 1 '((number . 1) (title . "one")) (magit-dash-pr-test/status))
+    (magit-dash-pr-test/age-to-one "o/r" 1)
+    (with-temp-buffer
+      (magit-dash-pr-dashboard-mode)
+      (cl-letf (((symbol-function 'magit-dash-pr-status-fetch-one)
+                 (lambda (_slug _number _dir on-success _on-error)
+                   (funcall on-success (magit-dash-pr-test/status :threads-open 7)))))
+        (magit-dash-pr-dashboard--refresh-status
+         (current-buffer) '("o/r" . 1) '((number . 1)) "/"))
+      (should (= 1.0 (magit-dash-pr-test/stale-record "o/r" 1)))
+      (should (= 7 (plist-get (plist-get (magit-dash-pr-cache-get "o/r" 1) :status)
+                              :threads-open))))))
+
+(ert-deftest magit-dash-pr/status-write-without-prior-record ()
+  (magit-dash-pr-test/with-cache
+    (with-temp-buffer
+      (magit-dash-pr-dashboard-mode)
+      (should (magit-dash-pr-dashboard--store-status
+               "o/r" 5 (magit-dash-pr-test/status) '((number . 5) (title . "five"))))
+      (let ((record (magit-dash-pr-cache-get "o/r" 5)))
+        (should (numberp (plist-get record :fetched-at)))
+        (should (equal "five" (map-elt (plist-get record :payload) 'title)))
+        (should (= 3 (plist-get (plist-get record :status) :threads-open)))))))
+
+(ert-deftest magit-dash-pr/status-malformed-cached-status-never-signals ()
+  (magit-dash-pr-test/with-cache
+    (let ((bad (list (magit-dash-pr-test/status :requested "alice")
+                     (magit-dash-pr-test/status :threads-outdated "z")
+                     "str"
+                     '(:approvals 1 :required)
+                     (magit-dash-pr-test/status :ci 5)))
+          (n 0))
+      (seq-do (lambda (status)
+                (setq n (1+ n))
+                (magit-dash-pr-cache-put "o/r" n `((number . ,n) (state . "OPEN")) status))
+              bad)
+      (with-temp-buffer
+        (magit-dash-pr-dashboard-mode)
+        (let ((entries (magit-dash-pr-dashboard--cached-entries (list :state "open"))))
+          (should (= 5 (length entries)))
+          (seq-do (lambda (entry)
+                    (should (stringp (alist-get 'approvals (magit-dash-pr-test/cells entry)))))
+                  entries))
+        (should (equal "" (magit-dash-pr-dashboard--format-approvals
+                           (magit-dash-pr-test/status :requested "alice"))))
+        (should (equal "" (magit-dash-pr-dashboard--format-threads "str")))
+        (should (stringp (magit-dash-pr-dashboard--format-ci 5)))))))
+
+(ert-deftest magit-dash-pr/status-survives-mode-reentry ()
+  (with-temp-buffer
+    (magit-dash-pr-dashboard-mode)
+    (magit-dash-pr-dashboard--set-status "o/r" 1 (magit-dash-pr-test/status))
+    (setq magit-dash-pr-dashboard--status-cancel #'ignore)
+    (magit-dash-pr-dashboard-mode)
+    (should (magit-dash-pr-dashboard--status "o/r" 1))
+    (should (eq #'ignore magit-dash-pr-dashboard--status-cancel))
+    (should (memq #'magit-dash-pr-dashboard--cancel-status-collection
+                  kill-buffer-hook))))
+
+(ert-deftest magit-dash-pr/status-kill-buffer-cancels-collection ()
+  (magit-dash-pr-test/with-cache
+    (let ((cancelled 0)
+          (buf (generate-new-buffer " *dash-kill*")))
+      (cl-letf (((symbol-function 'magit-dash-pr-status-collect-all-async)
+                 (lambda (&rest _) (lambda () (setq cancelled (1+ cancelled))))))
+        (with-current-buffer buf
+          (magit-dash-pr-dashboard-mode)
+          (magit-dash-pr-dashboard--collect-statuses buf "/")
+          (should (functionp magit-dash-pr-dashboard--status-cancel)))
+        (kill-buffer buf)
+        (should (= 1 cancelled))))))
+
+(ert-deftest magit-dash-pr/status-collect-wiring ()
+  (magit-dash-pr-test/with-cache
+    (let (calls (cancelled 0) (messages nil))
+      (cl-letf (((symbol-function 'magit-dash-pr-status-collect-all-async)
+                 (lambda (on-done on-error dir on-start on-progress)
+                   (push (list on-done on-error dir on-start on-progress) calls)
+                   (lambda () (setq cancelled (1+ cancelled)))))
+                ((symbol-function 'message)
+                 (lambda (fmt &rest args) (push (apply #'format fmt args) messages))))
+        (with-temp-buffer
+          (magit-dash-pr-dashboard-mode)
+          (setq tabulated-list-entries
+                (list (magit-dash-pr-dashboard--build-entry '((number . 1) (title . "a")) "o/r")))
+          (magit-dash-pr-dashboard--collect-statuses (current-buffer) "/d")
+          (should (= 0 cancelled))
+          (magit-dash-pr-dashboard--collect-statuses (current-buffer) "/d")
+          (should (= 1 cancelled))
+          (let ((call (car calls))
+                (prs (list (append (list :repo "o/r" :number 1)
+                                   (magit-dash-pr-test/status :threads-open 4)))))
+            (should (equal "/d" (nth 2 call)))
+            (funcall (nth 4 call) prs nil nil)
+            (should (equal "4" (alist-get 'threads
+                                          (magit-dash-pr-test/cells
+                                           (car tabulated-list-entries)))))
+            (funcall (nth 1 call) "boom")
+            (should (seq-some (lambda (m) (string-match-p "unavailable: boom" m)) messages))))))))
+
+(ert-deftest magit-dash-pr/status-unchanged-costs-no-disk ()
+  (magit-dash-pr-test/with-cache
+    (let ((gets 0) (puts 0)
+          (real-get (symbol-function 'magit-dash-pr-cache-get))
+          (real-put (symbol-function 'magit-dash-pr-cache-put-status))
+          (prs (list (append (list :repo "o/r" :number 1) (magit-dash-pr-test/status)))))
+      (cl-letf (((symbol-function 'magit-dash-pr-cache-get)
+                 (lambda (&rest args) (setq gets (1+ gets)) (apply real-get args)))
+                ((symbol-function 'magit-dash-pr-cache-put-status)
+                 (lambda (&rest args) (setq puts (1+ puts)) (apply real-put args))))
+        (with-temp-buffer
+          (magit-dash-pr-dashboard-mode)
+          (setq tabulated-list-entries
+                (list (magit-dash-pr-dashboard--build-entry '((number . 1)) "o/r")))
+          (magit-dash-pr-dashboard--fill-statuses (current-buffer) prs)
+          (should (= 1 puts))
+          (let ((gets-after-first gets))
+            (should (> gets-after-first 0))
+            (magit-dash-pr-dashboard--fill-statuses (current-buffer) prs)
+            (should (= gets-after-first gets))
+            (should (= 1 puts))))))))
+
+(ert-deftest magit-dash-pr/status-refresh-entries-survives-setup-failure ()
+  (magit-dash-pr-test/with-cache
+    (let (views fetched)
+      (with-temp-buffer
+        (magit-dash-pr-dashboard-mode)
+        (setq tabulated-list-entries
+              (list (magit-dash-pr-dashboard--build-entry '((number . 1)) "bad")
+                    (magit-dash-pr-dashboard--build-entry '((number . 2)) "o/r")))
+        (cl-letf (((symbol-function 'magit-dash-gh--run-process)
+                   (lambda (args &rest _) (push args views)))
+                  ((symbol-function 'magit-dash-pr-status-fetch-one)
+                   (lambda (slug number &rest _)
+                     (if (equal slug "bad")
+                         (error "bad slug")
+                       (push (cons slug number) fetched)))))
+          (magit-dash-pr-dashboard-refresh-entries
+           (seq-map #'car tabulated-list-entries))
+          (should (= 2 (length views)))
+          (should (equal '(("o/r" . 2)) fetched)))))))
+
+(ert-deftest magit-dash-pr/status-store-guards ()
+  (magit-dash-pr-test/with-cache
+    (with-temp-buffer
+      (magit-dash-pr-dashboard-mode)
+      (should (null (magit-dash-pr-dashboard--store-status
+                     "o/r" 1 (list :ci nil :approvals nil :threads-open nil) nil)))
+      (should (null (magit-dash-pr-dashboard--store-status
+                     "o/r" 1 (list :error "boom" :approvals 1) nil)))
+      (should (null (magit-dash-pr-cache-get "o/r" 1)))
+      ;; truncated with no prior is accepted
+      (should (magit-dash-pr-dashboard--store-status
+               "o/r" 1 (magit-dash-pr-test/status :truncated t :threads-open 5) '((number . 1))))
+      ;; a worse truncated result is rejected, a not-worse one accepted
+      (should (null (magit-dash-pr-dashboard--store-status
+                     "o/r" 1 (magit-dash-pr-test/status :truncated t :threads-open 2) nil)))
+      (should (magit-dash-pr-dashboard--store-status
+               "o/r" 1 (magit-dash-pr-test/status :truncated t :threads-open 6) nil))
+      (should (= 6 (plist-get (plist-get (magit-dash-pr-cache-get "o/r" 1) :status)
+                              :threads-open))))))
+
+(ert-deftest magit-dash-pr/build-format-default-columns-fit-width-80 ()
+  (let* ((fmt (magit-dash-pr-dashboard--build-format 80 nil))
+         (total (seq-reduce (lambda (acc col) (+ acc (cadr col))) (append fmt nil) 0))
+         (repo (cadr (aref fmt 0))))
+    (should (or (<= total 80) (>= repo 12)))))
 
 (provide 'test-magit-dash-pr)
 ;;; test-magit-dash-pr.el ends here
