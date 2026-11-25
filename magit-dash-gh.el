@@ -804,8 +804,17 @@ Return (EXIT-CODE . OUTPUT)."
         (let ((code (apply #'call-process "gh" nil (current-buffer) nil args)))
           (cons code (buffer-string)))))))
 
-(defun magit-dash-gh--run-process (args dir on-success &optional on-error)
+(defvar magit-dash-gh-retry-attempts 3
+  "Total attempts for an async `gh' call when GitHub returns a 5xx gateway error.")
+
+(defvar magit-dash-gh-retry-delay 3
+  "Seconds before the first async retry; doubles on each further retry.")
+
+(defun magit-dash-gh--run-process (args dir on-success &optional on-error attempt)
   "Run `gh' with ARGS in DIR asynchronously.
+Transient HTTP 502/503/504 failures are retried up to
+`magit-dash-gh-retry-attempts' times with exponential backoff; ATTEMPT is
+the internal 1-based attempt counter.
 ON-SUCCESS is called with the output string when the process exits 0.
 ON-ERROR is called with the output string and exit code otherwise;
 when nil, a `message' is emitted instead.
@@ -833,13 +842,24 @@ signal."
                                         (buffer-string)))
                               (code (process-exit-status proc)))
                           (kill-buffer (process-buffer proc))
-                          (if (= code 0)
-                              (funcall on-success output)
-                            (if on-error
-                                (funcall on-error output code)
-                              (message "magit-gh: gh %s exited %d: %s"
-                                       (car args) code
-                                       (string-trim output))))))))))
+                          (cond
+                           ((= code 0)
+                            (funcall on-success output))
+                           ((and (< (or attempt 1) magit-dash-gh-retry-attempts)
+                                 (string-match-p "HTTP 50[234]" output))
+                            (let ((delay (* magit-dash-gh-retry-delay
+                                            (expt 2 (1- (or attempt 1))))))
+                              (message "magit-gh: gh %s hit a gateway error, retrying in %ss"
+                                       (car args) delay)
+                              (run-with-timer delay nil #'magit-dash-gh--run-process
+                                              args dir on-success on-error
+                                              (1+ (or attempt 1)))))
+                           (on-error
+                            (funcall on-error output code))
+                           (t
+                            (message "magit-gh: gh %s exited %d: %s"
+                                     (car args) code
+                                     (string-trim output))))))))))
         (with-current-buffer buf
           (setq default-directory dir))
         proc))))

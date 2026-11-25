@@ -197,7 +197,8 @@ Return (CODE . OUTPUT) of the last attempt."
     (while (and (< attempt magit-dash-pr-status-retry-attempts)
                 (magit-dash-pr-status--transient-failure-p result))
       (message "magit-dash: gh api graphql failed transiently, retrying in %ss" delay)
-      (sleep-for delay)
+      ;; Yield (timers, sentinels, filters) instead of freezing Emacs.
+      (accept-process-output nil delay)
       (setq delay (* 2 delay))
       (setq attempt (1+ attempt))
       (setq result (magit-dash-gh--call-process args dir)))
