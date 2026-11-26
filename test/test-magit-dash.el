@@ -4965,7 +4965,7 @@ The bug was that add-text-properties returns t, not the modified string."
     (magit-dash--which-key-register-replacements)
     (let ((rules (alist-get 'magit-dash-mode which-key-replacement-alist)))
       (should rules)
-      (should (equal 1 (length rules)))
+      (should (equal 6 (length rules)))
       (should (equal (cdr (assoc (cons nil "\\`magit-dash-\\(.*\\)") rules))
                      '(nil . "md-\\1"))))))
 

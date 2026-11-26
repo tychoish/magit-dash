@@ -377,9 +377,11 @@ Set to nil to leave `which-key-idle-delay' untouched."
   :group 'magit-dash)
 
 (defcustom magit-dash-which-key-abbreviate-commands 'strip
-  "How to abbreviate command names in `which-key' for `magit-dash-mode'.
-When set to `strip' (or t), the `magit-dash-' prefix is removed completely.
-When set to `md', `magit-dash-' becomes `md-'.
+  "How to abbreviate command names in which-key for magit-dash modes.
+Trim `magit-dash-pr-dashboard-', `magit-dash-pr-' and `magit-dash-'
+from command names and prefix-map labels in dashboard and related modes.
+When set to `strip' (or t), remove the prefix completely.
+When set to `md', replace the prefix with `md-'.
 When nil, no replacements are registered."
   :type '(choice (const :tag "Strip magit-dash- prefix completely" strip)
                  (const :tag "Abbreviate prefix as md-" md)

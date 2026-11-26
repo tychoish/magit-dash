@@ -22,7 +22,7 @@
 (defvar which-key-replacement-alist)
 (defvar magit-dash-which-key-abbreviate-commands 'strip
   "How to abbreviate magit-dash commands in which-key.
-One of `strip', `short', or nil.")
+One of `strip', `md', or nil.")
 (defvar magit-dash-buffer-name "*magit-dash-repos*")
 (defvar magit-dash--inhibit-post-refresh-hook nil
   "Non-nil when `magit-dash--on-magit-post-refresh' is executing.")
@@ -38,21 +38,35 @@ One of `strip', `short', or nil.")
 (declare-function magit-dash-dispatch "magit-dash-status")
 (declare-function magit-dash-pr-dashboard--setup-code-review-keys "magit-dash-pr")
 
+(defconst magit-dash--which-key-modes
+  '(magit-dash-mode magit-dash-actionable-mode magit-dash-pr-dashboard-mode
+    magit-dash-stack-mode magit-dash-gh-actions-log-mode)
+  "Major modes whose which-key descriptions abbreviate package namespaces.")
+
 (defun magit-dash--which-key-register-replacements ()
-  "Register command abbreviations in `which-key-replacement-alist'.
-Applied for `magit-dash-mode'.  Does nothing if
-`magit-dash-which-key-abbreviate-commands' is nil or
-`which-key-replacement-alist' is not defined."
-  (when (and (bound-and-true-p magit-dash-which-key-abbreviate-commands)
+  "Register namespace abbreviations for every magit-dash major mode.
+Trim PR dashboard and PR namespaces before the general package prefix.
+Named prefix maps retain their which-key group marker.  Do nothing when
+`magit-dash-which-key-abbreviate-commands' is nil or which-key is unloaded."
+  (when (and magit-dash-which-key-abbreviate-commands
              (boundp 'which-key-replacement-alist))
-    (let* ((prefix-repl (if (memq magit-dash-which-key-abbreviate-commands '(strip t))
-                            "\\1"
-                          "md-\\1"))
-           (rules (list (cons (cons nil "\\`magit-dash-\\(.*\\)")
-                              (cons nil prefix-repl)))))
-      (setq which-key-replacement-alist
-            (cons (cons 'magit-dash-mode rules)
-                  (assq-delete-all 'magit-dash-mode which-key-replacement-alist))))))
+    (let* ((prefix-repl
+            (if (memq magit-dash-which-key-abbreviate-commands '(strip t))
+                "\\1"
+              "md-\\1"))
+           (rules
+            (seq-mapcat
+             (lambda (prefix)
+               (list
+                (cons (cons nil (concat "\\`group:" prefix "\\(.*\\)"))
+                      (cons nil (concat "group:" prefix-repl)))
+                (cons (cons nil (concat "\\`" prefix "\\(.*\\)"))
+                      (cons nil prefix-repl))))
+             '("magit-dash-pr-dashboard-" "magit-dash-pr-" "magit-dash-"))))
+      (seq-do
+       (lambda (mode)
+         (setf (alist-get mode which-key-replacement-alist) rules))
+       magit-dash--which-key-modes))))
 
 (defun magit-dash--on-magit-post-refresh ()
   "Refresh dashboard row for the current repository after a Magit operation."
@@ -110,7 +124,8 @@ resolver finds none.  Remove the entry to keep code-review's own worktrees."
   :group 'magit-dash)
 
 (defvar magit-dash-global--saved-settings nil
-  "Alist of (SYMBOL . (BOUNDP . VALUE)) saved before enabling `magit-dash-global-mode'.")
+  "Settings saved before enabling `magit-dash-global-mode'.
+Each entry is (SYMBOL . (BOUNDP . VALUE)).")
 
 (defun magit-dash-global--apply-settings ()
   "Save previous values and apply `magit-dash-global-managed-settings'."
@@ -146,6 +161,7 @@ Sets up keybindings, savehist variables, and hooks while leaving the main
         (add-hook 'magit-mode-hook #'magit-dash-global--setup-magit)
         (add-hook 'after-load-functions #'magit-dash-global--on-after-load)
         (add-hook 'which-key-mode-hook #'magit-dash--which-key-register-replacements)
+        (magit-dash--which-key-register-replacements)
         (when (boundp 'savehist-additional-variables)
           (add-to-list 'savehist-additional-variables 'magit-dash-columns)
           (add-to-list 'savehist-additional-variables 'magit-dash-pr-columns)
