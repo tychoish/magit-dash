@@ -1199,6 +1199,7 @@ returns an alist response, or (CODE . OUTPUT) for a failure."
 ;;; Submit through code-review
 
 (defvar code-review-github-host)
+(defvar code-review-auth-backend)
 (defvar magit-dash-review-submit-time-limit)
 
 (defvar magit-dash-review-test/cr-calls nil

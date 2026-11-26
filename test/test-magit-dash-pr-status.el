@@ -1019,9 +1019,11 @@ cat %s
                 :type 'user-error)
   (should-error (magit-dash-pr-status--parse-json (string-to-multibyte "{\"a\":\"\x80\"}"))
                 :type 'user-error)
-  (cl-letf (((symbol-function 'json-parse-string)
-             (lambda (&rest _) (signal 'json-utf8-decode-error '("bad")))))
-    (should-error (magit-dash-pr-status--parse-json "{}") :type 'user-error)))
+  ;; Emacs 29 does not define this condition; it cannot signal it either.
+  (when (get 'json-utf8-decode-error 'error-conditions)
+    (cl-letf (((symbol-function 'json-parse-string)
+               (lambda (&rest _) (signal 'json-utf8-decode-error '("bad")))))
+      (should-error (magit-dash-pr-status--parse-json "{}") :type 'user-error))))
 
 (ert-deftest magit-dash-pr-status/fetch-one-times-out-once ()
   (let* ((magit-dash-pr-status-fetch-one-timeout 0.3)
