@@ -479,9 +479,19 @@ Kept in sync with `magit-dash-pr-columns'."
             t)
         (cdr (assq col magit-dash-pr--default-columns))))))
 
+(defvar-local magit-dash-pr-dashboard--filters
+  (list :state "open" :author "@me" :repo nil :org nil)
+  "Current PR dashboard filters plist.
+Keys: :state (\"open\"/\"closed\"), :author, :repo (OWNER/NAME), :org.")
+
 (defun magit-dash-pr--active-columns ()
   "Return PR column symbols that are currently enabled, in display order."
-  (seq-filter #'magit-dash-pr--column-enabled-p
+  (seq-filter (lambda (column)
+                (and (magit-dash-pr--column-enabled-p column)
+                     (not (and (eq column 'author)
+                               (local-variable-p 'magit-dash-pr-dashboard--filters)
+                               (equal (plist-get magit-dash-pr-dashboard--filters :author)
+                                      "@me")))))
               magit-dash-pr--all-columns))
 
 (defun magit-dash-pr-toggle-column (col)
@@ -519,11 +529,6 @@ Kept in sync with `magit-dash-pr-columns'."
   (if (and slug (string-match "\\`\\([^/]+\\)/\\([^/]+\\)\\'" slug))
       (cons (match-string 1 slug) (match-string 2 slug))
     (cons "" (or slug ""))))
-
-(defvar-local magit-dash-pr-dashboard--filters
-  (list :state "open" :author "@me" :repo nil :org nil)
-  "Current PR dashboard filters plist.
-Keys: :state (\"open\"/\"closed\"), :author, :repo (OWNER/NAME), :org.")
 
 (defcustom magit-dash-pr-fetch-limit 100
   "Number of pull requests to request from GitHub per listing.
@@ -1693,6 +1698,10 @@ other buffers."
            (buf (current-buffer))
            (dir (or (ignore-errors (magit-dash-gh--repo-dir))
                     (expand-file-name "~"))))
+      (setq tabulated-list-format (magit-dash-pr-dashboard--build-format))
+      (tabulated-list-init-header)
+      (when tabulated-list-entries
+        (magit-dash-pr-dashboard--rebuild-entries))
       (unless tabulated-list-entries
         (setq tabulated-list-entries
               (magit-dash-pr-dashboard--cached-entries filters))
@@ -1707,7 +1716,9 @@ other buffers."
           ((not (string-prefix-p "[" (string-trim output)))
            (message "magit-gh: discovery returned no usable result; kept cached rows"))
           ((and (buffer-live-p buf)
-                (with-current-buffer buf (derived-mode-p 'magit-dash-pr-dashboard-mode)))
+                (with-current-buffer buf
+                  (and (derived-mode-p 'magit-dash-pr-dashboard-mode)
+                       (equal filters magit-dash-pr-dashboard--filters))))
            (with-current-buffer buf
              (setq tabulated-list-entries
                    (or (magit-dash-pr-dashboard--parse-output output filters) nil))

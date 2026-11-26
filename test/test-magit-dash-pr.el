@@ -443,7 +443,8 @@
   "Calling `magit-dash-pr-dashboard-refresh' does not clear `tabulated-list-entries' before fetch completes."
   (with-temp-buffer
     (magit-dash-pr-dashboard-mode)
-    (setq tabulated-list-entries '(((:repo "o/r" :number 1) ["o/r" "1" "pass" "T" "·" "1d" "0" "approved"])))
+    (setq tabulated-list-entries
+          (list (magit-dash-pr-dashboard--build-entry '((number . 1)) "o/r")))
     (cl-letf (((symbol-function 'magit-dash-gh--run-process)
                (lambda (_args _dir _on-success &optional _on-error)
                  nil)))
@@ -2442,6 +2443,32 @@ spawns (which also error, so no network)."
           (should (memq 'magit-dash-stale (ensure-list (get-text-property 0 'face (aref stale i)))))
           ;; The row's own headRefOid wins over the cache record.
           (should (equal " " (substring-no-properties (aref live i)))))))))
+
+
+(ert-deftest magit-dash-pr/self-view-hides-author-column ()
+  "The current user's PR view omits the redundant author column."
+  (with-temp-buffer
+    (let ((magit-dash-pr-columns '((author . t))))
+      (setq-local magit-dash-pr-dashboard--filters '(:author "@me"))
+      (should-not (memq 'author (magit-dash-pr--active-columns)))
+      (setq-local magit-dash-pr-dashboard--filters '(:author nil))
+      (should (memq 'author (magit-dash-pr--active-columns))))))
+
+(ert-deftest magit-dash-pr/refresh-rebuilds-columns-before-discovery ()
+  "Changing the author filter immediately updates existing rows and header."
+  (with-temp-buffer
+    (magit-dash-pr-dashboard-mode)
+    (setq tabulated-list-entries
+          (list (magit-dash-pr-dashboard--build-entry
+                 '((number . 7) (author . ((login . "alice")))) "o/r")))
+    (setq-local magit-dash-pr-dashboard--filters '(:state "open" :author "@me"))
+    (cl-letf (((symbol-function 'magit-dash-gh--run-process) #'ignore)
+              ((symbol-function 'magit-dash-pr--prime-account-logins) #'ignore))
+      (magit-dash-pr-dashboard-refresh))
+    (should-not (seq-find (lambda (column) (equal (car column) "Author"))
+                          (append tabulated-list-format nil)))
+    (should (= (length tabulated-list-format)
+               (length (cadr (car tabulated-list-entries)))))))
 
 (provide 'test-magit-dash-pr)
 ;;; test-magit-dash-pr.el ends here
