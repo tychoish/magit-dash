@@ -22,6 +22,14 @@
 - *Magit-Status Integration*: Display real-time CI status headers, current PR information, and authored
   PR sections inside the native =magit-status= buffer via [[file:api.org::#magit-dash-status-setup][~magit-dash-status-setup~]].
 
+* Pull Request Status
+
+The Status column combines CI, merge conflicts, commits ahead/behind the PR base, and stack relationships. It appears before Title; the separate CI column is disabled by default, while explicit saved column preferences remain respected.
+
+Comparison counts use the exact base and head commit IDs reported by GitHub and update asynchronously. Missing or failed comparisons show ~↑?↓?~ and retry on refresh. ~clean~ means GitHub reports no merge conflicts; ~merge?~ means mergeability is unknown.
+
+~stack#N~ indicates a displayed PR whose head branch is this PR’s base, or whose base branch is this PR’s head. This inference uses branch names within the same repository and current dashboard view; ~stack-~ means no relationship was found among displayed PRs. It does not query hidden PRs or the local branch stack.
+
 * Key Functions and Options
 
 - [[file:api.org::#magit-dash-pr-dashboard-open][~magit-dash-pr-dashboard-open~]]: Open the dedicated PR overview buffer.

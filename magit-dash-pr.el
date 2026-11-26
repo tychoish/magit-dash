@@ -422,7 +422,7 @@ Can be:
   :group 'magit-dash)
 
 (defconst magit-dash-pr--default-columns
-  '((org . nil) (repo . t) (pr . t) (author . t) (ci . t) (title . t) (base . nil) (worktree . t) (updated . t) (age . nil) (comments . t) (review . t) (approvals . t) (threads . t) (new . nil))
+  '((org . nil) (repo . t) (pr . t) (author . t) (ci . nil) (title . t) (base . nil) (worktree . t) (updated . t) (age . nil) (comments . t) (review . t) (approvals . t) (threads . t) (new . nil) (status . t))
   "Default enabled state of each PR dashboard column.
 Columns missing from a persisted `magit-dash-pr-columns' fall back to this.")
 
@@ -433,7 +433,7 @@ Persisted across sessions via `savehist-additional-variables'.")
 
 
 (defconst magit-dash-pr--all-columns
-  '(org repo pr author ci title base worktree updated age comments review approvals threads new)
+  '(org repo pr author ci status title base worktree updated age comments review approvals threads new)
   "All available PR dashboard columns in display order.")
 
 (defconst magit-dash-pr--column-defs
@@ -451,7 +451,8 @@ Persisted across sessions via `savehist-additional-variables'.")
     (review   . ("Review"  14 t))
     (approvals . ("Appr"   6  t))
     (threads  . ("Thr"     3  t))
-    (new      . ("New"     4  t)))
+    (new      . ("New"     4  t))
+    (status   . ("Status"  26 t)))
   "Alist of COLUMN-SYMBOL to default (LABEL WIDTH SORTABLE) for PR columns.
 Org and Repo widths are computed dynamically in
 `magit-dash-pr-dashboard--build-format'.")
@@ -741,6 +742,124 @@ Uses the same ✓/x/⟳ indicators as the repository dashboard."
     ("REVIEW_REQUIRED" (propertize "needed" 'face 'warning))
     (_ "")))
 
+;;;; Combined merge, CI, divergence and stack status
+
+(defvar-local magit-dash-pr-dashboard--comparisons nil
+  "Hash table of (REPO BASE-SHA HEAD-SHA) to (AHEAD . BEHIND) counts.
+Counts are immutable for a SHA pair and never reused for a changed head/base.
+A nil value records an unsuccessful attempt until the next refresh.")
+
+(defvar-local magit-dash-pr-dashboard--comparison-pending nil
+  "Hash table of SHA comparison keys currently being fetched.")
+
+(defun magit-dash-pr-dashboard--format-status (pr repo status)
+  "Return combined merge status for PR in REPO using cached review STATUS.
+Stack relationships are inferred only from PRs currently displayed in REPO.
+Missing mergeability or comparison counts are displayed explicitly as unknown."
+  (let* ((number (map-elt pr 'number))
+         (base (map-elt pr 'baseRefName))
+         (head (map-elt pr 'headRefName))
+         (counts (and magit-dash-pr-dashboard--comparisons
+                      (map-elt magit-dash-pr-dashboard--comparisons
+                               (list repo (map-elt pr 'baseRefOid)
+                                     (map-elt pr 'headRefOid)))))
+         (related (seq-find
+                   (lambda (entry)
+                     (let ((other (plist-get (car entry) :pr)))
+                       (and (equal repo (plist-get (car entry) :repo))
+                            (not (equal number (map-elt other 'number)))
+                            (or (and base (equal base (map-elt other 'headRefName)))
+                                (and head (equal head (map-elt other 'baseRefName)))))))
+                   tabulated-list-entries))
+         (mergeable (map-elt pr 'mergeable))
+         (conflict (or (equal mergeable "CONFLICTING")
+                       (equal (map-elt pr 'mergeStateStatus) "DIRTY"))))
+    (string-join
+     (list (magit-dash-pr-dashboard--format-ci
+            (or (magit-dash-pr--parse-status-rollup (map-elt pr 'statusCheckRollup))
+                (plist-get status :ci)))
+           (cond (conflict (propertize "conflict" 'face 'error))
+                 ((equal mergeable "MERGEABLE") "clean")
+                 (t (propertize "merge?" 'face 'shadow)))
+           (propertize
+            (if (consp counts)
+                (format "↑%d↓%d" (car counts) (cdr counts))
+              "↑?↓?")
+            'help-echo "Commits ahead/behind the PR base; ? means not yet available")
+           (if related
+               (propertize
+                (format "stack#%d" (map-elt (plist-get (car related) :pr) 'number))
+                'help-echo "Related PR in the displayed stack (matching base/head branches)")
+             (propertize "stack-" 'face 'shadow
+                         'help-echo "No stack relationship among displayed PRs")))
+     " ")))
+
+(defun magit-dash-pr-dashboard--finish-comparison (buf dir pending key output)
+  "Finish comparison KEY for BUF from DIR, removing it from PENDING.
+Parse OUTPUT if present; failed or malformed replies retain unknown counts."
+  (map-delete pending key)
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (let ((counts
+             (and output
+                  (ignore-errors
+                    (let* ((data (json-parse-string output :object-type 'alist))
+                           (ahead (map-elt data 'ahead_by))
+                           (behind (map-elt data 'behind_by)))
+                      (and (natnump ahead) (natnump behind)
+                           (cons ahead behind)))))))
+        (setf (map-elt magit-dash-pr-dashboard--comparisons key) counts)
+        (magit-dash-pr-dashboard--rebuild-entries)
+        (magit-dash-pr-dashboard--enrich-comparisons buf dir)))))
+
+(defun magit-dash-pr-dashboard--enrich-comparisons (buf dir)
+  "Fetch exact PR base/head divergence for BUF asynchronously from DIR.
+Requests run one at a time and are deduplicated by repository and SHA pair.
+Failures leave unknown counts and can be retried on the next refresh."
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (unless magit-dash-pr-dashboard--comparisons
+        (setq magit-dash-pr-dashboard--comparisons (make-hash-table :test #'equal)))
+      (unless magit-dash-pr-dashboard--comparison-pending
+        (setq magit-dash-pr-dashboard--comparison-pending (make-hash-table :test #'equal)))
+      (when (zerop (map-length magit-dash-pr-dashboard--comparison-pending))
+        (when-let* ((entry
+                    (seq-find
+                     (lambda (entry)
+                       (let* ((id (car entry))
+                              (pr (plist-get id :pr))
+                              (base (map-elt pr 'baseRefOid))
+                              (head (map-elt pr 'headRefOid)))
+                         (and (stringp base) (not (string-empty-p base))
+                              (stringp head) (not (string-empty-p head))
+                              (not (map-contains-key
+                                    magit-dash-pr-dashboard--comparisons
+                                    (list (plist-get id :repo) base head))))))
+                     tabulated-list-entries)))
+          (let* ((id (car entry))
+                 (pr (plist-get id :pr))
+                 (key (list (plist-get id :repo) (map-elt pr 'baseRefOid)
+                            (map-elt pr 'headRefOid)))
+                 (pending magit-dash-pr-dashboard--comparison-pending))
+            (setf (map-elt pending key) t)
+            (condition-case err
+                (magit-dash-gh--run-process
+                 (list "api" (format "repos/%s/compare/%s...%s"
+                                     (nth 0 key) (nth 1 key) (nth 2 key))
+                       "--jq" "{ahead_by, behind_by}")
+                 dir
+                 (lambda (output)
+                   (magit-dash-pr-dashboard--finish-comparison
+                    buf dir pending key output))
+                 (lambda (_output _code)
+                   (magit-dash-pr-dashboard--finish-comparison
+                    buf dir pending key nil)))
+              (error
+               (message "magit-gh: comparison unavailable: %s"
+                        (error-message-string err))
+               (magit-dash-pr-dashboard--finish-comparison
+                buf dir pending key nil)))))))))
+
 ;;;; Cached review status (approvals and unresolved threads)
 
 (defvar-local magit-dash-pr-dashboard--statuses nil
@@ -1009,7 +1128,7 @@ LIMIT defaults to `magit-dash-pr-fetch-limit'."
         (append
          (list "pr" "list" "-R" repo "--state" state
                "--json"
-               "number,title,state,mergedAt,author,createdAt,updatedAt,comments,reviewDecision,statusCheckRollup,isDraft,url,headRefName,headRefOid,baseRefName,mergeable,mergeStateStatus"
+               "number,title,state,mergedAt,author,createdAt,updatedAt,comments,reviewDecision,statusCheckRollup,isDraft,url,headRefName,headRefOid,baseRefName,baseRefOid,mergeable,mergeStateStatus"
                "--jq" (if (plist-get filters :conflicts)
                           "map(select(.mergeable == \"CONFLICTING\" or .mergeStateStatus == \"DIRTY\") | . + {commentsCount: (.comments | length)} | del(.comments))"
                         "map(. + {commentsCount: (.comments | length)} | del(.comments))")
@@ -1189,6 +1308,8 @@ marks freshly fetched data and is never dimmed."
                               (magit-dash-pr-dashboard--format-ci
                                (or (magit-dash-pr--parse-status-rollup (map-elt pr 'statusCheckRollup))
                                    (plist-get status :ci))))
+                             ('status
+                              (magit-dash-pr-dashboard--format-status pr repo-name status))
                              ('approvals
                               (magit-dash-pr-dashboard--format-approvals status))
                              ('threads
@@ -1370,6 +1491,8 @@ OUTPUT is `gh pr list' JSON."
                                      (let* ((rollup (map-elt match 'statusCheckRollup))
                                             (head-ref (map-elt match 'headRefName))
                                             (base-ref (map-elt match 'baseRefName))
+                                            (base-sha (map-elt match 'baseRefOid))
+                                            (head-sha (map-elt match 'headRefOid))
                                             (st (map-elt match 'state))
                                             (merged-at (map-elt match 'mergedAt))
                                             (mergeable (map-elt match 'mergeable))
@@ -1379,6 +1502,8 @@ OUTPUT is `gh pr list' JSON."
                                                      (when rollup (list (cons 'statusCheckRollup rollup)))
                                                      (when head-ref (list (cons 'headRefName head-ref)))
                                                      (when base-ref (list (cons 'baseRefName base-ref)))
+                                                     (when base-sha (list (cons 'baseRefOid base-sha)))
+                                                     (when head-sha (list (cons 'headRefOid head-sha)))
                                                      (when st (list (cons 'state st)))
                                                      (when (and merged-at (not (eq merged-at :null)))
                                                        (list (cons 'mergedAt merged-at)))
@@ -1396,7 +1521,7 @@ OUTPUT is `gh pr list' JSON."
                                           (string-equal (or (plist-get id :merge-state-status) "") "DIRTY"))))
                                   new-entries)))
               (setq tabulated-list-entries (magit-dash-pr-dashboard--apply-ci-filter new-entries))
-              (magit-dash-pr-dashboard--print))))))))
+              (magit-dash-pr-dashboard--rebuild-entries))))))))
 
 (defun magit-dash-pr-dashboard--enrich-ci (buf state dir)
   "Fetch CI status and PR metadata per repo and merge it into BUF's rows for STATE.
@@ -1424,10 +1549,11 @@ working directory for `gh'."
                   (funcall done)
                 (magit-dash-gh--run-process
                  (list "pr" "list" "-R" repo "--state" gh-state
-                       "--json" "number,state,mergedAt,statusCheckRollup,headRefName,baseRefName,mergeable,mergeStateStatus" "--limit" fetch-limit)
+                       "--json" "number,state,mergedAt,statusCheckRollup,headRefName,headRefOid,baseRefName,baseRefOid,mergeable,mergeStateStatus" "--limit" fetch-limit)
                  dir
                  (lambda (output)
                    (magit-dash-pr-dashboard--merge-ci buf repo output)
+                   (magit-dash-pr-dashboard--enrich-comparisons buf dir)
                    (funcall done))
                 (lambda (_output _code)
                   (funcall done)))))
@@ -1437,14 +1563,16 @@ working directory for `gh'."
         (seq-do (lambda (repo)
                   (magit-dash-gh--run-process
                    (list "pr" "list" "-R" repo "--state" gh-state
-                         "--json" "number,state,mergedAt,statusCheckRollup,headRefName,baseRefName,mergeable,mergeStateStatus" "--limit" fetch-limit)
+                         "--json" "number,state,mergedAt,statusCheckRollup,headRefName,headRefOid,baseRefName,baseRefOid,mergeable,mergeStateStatus" "--limit" fetch-limit)
                    dir
-                   (lambda (output) (magit-dash-pr-dashboard--merge-ci buf repo output))
+                   (lambda (output)
+                     (magit-dash-pr-dashboard--merge-ci buf repo output)
+                     (magit-dash-pr-dashboard--enrich-comparisons buf dir))
                    (lambda (_output _code) nil)))
                 repos)))))
 
 (defconst magit-dash-pr-dashboard--view-fields
-  "number,title,state,mergedAt,author,createdAt,updatedAt,comments,reviewDecision,statusCheckRollup,isDraft,url,headRefName,headRefOid,baseRefName,mergeable,mergeStateStatus"
+  "number,title,state,mergedAt,author,createdAt,updatedAt,comments,reviewDecision,statusCheckRollup,isDraft,url,headRefName,headRefOid,baseRefName,baseRefOid,mergeable,mergeStateStatus"
   "JSON fields requested when refreshing a single PR with `gh pr view'.")
 
 (defun magit-dash-pr-dashboard--view-args (key)
@@ -1488,7 +1616,7 @@ Malformed OUTPUT is logged and keeps the row."
                           (unless gone-p
                             (magit-dash-pr-dashboard--build-entry merged repo)))))
                     tabulated-list-entries)))
-            (magit-dash-pr-dashboard--print))
+            (magit-dash-pr-dashboard--rebuild-entries))
         nil))))
 
 ;;;; Status fill and per-row status refresh
@@ -1662,7 +1790,9 @@ discovery query runs and no other row changes."
               (magit-dash-pr-dashboard--view-args key) dir
               (lambda (output)
                 (unwind-protect
-                    (magit-dash-pr-dashboard--replace-row buf key output)
+                    (progn
+                      (magit-dash-pr-dashboard--replace-row buf key output)
+                      (magit-dash-pr-dashboard--enrich-comparisons buf dir))
                   (funcall done)))
               (lambda (output _code)
                 (message "magit-gh: could not refresh %s#%s: %s"
@@ -1692,6 +1822,11 @@ other buffers."
         (when (called-interactively-p 'interactive)
           (user-error "No PR dashboard buffer exists")))
     (clrhash magit-dash-pr-dashboard--reviewed-heads)
+    (when magit-dash-pr-dashboard--comparisons
+      (map-do (lambda (key value)
+                (unless value
+                  (map-delete magit-dash-pr-dashboard--comparisons key)))
+              magit-dash-pr-dashboard--comparisons))
     (let* ((filters magit-dash-pr-dashboard--filters)
            (args (magit-dash-pr-dashboard--build-args
                   filters magit-dash-pr-dashboard--limit))
@@ -1741,6 +1876,9 @@ other buffers."
            (unless (plist-get filters :repo)
              (magit-dash-pr-dashboard--enrich-ci
               buf (or (plist-get filters :state) "open") dir))
+           (with-current-buffer buf
+             (magit-dash-pr-dashboard--rebuild-entries))
+           (magit-dash-pr-dashboard--enrich-comparisons buf dir)
            (magit-dash-pr-dashboard--collect-statuses buf dir))))))))
 
 (defun magit-dash-pr-dashboard--entry-at-point ()

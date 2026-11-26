@@ -1568,7 +1568,8 @@ without real git repos or a live dashboard buffer."
     (should (= 8 (length vec)))
     (should (equal "myrepo" (aref vec 0)))
     (should (equal "10" (aref vec 1)))
-    (should (equal "✓" (substring-no-properties (aref vec 2))))
+    (should (equal "✓ merge? ↑?↓? stack-"
+                   (substring-no-properties (aref vec 2))))
     (should (equal "My PR" (aref vec 3)))
     (should (equal "approved" (substring-no-properties (aref vec 7))))
     (should (equal 10 (plist-get id :number)))

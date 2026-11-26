@@ -350,13 +350,13 @@
   "Repo column width is capped at the longest repo name + 3."
   (let* ((entries '(((:repo "owner/repo-short") ["repo-short" "1" "pass" "Title" "·" "1d" "0" "approved"])
                     ((:repo "owner/a-much-longer-repository-name") ["a-much-longer-repository-name" "2" "pass" "Title" "·" "1d" "0" "approved"])))
-         (fmt (magit-dash-pr-dashboard--build-format 150 entries)))
+         (fmt (magit-dash-pr-dashboard--build-format 200 entries)))
     (should (equal "Repo" (car (aref fmt 0))))
     (should (= (+ (length "a-much-longer-repository-name") 3)
                (cadr (aref fmt 0))))))
 
 (ert-deftest magit-dash-pr/build-format-show-org ()
-  "When show-org is non-nil, build-format includes Org and Repo columns, followed by PR#, CI, Title, WT, Updated."
+  "Org and Repo precede PR#, Status, Title, WT and Updated columns."
   (let* ((magit-dash-pr-show-org t)
          (magit-dash-pr-columns (append '((author . nil)) magit-dash-pr-columns))
          (entries '(((:repo "casaphq/my-repo") ["casaphq" "my-repo" "1" "pass" "Title" "·" "1d" "0" "approved"])))
@@ -364,7 +364,7 @@
     (should (equal "Org" (car (aref fmt 0))))
     (should (equal "Repo" (car (aref fmt 1))))
     (should (equal "PR#" (car (aref fmt 2))))
-    (should (equal "CI" (car (aref fmt 3))))
+    (should (equal "Status" (car (aref fmt 3))))
     (should (equal "Title" (car (aref fmt 4))))
     (should (equal "WT" (car (aref fmt 5))))
     (should (equal "Updated" (car (aref fmt 6))))))
@@ -373,7 +373,7 @@
   "When no entries exist, Repo column falls back to available window space (min 12)."
   (let* ((magit-dash-pr-columns (append '((author . nil)) magit-dash-pr-columns))
          (fmt (magit-dash-pr-dashboard--build-format 100 nil)))
-    (should (= (- 100 77 9) (cadr (aref fmt 0))))))
+    (should (= 12 (cadr (aref fmt 0))))))
 
 (ert-deftest magit-dash-pr/split-slug ()
   "Split slug correctly extracts owner and repo."
@@ -502,11 +502,11 @@
   (should (eq nil (alist-get 'org magit-dash-pr-columns)))
   (should (eq t (alist-get 'repo magit-dash-pr-columns)))
   (should (eq t (alist-get 'pr magit-dash-pr-columns)))
-  (should (eq t (alist-get 'ci magit-dash-pr-columns)))
+  (should (eq nil (alist-get 'ci magit-dash-pr-columns)))
   (should (eq t (alist-get 'title magit-dash-pr-columns)))
   (should (eq t (alist-get 'worktree magit-dash-pr-columns)))
   (should (eq t (alist-get 'updated magit-dash-pr-columns)))
-  (should (equal '(repo pr author ci title worktree updated comments review approvals threads)
+  (should (equal '(repo pr author status title worktree updated comments review approvals threads)
                  (magit-dash-pr--active-columns)))
   (let ((was-on (bound-and-true-p magit-dash-global-mode)))
     (unwind-protect
@@ -531,7 +531,7 @@
 (ert-deftest magit-dash-pr/build-entry-respects-arbitrary-columns ()
   "build-entry outputs only the active columns."
   (let ((magit-dash-pr-columns
-         '((org . nil) (repo . t) (pr . t) (author . nil) (base . nil) (ci . nil) (title . nil) (worktree . nil) (updated . nil) (age . nil) (comments . nil) (review . nil) (approvals . nil) (threads . nil)))
+         '((org . nil) (repo . t) (pr . t) (author . nil) (base . nil) (ci . nil) (title . nil) (worktree . nil) (updated . nil) (age . nil) (comments . nil) (review . nil) (approvals . nil) (threads . nil) (status . nil)))
         (pr '((number . 10) (title . "T") (updatedAt . "") (comments . 0))))
     (let* ((entry (magit-dash-pr-dashboard--build-entry pr "owner/repo"))
            (vec (cadr entry)))
@@ -605,7 +605,7 @@
       (should (magit-dash-pr-dashboard--worktree-exists-p entry)))))
 
 (ert-deftest magit-dash-pr/build-entry-updated-column ()
-  "build-entry populates columns in order: repo, pr, ci, title, worktree, updated, comments, review."
+  "Populate default row cells in order, including combined Status."
   (let* ((pr '((number . 15)
                (title . "Fix stuff")
                (updatedAt . "2024-06-01T12:00:00Z")
@@ -623,8 +623,8 @@
     (should (equal "bugfix/issue-15" (plist-get id :head-ref)))
     ;; PR# column is aref 1 -> "15"
     (should (equal "15" (substring-no-properties (aref vec 1))))
-    ;; CI column is aref 2 -> "x"
-    (should (equal "x" (substring-no-properties (aref vec 2))))
+    ;; Status includes CI before merge, divergence and stack indicators.
+    (should (string-prefix-p "x " (substring-no-properties (aref vec 2))))
     ;; Title column is aref 3 -> "Fix stuff"
     (should (equal "Fix stuff" (substring-no-properties (aref vec 3))))
     ;; WT column is aref 4 -> "·"
@@ -1476,7 +1476,7 @@
       ;; Check args with :conflicts
       (let ((args (magit-dash-pr-dashboard--build-args
                    '(:repo "org/repo" :conflicts t))))
-        (should (member "number,title,state,mergedAt,author,createdAt,updatedAt,comments,reviewDecision,statusCheckRollup,isDraft,url,headRefName,headRefOid,baseRefName,mergeable,mergeStateStatus" args))
+        (should (member "number,title,state,mergedAt,author,createdAt,updatedAt,comments,reviewDecision,statusCheckRollup,isDraft,url,headRefName,headRefOid,baseRefName,baseRefOid,mergeable,mergeStateStatus" args))
         (should (seq-some (lambda (a) (string-match-p "CONFLICTING.*DIRTY" a)) args)))
       ;; Check views menu binding
       (let ((flat (format "%S" (get 'magit-dash-pr-views-menu 'transient--layout))))
