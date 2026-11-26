@@ -2718,5 +2718,50 @@ spawns (which also error, so no network)."
           (should (memq 'magit-dash-pr-saved-filters savehist-additional-variables)))
       (magit-dash-global-mode -1))))
 
+(ert-deftest magit-dash-pr/author-cache-and-filter-by-author ()
+  "Per-repo author cache seeds from built entries and PR cache for author selection."
+  (let ((magit-dash-pr--author-cache (make-hash-table :test #'equal))
+        (refreshed 0))
+    (cl-letf (((symbol-function 'magit-dash-pr-cache-list)
+               (lambda (&optional repo _org)
+                 (if (or (null repo) (equal (downcase repo) "o/r"))
+                     (list (list :repo "o/r" :number 1 :gone nil
+                                 :payload '((author . ((login . "charlie")))))
+                           (list :repo "o/r" :number 2 :gone t
+                                 :payload '((author . ((login . "gone-user")))))
+                           (list :repo "other/x" :number 3 :gone nil
+                                 :payload '((author . ((login . "dave"))))))
+                   nil)))
+              ((symbol-function 'magit-dash-pr-dashboard-refresh)
+               (lambda () (setq refreshed (1+ refreshed)))))
+      (with-temp-buffer
+        (magit-dash-pr-dashboard-mode)
+        (magit-dash-pr-dashboard--build-entry
+         '((number . 10) (author . ((login . "alice")))) "o/r")
+        (magit-dash-pr-dashboard--build-entry
+         '((number . 11) (author . ((login . "bob")))) "O/R")
+        ;; Repo-scoped authors exclude gone records and other repos.
+        (should (equal '("alice" "bob" "charlie")
+                       (magit-dash-pr-dashboard--known-authors "o/r")))
+        ;; Unscoped includes all non-gone repos.
+        (should (equal '("alice" "bob" "charlie" "dave")
+                       (magit-dash-pr-dashboard--known-authors)))
+        ;; Interactive filter-by-author prompts with @me + cached authors and updates filter.
+        (setq magit-dash-pr-dashboard--filters '(:state "open" :repo "o/r"))
+        (let (seen-candidates)
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (_prompt cands &rest _)
+                       (setq seen-candidates cands)
+                       "alice")))
+            (magit-dash-pr-dashboard-filter-by-author))
+          (should (equal '("@me" "alice" "bob" "charlie") seen-candidates))
+          (should (equal "alice" (plist-get magit-dash-pr-dashboard--filters :author)))
+          (should (= 1 refreshed)))
+        ;; Empty string clears :author.
+        (magit-dash-pr-dashboard-filter-by-author "")
+        (should-not (plist-get magit-dash-pr-dashboard--filters :author))
+        (should (eq #'magit-dash-pr-dashboard-filter-by-author
+                    (keymap-lookup magit-dash-pr-dashboard-mode-map "f a")))))))
+
 (provide 'test-magit-dash-pr)
 ;;; test-magit-dash-pr.el ends here

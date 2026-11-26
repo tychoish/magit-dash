@@ -501,6 +501,68 @@ plus optional `:hide-failing'.  Persisted via `savehist-additional-variables'."
 (defvar magit-dash-pr-saved-filter-history nil
   "History list for saved PR dashboard filter selection.")
 
+(defvar magit-dash-pr-author-history nil
+  "History list for PR dashboard author filter selection.")
+
+(defvar magit-dash-pr--author-cache (make-hash-table :test #'equal)
+  "Cache mapping downcased repo slug to known PR author login strings.
+Populated as PRs are built and seeded from `magit-dash-pr-cache-list'.
+Safe to retain across refreshes because PR authors do not change.")
+
+(defun magit-dash-pr--record-author (repo login)
+  "Record author LOGIN for REPO in `magit-dash-pr--author-cache'."
+  (when (and (stringp repo) (not (string-empty-p repo))
+             (stringp login) (not (string-empty-p login)))
+    (let* ((key (downcase repo))
+           (existing (map-elt magit-dash-pr--author-cache key)))
+      (unless (member login existing)
+        (setf (map-elt magit-dash-pr--author-cache key)
+              (cons login existing))))))
+
+(defun magit-dash-pr-dashboard--known-authors (&optional repo org)
+  "Return sorted, deduplicated author logins known for REPO or ORG.
+Combines `magit-dash-pr--author-cache', current buffer entries, and
+non-gone records from `magit-dash-pr-cache-list'."
+  (let ((authors nil)
+        (repo-key (and (stringp repo) (not (string-empty-p repo)) (downcase repo)))
+        (org-prefix (and (stringp org) (not (string-empty-p org))
+                         (concat (downcase org) "/"))))
+    ;; Seed from persistent PR cache for matching scope.
+    (seq-do
+     (lambda (record)
+       (unless (plist-get record :gone)
+         (let* ((r (plist-get record :repo))
+                (payload (plist-get record :payload))
+                (login (and (listp payload)
+                            (map-elt (map-elt payload 'author) 'login))))
+           (when (and (stringp login) (not (string-empty-p login)))
+             (magit-dash-pr--record-author r login)))))
+     (ignore-errors (magit-dash-pr-cache-list repo org)))
+    ;; Collect from in-memory per-repo cache.
+    (map-do (lambda (k logins)
+              (when (and (or (null repo-key) (equal k repo-key))
+                         (or (null org-prefix) (string-prefix-p org-prefix k)))
+                (seq-do (lambda (login)
+                          (unless (member login authors)
+                            (push login authors)))
+                        logins)))
+            magit-dash-pr--author-cache)
+    ;; Include authors from current buffer rows.
+    (seq-do (lambda (entry)
+              (let* ((id (car entry))
+                     (r (plist-get id :repo))
+                     (login (map-elt (map-elt (plist-get id :pr) 'author) 'login)))
+                (when (and (stringp login) (not (string-empty-p login))
+                           (or (null repo-key) (and (stringp r) (equal (downcase r) repo-key)))
+                           (or (null org-prefix) (and (stringp r) (string-prefix-p org-prefix (downcase r)))))
+                  (unless (member login authors)
+                    (push login authors)))))
+            (or (and (boundp 'magit-dash-pr-dashboard--all-entries)
+                     magit-dash-pr-dashboard--all-entries)
+                (and (boundp 'tabulated-list-entries)
+                     tabulated-list-entries)))
+    (sort authors #'string-lessp)))
+
 (defun magit-dash-pr--active-columns ()
   "Return PR column symbols that are currently enabled, in display order."
   (seq-filter (lambda (column)
@@ -652,6 +714,7 @@ Uses active columns.  WIDTH is available window width; when nil,
 (defvar-keymap magit-dash-pr-dashboard-filter-map
   :doc "Filter keys, mounted on `f' in `magit-dash-pr-dashboard-mode-map'."
   "f" #'magit-dash-pr-dashboard-set-filter
+  "a" #'magit-dash-pr-dashboard-filter-by-author
   "c" #'magit-dash-pr-dashboard-clear-filters
   "x" #'magit-dash-pr-dashboard-toggle-hide-failing
   "s" #'magit-dash-pr-dashboard-save-filter
@@ -1467,6 +1530,7 @@ marks freshly fetched data and is never dimmed."
          (short-repo (if (string-empty-p (cdr pair)) (car pair) (cdr pair)))
          (status (magit-dash-pr-dashboard--status repo-name number))
          (active (magit-dash-pr--active-columns)))
+    (magit-dash-pr--record-author repo-name (map-elt (map-elt pr 'author) 'login))
     (list entry-id
           (let ((cells
                  (apply #'vector
@@ -2303,6 +2367,30 @@ Includes HIDE-FAILING (or `:hide-failing' in FILTERS) when non-nil."
   (magit-dash-pr-dashboard--update-mode-line)
   (magit-dash-pr-dashboard--print))
 
+(defun magit-dash-pr-dashboard--read-author (filters)
+  "Prompt for a PR author username using cached authors for FILTERS."
+  (let* ((known (magit-dash-pr-dashboard--known-authors
+                 (plist-get filters :repo) (plist-get filters :org)))
+         (candidates (cons "@me" (seq-remove (lambda (a) (equal a "@me")) known))))
+    (string-trim
+     (completing-read "Author (@me or username, empty to clear): "
+                      candidates nil nil nil
+                      'magit-dash-pr-author-history
+                      (or (plist-get filters :author) "")))))
+
+(defun magit-dash-pr-dashboard-filter-by-author (&optional author)
+  "Filter the PR dashboard to pull requests authored by AUTHOR.
+When called interactively, prompts with cached PR authors for the
+current repository or organization.  Empty input clears the filter."
+  (interactive)
+  (let* ((current magit-dash-pr-dashboard--filters)
+         (chosen (string-trim (or author (magit-dash-pr-dashboard--read-author current))))
+         (new-val (if (string-empty-p chosen) nil chosen)))
+    (setq magit-dash-pr-dashboard--filters
+          (plist-put (copy-sequence current) :author new-val))
+    (magit-dash-pr-dashboard--update-mode-line)
+    (magit-dash-pr-dashboard-refresh)))
+
 (defun magit-dash-pr-dashboard-set-filter ()
   "Interactively set one PR dashboard filter field."
   (interactive)
@@ -2316,8 +2404,7 @@ Includes HIDE-FAILING (or `:hide-failing' in FILTERS) when non-nil."
                   ("state"
                    (completing-read "State: " '("open" "closed") nil t))
                   ("author"
-                   (read-string "Author (@me for current user, empty to clear): "
-                                (or (plist-get current :author) "@me")))
+                   (magit-dash-pr-dashboard--read-author current))
                   ("repo"
                    (read-string "Repo (OWNER/NAME, empty to clear): "
                                 (or (plist-get current :repo) "")))
@@ -3761,6 +3848,7 @@ Key groups mirror `magit-dash-menu': w worktree, c CI, f filter, m mark."
     ("tc"  "Toggle column…"           magit-dash-pr-toggle-column)
     ("to"  "Toggle Org column"        magit-dash-pr-toggle-org)
     ("ff"  "Set filter…"              magit-dash-pr-dashboard-set-filter)
+    ("fa"  "Filter by author…"        magit-dash-pr-dashboard-filter-by-author)
     ("fs"  "Save filter…"             magit-dash-pr-dashboard-save-filter)
     ("fl"  "Load saved filter…"       magit-dash-pr-dashboard-apply-saved-filter)
     ("fd"  "Delete saved filter…"     magit-dash-pr-dashboard-delete-saved-filter)
