@@ -360,12 +360,12 @@ if BRANCH or WT-PATH already exist."
       (call-interactively #'magit-worktree-checkout))
     (magit-dash-refresh)))
 
-;;;###autoload
 (defconst magit-dash-worktree--status-args
   '("-c" "status.showUntrackedFiles=all" "-c" "status.ignoreSubmodules=none"
     "status" "--porcelain")
   "Arguments for a `git status' that cannot be silenced by user or repo config.")
 
+;;;###autoload
 (defun magit-dash-worktree-uncommitted-changes-p (path)
   "Return non-nil if git worktree at PATH has uncommitted changes.
 Checks for modified tracked files, staged changes, untracked files and
