@@ -3,7 +3,6 @@
 ;; Author: tycho garen
 ;; Maintainer: tychoish
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "29.1") (magit "4.0") (annotated-completing-read "0.1"))
 ;; Keywords: vc, tools, magit, github, ci
 ;; URL: https://github.com/tychoish/dot-emacs
 
@@ -377,7 +376,8 @@ ON-COMPLETE is called with `ok' or `error' on finish."
          (when on-complete (funcall on-complete 'error err)))))))
 
 ;;;###autoload
-(defalias 'magit-gh-workflow-run #'magit-dash-gh-workflow-run)
+(define-obsolete-function-alias 'magit-gh-workflow-run
+  #'magit-dash-gh-workflow-run "0.1")
 ;;;###autoload
 (defalias 'magit-dash-workflow-run #'magit-dash-gh-workflow-run)
 

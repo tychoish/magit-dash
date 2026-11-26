@@ -249,7 +249,7 @@ overlays, which in a diff-review file buffer are also pushed onto
     (message "magit-dash-review-analysis: decoration failed (%s); diff-review is unaffected"
              (error-message-string err))))
 
-(defun ad:magit-dash-review-analysis-decorate (&rest _)
+(defun magit-dash-review-analysis--decorate-advice (&rest _)
   "Add analysis overlays after diff-review decorates a file buffer.
 Never signals: a failure is reported once and diff-review carries on."
   (condition-case err
@@ -262,7 +262,7 @@ Never signals: a failure is reported once and diff-review carries on."
                                                     #'diff-review--line-pos))
     (error (magit-dash-review-analysis--warn err) nil)))
 
-(defun ad:magit-dash-review-analysis-file-line (fn i indent)
+(defun magit-dash-review-analysis--file-line-advice (fn i indent)
   "Append the file's analysis to the list line FN renders for file I.
 FN is `diff-review--file-line'; INDENT is passed through.  Never signals:
 on a failure the original line is returned and the failure reported once."
@@ -314,13 +314,13 @@ mode off) when diff-review lacks the functions this advises."
       (setq magit-dash-review-analysis-mode nil)
       (user-error "magit-dash-review-analysis: diff-review %s lacks the internals this mode decorates (diff-review--decorate, diff-review--file-line/2)"
                   (if (boundp 'diff-review-version) diff-review-version "?")))
-    (advice-add 'diff-review--decorate :after #'ad:magit-dash-review-analysis-decorate)
-    (advice-add 'diff-review--file-line :around #'ad:magit-dash-review-analysis-file-line)
+    (advice-add 'diff-review--decorate :after #'magit-dash-review-analysis--decorate-advice)
+    (advice-add 'diff-review--file-line :around #'magit-dash-review-analysis--file-line-advice)
     (setq magit-dash-review-analysis--warned nil)
     (magit-dash-review-analysis--redraw))
    (t
-    (advice-remove 'diff-review--decorate #'ad:magit-dash-review-analysis-decorate)
-    (advice-remove 'diff-review--file-line #'ad:magit-dash-review-analysis-file-line)
+    (advice-remove 'diff-review--decorate #'magit-dash-review-analysis--decorate-advice)
+    (advice-remove 'diff-review--file-line #'magit-dash-review-analysis--file-line-advice)
     (seq-do (lambda (buffer)
               (with-current-buffer buffer
                 (when (bound-and-true-p diff-review-file-mode)

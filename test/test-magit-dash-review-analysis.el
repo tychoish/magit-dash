@@ -94,18 +94,18 @@
           (insert "l1\nl2\nl3\n")
           (setq-local diff-review-file-mode t)
           (magit-dash-review-analysis-mode 1)
-          (should (advice-member-p #'ad:magit-dash-review-analysis-decorate
+          (should (advice-member-p #'magit-dash-review-analysis--decorate-advice
                                    'diff-review--decorate))
-          (should (advice-member-p #'ad:magit-dash-review-analysis-file-line
+          (should (advice-member-p #'magit-dash-review-analysis--file-line-advice
                                    'diff-review--file-line))
           (magit-dash-review-analysis-decorate-buffer
            by-hunk '((:line 1 :count 1)) #'magit-dash-review-analysis-test/line-pos)
           (should (overlays-in (point-min) (point-max)))
           (magit-dash-review-analysis-mode -1)
           (should-not (overlays-in (point-min) (point-max)))
-          (should-not (advice-member-p #'ad:magit-dash-review-analysis-decorate
+          (should-not (advice-member-p #'magit-dash-review-analysis--decorate-advice
                                        'diff-review--decorate))
-          (should-not (advice-member-p #'ad:magit-dash-review-analysis-file-line
+          (should-not (advice-member-p #'magit-dash-review-analysis--file-line-advice
                                        'diff-review--file-line)))
       (magit-dash-review-analysis-mode -1))))
 
@@ -120,13 +120,13 @@
                     ((symbol-function 'diff-review--file)
                      (lambda (i) (list :path (if (eql i 0) "src/a.ts" "src/z.ts")))))
             (let ((fn (lambda (i _indent) (propertize "M name\n" 'diff-review-index i))))
-              (let ((decorated (ad:magit-dash-review-analysis-file-line fn 0 "")))
+              (let ((decorated (magit-dash-review-analysis--file-line-advice fn 0 "")))
                 (should (string-match-p "r5 \\[NO-TEST\\]" decorated))
                 (should (string-suffix-p "\n" decorated))
                 (should (eql (get-text-property (1- (length decorated)) 'diff-review-index
                                                 decorated)
                              0)))
-              (should (equal (ad:magit-dash-review-analysis-file-line fn 1 "") "M name\n")))))
+              (should (equal (magit-dash-review-analysis--file-line-advice fn 1 "") "M name\n")))))
       (kill-buffer review))))
 
 (ert-deftest magit-dash-review-analysis-test/write-replaces-analysis ()
@@ -211,7 +211,7 @@
               (setq-local diff-review--file-path "src/a.ts")
               (setq-local diff-review--hunks '((:line 1 :count 2)))
               (setq-local diff-review--overlays nil)
-              (ad:magit-dash-review-analysis-decorate)
+              (magit-dash-review-analysis--decorate-advice)
               (should (= (length diff-review--overlays) 1))
               (let ((overlay (car diff-review--overlays)))
                 (diff-review--undecorate)
@@ -225,9 +225,9 @@
               ((symbol-function 'message)
                (lambda (&rest args) (push (apply #'format args) messages))))
       (let ((fn (lambda (_i _indent) "M name\n")))
-        (should (equal (ad:magit-dash-review-analysis-file-line fn 0 "") "M name\n"))
-        (should (equal (ad:magit-dash-review-analysis-file-line fn 0 "") "M name\n")))
-      (should-not (ad:magit-dash-review-analysis-decorate))
+        (should (equal (magit-dash-review-analysis--file-line-advice fn 0 "") "M name\n"))
+        (should (equal (magit-dash-review-analysis--file-line-advice fn 0 "") "M name\n")))
+      (should-not (magit-dash-review-analysis--decorate-advice))
       (should (= (length messages) 1)))))
 
 (ert-deftest magit-dash-review-analysis-test/child-command-quoting ()

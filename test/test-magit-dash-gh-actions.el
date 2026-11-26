@@ -15,6 +15,11 @@
 
 ;;; Test helpers
 
+(ert-deftest magit-dash-gh-actions/legacy-workflow-alias ()
+  (should (eq (indirect-function 'magit-gh-workflow-run)
+              (indirect-function 'magit-dash-gh-workflow-run)))
+  (should (commandp 'magit-gh-workflow-run)))
+
 (defmacro magit-dash-gh-actions-test/with-temp-dir (&rest body)
   "Execute BODY with `default-directory' set to a fresh temp directory."
   (declare (indent 0))

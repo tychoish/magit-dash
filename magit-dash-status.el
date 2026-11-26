@@ -3,7 +3,6 @@
 ;; Author: tycho garen
 ;; Maintainer: tychoish
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "29.1") (magit "4.0") (transient "0.4"))
 ;; Keywords: vc, tools, magit, github, ci
 
 ;; This file is not part of GNU Emacs
@@ -410,9 +409,6 @@ Calls CALLBACK with list of PR plists."
             rev)))
 
 ;;; Keymaps & Section Handlers
-(defvaralias 'magit-magit-dash-status-ci-section-map 'magit-dash-status-ci-section-map)
-(defvaralias 'magit-magit-dash-status-pr-section-map 'magit-dash-status-pr-section-map)
-(defvaralias 'magit-magit-dash-status-prs-section-map 'magit-dash-status-prs-section-map)
 
 (defvar-keymap magit-dash-status-ci-section-map
   :doc "Keymap for CI header section in `magit-status'."

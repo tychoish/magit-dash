@@ -41,6 +41,26 @@
 
 ;;; CI Symbol Tests
 
+(ert-deftest magit-dash-status/section-keymaps ()
+  "Each section class supplies its own keymap to Magit."
+  (with-temp-buffer
+    (let (sections)
+      (magit-insert-section (root)
+        (magit-insert-section (magit-dash-status-ci-section)
+          (push magit-insert-section--current sections)
+          (insert "CI\n"))
+        (magit-insert-section (magit-dash-status-pr-section)
+          (push magit-insert-section--current sections)
+          (insert "PR\n"))
+        (magit-insert-section (magit-dash-status-prs-section)
+          (push magit-insert-section--current sections)
+          (insert "PRs\n")))
+      (should (equal (mapcar (lambda (section) (oref section keymap))
+                             (nreverse sections))
+                     '(magit-dash-status-ci-section-map
+                       magit-dash-status-pr-section-map
+                       magit-dash-status-prs-section-map))))))
+
 (ert-deftest magit-dash-status/ci-symbol-success ()
   (let ((sym (magit-dash-status--ci-symbol "success" "completed")))
     (should (string-match-p "✓ pass" sym))))

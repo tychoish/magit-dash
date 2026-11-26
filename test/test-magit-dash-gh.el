@@ -605,37 +605,45 @@ even when other real candidates exist."
                   :type 'user-error)))
 
 (ert-deftest magit-dash-gh/with-account-nil ()
-  "with-magit-gh-account nil executes body without altering environment."
+  "magit-dash-gh-with-account nil executes body without altering environment."
   (let ((token-before (getenv "GH_TOKEN")))
     (should (equal "result"
-                   (with-magit-gh-account nil
+                   (magit-dash-gh-with-account nil
                      (should (equal token-before (getenv "GH_TOKEN")))
                      "result")))))
 
+(ert-deftest magit-dash-gh/legacy-account-macro ()
+  "The old account macro still expands and binds the account environment."
+  (cl-letf (((symbol-function 'magit-dash-gh--account-token)
+             (lambda (_user _host) "legacy-token")))
+    (should (equal "legacy-token"
+                   (with-magit-gh-account '(:user "alice" :host "github.com")
+                     (getenv "GH_TOKEN"))))))
+
 (ert-deftest magit-dash-gh/with-account-github-com ()
-  "with-magit-gh-account binds GH_TOKEN for github.com."
+  "magit-dash-gh-with-account binds GH_TOKEN for github.com."
   (cl-letf (((symbol-function 'magit-dash-gh--account-token)
              (lambda (user host)
                (format "token-for-%s-on-%s" user host))))
-    (with-magit-gh-account '(:user "alice" :host "github.com")
+    (magit-dash-gh-with-account '(:user "alice" :host "github.com")
       (should (equal "token-for-alice-on-github.com" (getenv "GH_TOKEN")))
       (should-not (getenv "GH_ENTERPRISE_TOKEN")))))
 
 (ert-deftest magit-dash-gh/with-account-enterprise ()
-  "with-magit-gh-account binds GH_ENTERPRISE_TOKEN and GH_HOST for enterprise hosts."
+  "magit-dash-gh-with-account binds GH_ENTERPRISE_TOKEN and GH_HOST for enterprise hosts."
   (cl-letf (((symbol-function 'magit-dash-gh--account-token)
              (lambda (user host)
                (format "ent-token-for-%s-on-%s" user host))))
-    (with-magit-gh-account '(:user "corp-dev" :host "ghe.myorg.internal")
+    (magit-dash-gh-with-account '(:user "corp-dev" :host "ghe.myorg.internal")
       (should (equal "ent-token-for-corp-dev-on-ghe.myorg.internal" (getenv "GH_ENTERPRISE_TOKEN")))
       (should (equal "ghe.myorg.internal" (getenv "GH_HOST"))))))
 
 (ert-deftest magit-dash-gh/with-account-string ()
-  "with-magit-gh-account supports plain username string defaulting to github.com."
+  "magit-dash-gh-with-account supports plain username string defaulting to github.com."
   (cl-letf (((symbol-function 'magit-dash-gh--account-token)
              (lambda (user host)
                (format "token-%s-%s" user host))))
-    (with-magit-gh-account "dev1"
+    (magit-dash-gh-with-account "dev1"
       (should (equal "token-dev1-github.com" (getenv "GH_TOKEN"))))))
 
 (ert-deftest magit-dash-gh/repo-account-struct ()
@@ -1177,4 +1185,3 @@ echo 'HTTP 503' >&2; exit 1" counter counter)
        (should (null (magit-dash-gh-test--new-live-procs before)))))))
 
 ;;; test-magit-dash-gh.el ends here
-

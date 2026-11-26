@@ -2293,7 +2293,7 @@ STATES TRUNCATED), STATES an alist of path to viewerViewedState and TRUNCATED
 non-nil when the PR has more files than were read.  Text goes as raw `-f'
 fields (never `-F', which would read local files); only the number is typed."
   (let ((parts (split-string slug "/")))
-    (with-magit-gh-account account
+    (magit-dash-gh-with-account account
       (magit-dash-gh--run-process
        (list "api" "graphql"
              "-f" (concat "query=" magit-dash-review--viewed-query)
@@ -2329,7 +2329,7 @@ messages and the rest still run."
     (let ((op (car ops))
           (next (lambda (&rest _)
                   (magit-dash-review--push-viewed pr-id (cdr ops) dir account on-done))))
-      (with-magit-gh-account account
+      (magit-dash-gh-with-account account
         (magit-dash-gh--run-process
          (list "api" "graphql"
                "-f" (concat "query=" (magit-dash-review--viewed-mutation (cdr op)))

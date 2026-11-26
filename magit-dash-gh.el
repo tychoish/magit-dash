@@ -3,7 +3,6 @@
 ;; Author: tycho garen
 ;; Maintainer: tychoish
 ;; Version: 0.1
-;; Package-Requires: ((emacs "29.1") (magit "4.0") (annotated-completing-read "0.1"))
 ;; Keywords: vc, tools, magit, github
 ;; URL: https://github.com/tychoish/dot-emacs
 
@@ -185,7 +184,7 @@ and binds GH_TOKEN (or GH_ENTERPRISE_TOKEN) in `process-environment'."
                     process-environment))))
       (funcall fn))))
 
-(defmacro with-magit-gh-account (account &rest body)
+(defmacro magit-dash-gh-with-account (account &rest body)
   "Execute BODY with environment configured for ACCOUNT.
 ACCOUNT is an account plist (:user USER :host HOST) or nil.
 When ACCOUNT is nil, executes BODY unchanged.
@@ -194,6 +193,9 @@ and binds GH_TOKEN (for github.com) or GH_ENTERPRISE_TOKEN (for Enterprise
 hosts) in `process-environment' for the duration of BODY."
   (declare (indent 1))
   `(magit-dash-gh--call-with-account ,account (lambda () ,@body)))
+
+(define-obsolete-function-alias 'with-magit-gh-account
+  #'magit-dash-gh-with-account "0.1")
 
 (defun magit-dash-gh--repo-account (&optional repo-or-path)
   "Return (:user USER :host HOST) plist for REPO-OR-PATH, or nil.
@@ -362,7 +364,7 @@ Prioritises cached info and local git references before calling
               (if (and local-default (not (string-empty-p local-default)))
                   local-default
                 (let ((output (ignore-errors
-                                (with-magit-gh-account (magit-dash-gh--repo-account dir)
+                                (magit-dash-gh-with-account (magit-dash-gh--repo-account dir)
                                   (string-trim
                                    (shell-command-to-string
                                     "gh repo view --json defaultBranchRef --jq .defaultBranchRef.name"))))))
@@ -420,7 +422,7 @@ Uses a single gh call fetching up to `magit-dash-prune-pr-limit' PRs."
 	 (table (or table (magit-dash-gh--prune-load-cache)))
 	 (cmd (format "gh pr list --state all --limit %d --json number,state,headRefName,headRefOid,title"
 		      magit-dash-prune-pr-limit))
-	 (output (with-magit-gh-account (magit-dash-gh--repo-account default-directory)
+	 (output (magit-dash-gh-with-account (magit-dash-gh--repo-account default-directory)
                    (string-trim (shell-command-to-string cmd)))))
     (when (string-prefix-p "[" output)
       (thread-last (json-parse-string output :array-type 'list :object-type 'alist)
@@ -937,7 +939,7 @@ Format is controlled by `magit-dash-gh-collect-index-format'."
 (defun magit-dash-gh--call-process (args dir)
   "Run `gh' synchronously with ARGS in DIR using its configured account.
 Return (EXIT-CODE . OUTPUT)."
-  (with-magit-gh-account (magit-dash-gh--repo-account dir)
+  (magit-dash-gh-with-account (magit-dash-gh--repo-account dir)
     (let ((default-directory dir))
       (with-temp-buffer
         (let ((code (apply #'call-process "gh" nil (current-buffer) nil args)))
@@ -1000,7 +1002,7 @@ Return the process, or nil."
         (message "magit-gh: gh %s failed: %s" (car args) msg))
       nil))
    (t
-    (with-magit-gh-account (magit-dash-gh--repo-account dir)
+    (magit-dash-gh-with-account (magit-dash-gh--repo-account dir)
       (let* ((default-directory dir)
              (buf (generate-new-buffer " *magit-dash-proc*"))
              (errbuf (generate-new-buffer " *magit-dash-proc-err*"))
@@ -1150,7 +1152,7 @@ blocking `gh repo view' network calls."
         ;; 3. Fallback to `gh repo view` only if completely unknown locally
         (unless (and owner repo)
           (ignore-errors
-            (let* ((output (with-magit-gh-account (magit-dash-gh--repo-account dir)
+            (let* ((output (magit-dash-gh-with-account (magit-dash-gh--repo-account dir)
                              (string-trim
                               (shell-command-to-string
                                "gh repo view --json owner,name --jq '[.owner.login,.name]|@tsv'"))))

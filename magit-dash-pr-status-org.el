@@ -3,7 +3,6 @@
 ;; Author: tycho garen
 ;; Maintainer: tychoish
 ;; Version: 0.1
-;; Package-Requires: ((emacs "29.1") (magit-dash "0.1") (org "9.0"))
 ;; Keywords: vc, tools, magit, github, org
 ;; URL: https://github.com/tychoish/dot-emacs
 

@@ -3,7 +3,6 @@
 ;; Author: tycho garen
 ;; Maintainer: tychoish
 ;; Version: 0.1
-;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: vc, tools, magit
 
 ;; This file is not part of GNU Emacs
