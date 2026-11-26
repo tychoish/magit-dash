@@ -35,17 +35,17 @@ jobs:
           cache: false
 
       - name: Lint Source Code
-        uses: tychoish/elisp-ci/lint@v0.1.3
+        uses: tychoish/elisp-ci/lint@v0.1.4
         with:
           fail-on-warning: "false"
           linters: "byte-compile checkdoc package-lint"
           required-linters: "byte-compile checkdoc package-lint"
 
       - name: Run ERT Tests
-        uses: tychoish/elisp-ci@v0.1.3
+        uses: tychoish/elisp-ci@v0.1.4
 
       - name: Measure Code Coverage
-        uses: tychoish/elisp-ci/coverage@v0.1.3
+        uses: tychoish/elisp-ci/coverage@v0.1.4
         with:
           report-format: "lcov"
           output-file: "coverage/lcov.info"
