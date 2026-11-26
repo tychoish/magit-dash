@@ -1476,7 +1476,7 @@
       ;; Check args with :conflicts
       (let ((args (magit-dash-pr-dashboard--build-args
                    '(:repo "org/repo" :conflicts t))))
-        (should (member "number,title,state,mergedAt,author,createdAt,updatedAt,comments,reviewDecision,statusCheckRollup,isDraft,url,headRefName,headRefOid,baseRefName,baseRefOid,mergeable,mergeStateStatus" args))
+        (should (member "number,title,state,mergedAt,author,createdAt,updatedAt,comments,reviewDecision,reviewRequests,statusCheckRollup,isDraft,url,headRefName,headRefOid,baseRefName,baseRefOid,mergeable,mergeStateStatus" args))
         (should (seq-some (lambda (a) (string-match-p "CONFLICTING.*DIRTY" a)) args)))
       ;; Check views menu binding
       (let ((flat (format "%S" (get 'magit-dash-pr-views-menu 'transient--layout))))
@@ -2469,6 +2469,254 @@ spawns (which also error, so no network)."
                           (append tabulated-list-format nil)))
     (should (= (length tabulated-list-format)
                (length (cadr (car tabulated-list-entries)))))))
+
+;;;; Extended filter dimensions and saved filters
+
+(ert-deftest magit-dash-pr/filter-ci-dimensions ()
+  "Filter :ci matches passing, failing, pending, not-failing, and none."
+  (with-temp-buffer
+    (magit-dash-pr-dashboard-mode)
+    (let* ((mk (lambda (n state)
+                 (magit-dash-pr-dashboard--build-entry
+                  (if state
+                      `((number . ,n) (statusCheckRollup . ((state . ,state))))
+                    `((number . ,n)))
+                  "o/r")))
+           (e1 (funcall mk 1 "SUCCESS"))
+           (e2 (funcall mk 2 "FAILURE"))
+           (e3 (funcall mk 3 "PENDING"))
+           (e4 (funcall mk 4 nil))
+           (entries (list e1 e2 e3 e4))
+           (nums (lambda (f)
+                   (seq-map (lambda (e) (plist-get (car e) :number))
+                            (magit-dash-pr-dashboard--apply-filters entries f)))))
+      (should (equal '(1) (funcall nums '(:ci "passing"))))
+      (should (equal '(2) (funcall nums '(:ci "failing"))))
+      (should (equal '(3) (funcall nums '(:ci "pending"))))
+      (should (equal '(1 3 4) (funcall nums '(:ci "not-failing"))))
+      (should (equal '(4) (funcall nums '(:ci "none"))))
+      ;; Fallback to cached status :ci when statusCheckRollup is absent.
+      (magit-dash-pr-dashboard--set-status "o/r" 4 '(:ci "SUCCESS"))
+      (should (equal '(1 4) (funcall nums '(:ci "passing")))))))
+
+(ert-deftest magit-dash-pr/filter-review-dimensions ()
+  "Filter :review matches approved, pending, and changes-requested."
+  (with-temp-buffer
+    (magit-dash-pr-dashboard-mode)
+    (let* ((e1 (magit-dash-pr-dashboard--build-entry
+                '((number . 1) (reviewDecision . "APPROVED")) "o/r"))
+           (e2 (magit-dash-pr-dashboard--build-entry
+                '((number . 2) (reviewDecision . "REVIEW_REQUIRED")) "o/r"))
+           (e3 (magit-dash-pr-dashboard--build-entry
+                '((number . 3) (reviewDecision . "CHANGES_REQUESTED")) "o/r"))
+           (e4 (magit-dash-pr-dashboard--build-entry
+                '((number . 4)) "o/r"))
+           (entries (list e1 e2 e3 e4))
+           (nums (lambda (f)
+                   (seq-map (lambda (e) (plist-get (car e) :number))
+                            (magit-dash-pr-dashboard--apply-filters entries f)))))
+      (should (equal '(1) (funcall nums '(:review "approved"))))
+      (should (equal '(2) (funcall nums '(:review "pending"))))
+      (should (equal '(3) (funcall nums '(:review "changes-requested"))))
+      ;; Cached status approvals/required satisfy approved when reviewDecision is absent.
+      (magit-dash-pr-dashboard--set-status "o/r" 4 '(:approvals 2 :required 2 :changes-requested 0))
+      (should (equal '(1 4) (funcall nums '(:review "approved")))))))
+
+(ert-deftest magit-dash-pr/filter-stack-dimensions ()
+  "Filter :stack separates PRs targeting main/master from stacked PRs."
+  (with-temp-buffer
+    (magit-dash-pr-dashboard-mode)
+    (let* ((e1 (magit-dash-pr-dashboard--build-entry
+                '((number . 1) (baseRefName . "main")) "o/r"))
+           (e2 (magit-dash-pr-dashboard--build-entry
+                '((number . 2) (baseRefName . "master")) "o/r"))
+           (e3 (magit-dash-pr-dashboard--build-entry
+                '((number . 3) (baseRefName . "feat/parent")) "o/r"))
+           (e4 (magit-dash-pr-dashboard--build-entry
+                '((number . 4)) "o/r"))
+           (entries (list e1 e2 e3 e4))
+           (nums (lambda (f)
+                   (seq-map (lambda (e) (plist-get (car e) :number))
+                            (magit-dash-pr-dashboard--apply-filters entries f)))))
+      (should (equal '(1 2) (funcall nums '(:stack "main"))))
+      (should (equal '(3) (funcall nums '(:stack "stacked")))))))
+
+(ert-deftest magit-dash-pr/filter-review-requested-dimensions ()
+  "Filter :review-requested supports any, none, literal login, and @me."
+  (with-temp-buffer
+    (magit-dash-pr-dashboard-mode)
+    (let* ((e1 (magit-dash-pr-dashboard--build-entry
+                '((number . 1) (reviewRequests . (((login . "Alice")) ((login . "bob")))))
+                "o/r"))
+           (e2 (magit-dash-pr-dashboard--build-entry
+                '((number . 2) (reviewRequests . nil))
+                "o/r"))
+           (e3 (magit-dash-pr-dashboard--build-entry
+                '((number . 3))
+                "o/r"))
+           (entries (list e1 e2 e3))
+           (nums (lambda (f)
+                   (seq-map (lambda (e) (plist-get (car e) :number))
+                            (magit-dash-pr-dashboard--apply-filters entries f)))))
+      (should (equal '(1) (funcall nums '(:review-requested "any"))))
+      (should (equal '(2) (funcall nums '(:review-requested "none"))))
+      (should (equal '(1) (funcall nums '(:repo "o/r" :review-requested "alice"))))
+      (cl-letf (((symbol-function 'magit-dash-pr--account-login) (lambda (_) "bob")))
+        (should (equal '(1) (funcall nums '(:repo "o/r" :review-requested "@me")))))
+      ;; Cross-repo build-args passes --review-requested for logins, not for any/none.
+      (should (member "--review-requested"
+                      (magit-dash-pr-dashboard--build-args '(:state "open" :review-requested "@me"))))
+      (should-not (member "--review-requested"
+                          (magit-dash-pr-dashboard--build-args '(:state "open" :review-requested "any"))))
+      (should-not (member "--review-requested"
+                          (magit-dash-pr-dashboard--build-args '(:state "open" :review-requested "none")))))))
+
+(ert-deftest magit-dash-pr/filter-pending-reviews-count ()
+  "Filter :pending-reviews supports exact and comparator expressions."
+  (should (magit-dash-pr-dashboard--match-count-p 0 "0"))
+  (should (magit-dash-pr-dashboard--match-count-p 2 2))
+  (should (magit-dash-pr-dashboard--match-count-p 2 "=2"))
+  (should (magit-dash-pr-dashboard--match-count-p 2 ">=1"))
+  (should (magit-dash-pr-dashboard--match-count-p 2 "2+"))
+  (should-not (magit-dash-pr-dashboard--match-count-p 1 "2+"))
+  (should (magit-dash-pr-dashboard--match-count-p 1 ">0"))
+  (should (magit-dash-pr-dashboard--match-count-p 1 "<2"))
+  (should (magit-dash-pr-dashboard--match-count-p 2 "<=2"))
+  (should-not (magit-dash-pr-dashboard--parse-count-spec "bad"))
+  (with-temp-buffer
+    (magit-dash-pr-dashboard-mode)
+    (let* ((e0 (magit-dash-pr-dashboard--build-entry
+                '((number . 10) (reviewRequests . nil)) "o/r"))
+           (e1 (magit-dash-pr-dashboard--build-entry
+                '((number . 11) (reviewRequests . (((login . "alice"))))) "o/r"))
+           (e2 (magit-dash-pr-dashboard--build-entry
+                '((number . 12)) "o/r"))
+           (entries (list e0 e1 e2))
+           (nums (lambda (spec)
+                   (seq-map (lambda (e) (plist-get (car e) :number))
+                            (magit-dash-pr-dashboard--apply-filters
+                             entries (list :pending-reviews spec))))))
+      (magit-dash-pr-dashboard--set-status "o/r" 12 '(:requested ("alice" "bob")))
+      (should (equal '(10) (funcall nums "0")))
+      (should (equal '(11) (funcall nums "1")))
+      (should (equal '(11 12) (funcall nums ">=1")))
+      (should (equal '(12) (funcall nums "2+")))
+      (should (equal '(10 11) (funcall nums "<=1"))))))
+
+(ert-deftest magit-dash-pr/filter-merge-ci-reveals-enriched-matches ()
+  "Async CI/metadata merge updates --all-entries and reveals newly matching rows."
+  (with-temp-buffer
+    (magit-dash-pr-dashboard-mode)
+    (let ((e1 (magit-dash-pr-dashboard--build-entry '((number . 1) (title . "a")) "o/r"))
+          (e2 (magit-dash-pr-dashboard--build-entry '((number . 2) (title . "b")) "o/r")))
+      (setq magit-dash-pr-dashboard--filters '(:state "open" :stack "stacked" :review "approved"))
+      (setq magit-dash-pr-dashboard--all-entries (list e1 e2))
+      (setq tabulated-list-entries
+            (magit-dash-pr-dashboard--apply-filters magit-dash-pr-dashboard--all-entries))
+      (should (null tabulated-list-entries))
+      (magit-dash-pr-dashboard--merge-ci
+       (current-buffer) "o/r"
+       "[{\"number\":1,\"baseRefName\":\"feat/base\",\"reviewDecision\":\"APPROVED\",\"reviewRequests\":[]},{\"number\":2,\"baseRefName\":\"main\",\"reviewDecision\":\"APPROVED\",\"reviewRequests\":[]}]")
+      (should (equal '(1)
+                     (seq-map (lambda (e) (plist-get (car e) :number))
+                              tabulated-list-entries))))))
+
+(ert-deftest magit-dash-pr/saved-filters-save-apply-delete ()
+  "Saved filters can be saved, applied, switched to via switch-view, and deleted."
+  (let ((magit-dash-pr-saved-filters nil)
+        (refreshed 0))
+    (cl-letf (((symbol-function 'magit-dash-pr-dashboard-refresh)
+               (lambda () (setq refreshed (1+ refreshed)))))
+      (with-temp-buffer
+        (magit-dash-pr-dashboard-mode)
+        (setq magit-dash-pr-dashboard--filters
+              '(:state "open" :author "@me" :ci "passing" :stack "stacked" :pending-reviews ">=1"))
+        (setq magit-dash-pr-dashboard--hide-failing t)
+        (magit-dash-pr-dashboard-save-filter "my-green-stack")
+        (should (assoc "my-green-stack" magit-dash-pr-saved-filters))
+        (should-error (magit-dash-pr-dashboard-save-filter "   ") :type 'user-error)
+        ;; Clear and restore via apply-saved-filter
+        (magit-dash-pr-dashboard-clear-filters)
+        (should-not (plist-get magit-dash-pr-dashboard--filters :ci))
+        (should-not magit-dash-pr-dashboard--hide-failing)
+        (magit-dash-pr-dashboard-apply-saved-filter "my-green-stack")
+        (should (equal "passing" (plist-get magit-dash-pr-dashboard--filters :ci)))
+        (should (equal "stacked" (plist-get magit-dash-pr-dashboard--filters :stack)))
+        (should (equal ">=1" (plist-get magit-dash-pr-dashboard--filters :pending-reviews)))
+        (should (eq t magit-dash-pr-dashboard--hide-failing))
+        ;; Switch-view also resolves saved filters
+        (magit-dash-pr-dashboard-clear-filters)
+        (magit-dash-pr-dashboard-switch-view "my-green-stack")
+        (should (equal "stacked" (plist-get magit-dash-pr-dashboard--filters :stack)))
+        ;; Delete removes the preset and errors on unknown name
+        (magit-dash-pr-dashboard-delete-saved-filter "my-green-stack")
+        (should-not (assoc "my-green-stack" magit-dash-pr-saved-filters))
+        (should-error (magit-dash-pr-dashboard-apply-saved-filter "missing") :type 'user-error)
+        (should (> refreshed 0))))))
+
+(ert-deftest magit-dash-pr/filter-format-and-mode-line ()
+  "Filter summary formats active dimensions and updates mode-line-process."
+  (should (equal "open" (magit-dash-pr-dashboard--format-filters '(:state "open"))))
+  (should (equal "author:@me req:@me review:pending stack:stacked ci:failing pending:>=1"
+                 (magit-dash-pr-dashboard--format-filters
+                  '(:state "open" :author "@me" :review-requested "@me"
+                    :review "pending" :stack "stacked" :ci "failing"
+                    :pending-reviews ">=1"))))
+  (with-temp-buffer
+    (magit-dash-pr-dashboard-mode)
+    (setq magit-dash-pr-dashboard--filters '(:state "open" :ci "passing"))
+    (magit-dash-pr-dashboard--update-mode-line)
+    (should (equal " [ci:passing]" mode-line-process))))
+
+(ert-deftest magit-dash-pr/set-filter-client-side-avoids-refetch ()
+  "Setting client-side filters re-filters --all-entries without re-fetching."
+  (let ((refreshed 0))
+    (cl-letf (((symbol-function 'magit-dash-pr-dashboard-refresh)
+               (lambda () (setq refreshed (1+ refreshed)))))
+      (with-temp-buffer
+        (magit-dash-pr-dashboard-mode)
+        (let ((e1 (magit-dash-pr-dashboard--build-entry
+                   '((number . 1) (baseRefName . "main")) "o/r"))
+              (e2 (magit-dash-pr-dashboard--build-entry
+                   '((number . 2) (baseRefName . "feat/x")) "o/r")))
+          (setq magit-dash-pr-dashboard--all-entries (list e1 e2))
+          (setq tabulated-list-entries (list e1 e2))
+          (cl-letf (((symbol-function 'completing-read)
+                     (let ((answers '("stack" "stacked")))
+                       (lambda (&rest _) (pop answers)))))
+            (magit-dash-pr-dashboard-set-filter))
+          (should (= 0 refreshed))
+          (should (equal '(2)
+                         (seq-map (lambda (e) (plist-get (car e) :number))
+                                  tabulated-list-entries)))
+          ;; Invalid pending-reviews input signals user-error
+          (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "pending-reviews"))
+                    ((symbol-function 'read-string) (lambda (&rest _) "nope")))
+            (should-error (magit-dash-pr-dashboard-set-filter) :type 'user-error)))))))
+
+(ert-deftest magit-dash-pr/filter-keybindings-and-savehist ()
+  "Saved filter keys are bound under f and saved filters are registered in savehist."
+  (should (eq #'magit-dash-pr-dashboard-save-filter
+              (keymap-lookup magit-dash-pr-dashboard-mode-map "f s")))
+  (should (eq #'magit-dash-pr-dashboard-apply-saved-filter
+              (keymap-lookup magit-dash-pr-dashboard-mode-map "f l")))
+  (should (eq #'magit-dash-pr-dashboard-delete-saved-filter
+              (keymap-lookup magit-dash-pr-dashboard-mode-map "f d")))
+  (require 'magit-dash-global)
+  (let ((magit-dash-global-mode nil)
+        (magit-dash-global-managed-settings nil)
+        (magit-dash-global--saved-settings nil)
+        (magit-mode-hook nil)
+        (magit-post-refresh-hook nil)
+        (magit-post-worktree-add-hook nil)
+        (after-load-functions nil)
+        (which-key-mode-hook nil)
+        (savehist-additional-variables nil))
+    (unwind-protect
+        (progn
+          (magit-dash-global-mode 1)
+          (should (memq 'magit-dash-pr-saved-filters savehist-additional-variables)))
+      (magit-dash-global-mode -1))))
 
 (provide 'test-magit-dash-pr)
 ;;; test-magit-dash-pr.el ends here

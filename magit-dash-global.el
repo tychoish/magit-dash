@@ -18,6 +18,7 @@
 (defvar savehist-additional-variables)
 (defvar magit-dash-columns)
 (defvar magit-dash-pr-columns)
+(defvar magit-dash-pr-saved-filters)
 (defvar which-key-mode)
 (defvar which-key-replacement-alist)
 (defvar magit-dash-which-key-abbreviate-commands 'strip
@@ -165,6 +166,7 @@ Sets up keybindings, savehist variables, and hooks while leaving the main
         (when (boundp 'savehist-additional-variables)
           (add-to-list 'savehist-additional-variables 'magit-dash-columns)
           (add-to-list 'savehist-additional-variables 'magit-dash-pr-columns)
+          (add-to-list 'savehist-additional-variables 'magit-dash-pr-saved-filters)
           (add-to-list 'savehist-additional-variables 'magit-dash--ephemeral-tags)))
     (magit-dash-global--revert-settings)
     (remove-hook 'magit-mode-hook #'magit-dash-global--setup-magit)
