@@ -50,7 +50,7 @@ jobs:
         uses: tychoish/elisp-ci@v0.1.3
 
       - name: Measure Code Coverage
-        uses: tychoish/elisp-ci/coverage@v0.1.3
+        uses: tychoish/elisp-ci/coverage@28285745e77974a466eac23a123aa169b10a2acf
         with:
           report-format: "lcov"
           output-file: "coverage/lcov.info"
