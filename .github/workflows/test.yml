@@ -16,6 +16,8 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+    env:
+      ELISP_CI_ELPAISH: "true"
     strategy:
       fail-fast: false
       matrix:
