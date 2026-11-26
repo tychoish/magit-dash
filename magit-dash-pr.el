@@ -714,6 +714,9 @@ Uses active columns.  WIDTH is available window width; when nil,
   "o" #'magit-dash-pr-toggle-org
   "t" #'magit-dash-pr-toggle-column
   "s" #'magit-dash-pr-dashboard-switch-view
+  "n" #'magit-dash-pr-dashboard-open-view
+  "b" #'magit-dash-pr-dashboard-switch-buffer
+  "c" #'magit-dash-pr-dashboard-clone-view
   "v" #'magit-dash-pr-dashboard-diff-review)
 
 (defvar-keymap magit-dash-pr-dashboard-filter-map
@@ -2157,8 +2160,9 @@ to the PR dashboard buffer if live, preventing accidental corruption of
 other buffers."
   (interactive)
   (if (not (derived-mode-p 'magit-dash-pr-dashboard-mode))
-      (if-let* ((dash-buf (get-buffer (or (bound-and-true-p magit-dash-pr-buffer-name)
-                                          "*magit-dash-prs*"))))
+      (if-let* ((dash-buf (or (get-buffer (or (bound-and-true-p magit-dash-pr-buffer-name)
+                                              "*magit-dash-prs*"))
+                              (car (magit-dash-pr-dashboard--buffers)))))
           (if (and (buffer-live-p dash-buf)
                    (with-current-buffer dash-buf (derived-mode-p 'magit-dash-pr-dashboard-mode)))
               (with-current-buffer dash-buf
@@ -2686,7 +2690,156 @@ buries the buffer."
   (magit-dash-pr-dashboard-refresh))
 
 (defconst magit-dash-pr-buffer-name "*magit-dash-pr*"
-  "Buffer name for the pull request dashboard.")
+  "Default buffer name for the unfiltered pull request dashboard.")
+
+(defvar-local magit-dash-pr-dashboard--view-name nil
+  "Optional human-readable label for the current PR dashboard buffer.")
+
+(defun magit-dash-pr--buffer-name (&optional filters label)
+  "Return the PR dashboard buffer name for FILTERS and optional LABEL.
+Returns `magit-dash-pr-buffer-name' for the default unfiltered open view,
+or `*magit-dash-pr: LABEL*' for named or filtered views so multiple views
+can be kept open simultaneously."
+  (let ((tag (cond
+              ((and (stringp label) (not (string-empty-p (string-trim label))))
+               (string-trim label))
+              (filters
+               (let ((summary (magit-dash-pr-dashboard--format-filters filters)))
+                 (unless (equal summary "open")
+                   summary)))
+              (t nil))))
+    (if tag
+        (format "*magit-dash-pr: %s*" tag)
+      magit-dash-pr-buffer-name)))
+
+(defun magit-dash-pr-dashboard--buffers ()
+  "Return all live `magit-dash-pr-dashboard-mode' buffers."
+  (seq-filter (lambda (buf)
+                (and (buffer-live-p buf)
+                     (with-current-buffer buf
+                       (derived-mode-p 'magit-dash-pr-dashboard-mode))))
+              (buffer-list)))
+
+(defun magit-dash-pr-dashboard--resolve-view-spec (&optional view-key)
+  "Resolve VIEW-KEY (or prompt interactively) into a (FILTERS . LABEL) cons.
+Supports built-in presets, author/repo prompts, and saved filters."
+  (let* ((saved-candidates
+          (seq-map (lambda (pair)
+                     (cons (car pair)
+                           (concat "[saved] "
+                                   (magit-dash-pr-dashboard--format-filters (cdr pair)))))
+                   magit-dash-pr-saved-filters))
+         (candidates
+          (append
+           '(("all"          . "All open PRs (aggregated across tracked repos)")
+             ("my-prs"       . "Authored by me (@me)")
+             ("needs-review" . "Review requested (@me)")
+             ("author"       . "Filtered by author username…")
+             ("repo"         . "Filtered by repository…")
+             ("conflicts"    . "PRs with merge conflicts")
+             ("closed"       . "Closed / Merged pull requests"))
+           saved-candidates))
+         (choice (or view-key
+                     (if (fboundp 'acr-completing-read)
+                         (acr-completing-read
+                          "PR view: "
+                          (seq-map #'car candidates)
+                          :annotation-fn (lambda (k)
+                                           (concat "  " (alist-get k candidates nil nil #'equal)))
+                          :history 'magit-dash-pr-view-history)
+                       (completing-read
+                        "PR view: "
+                        (seq-map (lambda (c) (format "%-14s %s" (car c) (cdr c))) candidates)
+                        nil t))))
+         (key (if (assoc choice magit-dash-pr-saved-filters)
+                  choice
+                (if (string-match "\\`\\([^ ]+\\)" choice)
+                    (match-string 1 choice)
+                  choice))))
+    (if-let* ((saved (assoc key magit-dash-pr-saved-filters)))
+        (cons (copy-sequence (cdr saved)) key)
+      (pcase key
+        ("all"
+         (cons (list :state "open" :author nil :repo nil :org nil) nil))
+        ("my-prs"
+         (cons (list :state "open" :author "@me" :repo nil :org nil) "my-prs"))
+        ("needs-review"
+         (cons (list :state "open" :author nil :repo nil :org nil :review-requested "@me")
+               "needs-review"))
+        ("author"
+         (let ((author (magit-dash-pr-dashboard--read-author
+                        (and (boundp 'magit-dash-pr-dashboard--filters)
+                             magit-dash-pr-dashboard--filters))))
+           (cons (list :state "open"
+                       :author (unless (string-empty-p author) author)
+                       :repo nil :org nil)
+                 (unless (string-empty-p author) (concat "author:" author)))))
+        ("repo"
+         (let* ((repo-list (when (boundp 'magit-dash-repo-list)
+                             (seq-filter #'magit-dash-repo-upstream-repo magit-dash-repo-list)))
+                (choices (when repo-list
+                           (seq-map #'magit-dash-repo-upstream-repo repo-list)))
+                (selected (if choices
+                              (completing-read "Select repository: " choices nil t)
+                            (read-string "Repository (OWNER/NAME): "))))
+           (cons (list :state "open" :author nil :repo selected :org nil)
+                 (concat "repo:" selected))))
+        ("conflicts"
+         (cons (list :state "open" :conflicts t :author nil :repo nil :org nil)
+               "conflicts"))
+        ("closed"
+         (cons (list :state "closed" :author nil :repo nil :org nil)
+               "closed"))
+        (_ (user-error "Unknown PR view: %S" key))))))
+
+;;;###autoload
+(defun magit-dash-pr-dashboard-open-view (&optional view-key)
+  "Open a PR dashboard view (VIEW-KEY) in its own dedicated buffer.
+Allows viewing multiple PR lists side by side (e.g. your PRs alongside a
+teammate's PRs or a specific repository)."
+  (interactive)
+  (let* ((spec (magit-dash-pr-dashboard--resolve-view-spec view-key))
+         (filters (car spec))
+         (label (cdr spec)))
+    (magit-dash-pr-dashboard--open-with-filters filters label)))
+
+;;;###autoload
+(defun magit-dash-pr-dashboard-switch-buffer ()
+  "Switch to another open `magit-dash-pr-dashboard-mode' buffer."
+  (interactive)
+  (let ((bufs (magit-dash-pr-dashboard--buffers)))
+    (unless bufs
+      (user-error "No PR dashboard buffers are open"))
+    (let* ((names (seq-map #'buffer-name bufs))
+           (annotate (lambda (name)
+                       (if-let* ((b (get-buffer name)))
+                           (with-current-buffer b
+                             (format "  (%d PRs, %s)"
+                                     (length tabulated-list-entries)
+                                     (magit-dash-pr-dashboard--format-filters
+                                      magit-dash-pr-dashboard--filters
+                                      magit-dash-pr-dashboard--hide-failing)))
+                         "")))
+           (chosen (if (fboundp 'acr-completing-read)
+                       (acr-completing-read "PR dashboard buffer: " names
+                                            :annotation-fn annotate)
+                     (completing-read "PR dashboard buffer: " names nil t))))
+      (pop-to-buffer (get-buffer chosen)))))
+
+(defun magit-dash-pr-dashboard-clone-view (&optional name)
+  "Clone the current PR dashboard's filters into a new buffer named NAME."
+  (interactive)
+  (unless (derived-mode-p 'magit-dash-pr-dashboard-mode)
+    (user-error "Not in a PR dashboard buffer"))
+  (let* ((label (string-trim
+                 (or name
+                     (read-string "New PR dashboard view name: "))))
+         (filters (copy-sequence magit-dash-pr-dashboard--filters)))
+    (when (string-empty-p label)
+      (user-error "View name cannot be empty"))
+    (when magit-dash-pr-dashboard--hide-failing
+      (setq filters (plist-put filters :hide-failing t)))
+    (magit-dash-pr-dashboard--open-with-filters filters label)))
 
 (defun magit-dash-pr--resolve-dashboard-default-directory (repo-slug &optional context-dir)
   "Resolve `default-directory' for repository-scoped PR dashboard of REPO-SLUG.
@@ -2731,7 +2884,9 @@ when provided."
          (orig-win (selected-window))
          (from-dash (or (derived-mode-p 'magit-dash-mode)
                         (string= (buffer-name orig-buf) (or (bound-and-true-p magit-dash-buffer-name) "*magit-dash-repos*"))))
-         (buf (get-buffer-create magit-dash-pr-buffer-name)))
+         (buf (get-buffer-create
+               (magit-dash-pr--buffer-name
+                (when repo (list :state "open" :repo repo))))))
     (with-current-buffer buf
       (magit-dash-pr-dashboard-mode)
       (when repo
@@ -2750,16 +2905,25 @@ when provided."
 ;;;###autoload
 (defalias 'magit-dash-pr-dashboard-open #'magit-dash-pr)
 
-(defun magit-dash-pr-dashboard--open-with-filters (filters)
-  "Open the PR dashboard buffer showing pull requests matching FILTERS."
+(defun magit-dash-pr-dashboard--open-with-filters (filters &optional label)
+  "Open a PR dashboard buffer showing pull requests matching FILTERS.
+Uses a view-specific buffer name derived from LABEL or FILTERS so multiple
+PR views can remain open simultaneously."
   (magit-dash-gh--check-gh)
   (let* ((orig-dir default-directory)
-         (buf (get-buffer-create magit-dash-pr-buffer-name)))
+         (clean (copy-sequence filters))
+         (hide-failing (and (plist-get clean :hide-failing) t))
+         (buf-name (magit-dash-pr--buffer-name clean label))
+         (buf (get-buffer-create buf-name)))
+    (setq clean (plist-put clean :hide-failing nil))
     (with-current-buffer buf
       (unless (derived-mode-p 'magit-dash-pr-dashboard-mode)
         (magit-dash-pr-dashboard-mode))
-      (setq-local magit-dash-pr-dashboard--filters filters)
-      (when-let* ((repo (plist-get filters :repo))
+      (setq-local magit-dash-pr-dashboard--view-name label)
+      (setq-local magit-dash-pr-dashboard--filters clean)
+      (setq-local magit-dash-pr-dashboard--hide-failing hide-failing)
+      (magit-dash-pr-dashboard--update-mode-line)
+      (when-let* ((repo (plist-get clean :repo))
                   (resolved-dir (magit-dash-pr--resolve-dashboard-default-directory repo orig-dir)))
         (setq-local default-directory resolved-dir))
       (magit-dash-pr-dashboard-refresh))
@@ -3909,6 +4073,9 @@ Key groups mirror `magit-dash-menu': w worktree, c CI, f filter, m mark."
     ("cf"  "Fetch CI logs"            magit-dash-pr-dashboard-fetch-ci)]]
   [["View & Filter"
     ("v"   "Switch view…"             magit-dash-pr-dashboard-switch-view)
+    ("V"   "Open view in new buffer…" magit-dash-pr-dashboard-open-view)
+    ("B"   "Switch PR buffer…"        magit-dash-pr-dashboard-switch-buffer)
+    ("C"   "Clone view to buffer…"    magit-dash-pr-dashboard-clone-view)
     ("tc"  "Toggle column…"           magit-dash-pr-toggle-column)
     ("to"  "Toggle Org column"        magit-dash-pr-toggle-org)
     ("ff"  "Set filter…"              magit-dash-pr-dashboard-set-filter)

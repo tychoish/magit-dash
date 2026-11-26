@@ -2765,5 +2765,51 @@ spawns (which also error, so no network)."
         (should (eq #'magit-dash-pr-dashboard-filter-by-author
                     (keymap-lookup magit-dash-pr-dashboard-mode-map "f a")))))))
 
+(ert-deftest magit-dash-pr/multi-buffer-views ()
+  "Different PR views open and maintain independent dashboard buffers."
+  (should (equal magit-dash-pr-buffer-name
+                 (magit-dash-pr--buffer-name '(:state "open"))))
+  (should (equal "*magit-dash-pr: author:@me*"
+                 (magit-dash-pr--buffer-name '(:state "open" :author "@me"))))
+  (should (equal "*magit-dash-pr: teammate*"
+                 (magit-dash-pr--buffer-name '(:state "open" :author "alice") "teammate")))
+  (let ((created-bufs nil)
+        (magit-dash-pr-saved-filters
+         '(("alice-prs" . (:state "open" :author "alice" :hide-failing t)))))
+    (unwind-protect
+        (cl-letf (((symbol-function 'magit-dash-gh--check-gh) #'ignore)
+                  ((symbol-function 'magit-dash-pr-dashboard-refresh) #'ignore)
+                  ((symbol-function 'pop-to-buffer) (lambda (b &rest _) b)))
+          (let ((b-mine (magit-dash-pr-dashboard-open-view "my-prs"))
+                (b-alice (magit-dash-pr-dashboard-open-view "alice-prs")))
+            (push b-mine created-bufs)
+            (push b-alice created-bufs)
+            (should-not (eq b-mine b-alice))
+            (should (equal "*magit-dash-pr: my-prs*" (buffer-name b-mine)))
+            (should (equal "*magit-dash-pr: alice-prs*" (buffer-name b-alice)))
+            (should (equal "@me" (plist-get (buffer-local-value 'magit-dash-pr-dashboard--filters b-mine) :author)))
+            (should (equal "alice" (plist-get (buffer-local-value 'magit-dash-pr-dashboard--filters b-alice) :author)))
+            (should (eq t (buffer-local-value 'magit-dash-pr-dashboard--hide-failing b-alice)))
+            (should-not (buffer-local-value 'magit-dash-pr-dashboard--hide-failing b-mine))
+            ;; Clone view creates a third independent buffer with copied filters
+            (with-current-buffer b-mine
+              (let ((b-clone (magit-dash-pr-dashboard-clone-view "my-clone")))
+                (push b-clone created-bufs)
+                (should (equal "*magit-dash-pr: my-clone*" (buffer-name b-clone)))
+                (should (equal "@me" (plist-get (buffer-local-value 'magit-dash-pr-dashboard--filters b-clone) :author)))))
+            ;; All live PR dashboard buffers are discovered
+            (let ((live (magit-dash-pr-dashboard--buffers)))
+              (should (memq b-mine live))
+              (should (memq b-alice live)))
+            ;; View keymap bindings
+            (should (eq #'magit-dash-pr-dashboard-open-view
+                        (keymap-lookup magit-dash-pr-dashboard-mode-map "v n")))
+            (should (eq #'magit-dash-pr-dashboard-switch-buffer
+                        (keymap-lookup magit-dash-pr-dashboard-mode-map "v b")))
+            (should (eq #'magit-dash-pr-dashboard-clone-view
+                        (keymap-lookup magit-dash-pr-dashboard-mode-map "v c")))))
+      (seq-do (lambda (b) (when (buffer-live-p b) (kill-buffer b)))
+              created-bufs))))
+
 (provide 'test-magit-dash-pr)
 ;;; test-magit-dash-pr.el ends here
