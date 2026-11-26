@@ -86,7 +86,12 @@
         (should-not (overlays-in (point-min) (point-max)))))))
 
 (ert-deftest magit-dash-review-analysis-test/mode-on-off ()
+  (message "CI diagnostic: diff-review=%S skip-conditions=%S quit=%S"
+           (locate-library "diff-review")
+           (get 'ert-test-skipped 'error-conditions) quit-flag)
+  (unwind-protect
   (skip-unless (locate-library "diff-review"))
+    (message "CI diagnostic: skip check exited"))
   (let ((by-hunk (magit-dash-review-analysis-for-path
                   (magit-dash-review-analysis-test/table) "src/a.ts")))
     (unwind-protect
