@@ -1,5 +1,10 @@
 ;;; test-magit-dash-worktree.el --- Tests for magit-dash-worktree.el -*- lexical-binding: t -*-
 
+;;; Commentary:
+;; Worktree symlinks, lifecycle safety and buffer cleanup regression tests.
+
+;;; Code:
+
 (require 'ert)
 (require 'cl-lib)
 (require 'magit-dash)
@@ -242,6 +247,110 @@
   (magit-dash-worktree-test--with-linked (repo wt)
     (magit-dash-test--commit wt "new.txt")
     (should (string-match-p "no upstream" (car (magit-dash-worktree-risks wt))))))
+
+
+;;; Worktree buffer cleanup
+
+(ert-deftest magit-dash-worktree/kill-buffers-exact-worktree ()
+  "Cleanup includes file and directory buffers, preserving nested worktrees."
+  (let* ((repo (magit-dash-test--make-repo))
+         (wt (expand-file-name ".wt/feat" repo))
+         (buffers (seq-map (lambda (name) (generate-new-buffer name))
+                           '(" *md-main-file*" " *md-main-dir*"
+                             " *md-linked*" " *md-prefix-sibling*"))))
+    (unwind-protect
+        (progn
+          (magit-dash-test--git repo "worktree" "add" "-q" "-b" "feat" wt)
+          (with-current-buffer (nth 0 buffers)
+            (setq buffer-file-name (expand-file-name "a.txt" repo))
+            (setq default-directory temporary-file-directory))
+          (with-current-buffer (nth 1 buffers)
+            (setq default-directory repo))
+          (with-current-buffer (nth 2 buffers)
+            (setq buffer-file-name (expand-file-name "a.txt" wt))
+            (setq default-directory (file-name-as-directory wt)))
+          (with-current-buffer (nth 3 buffers)
+            (setq default-directory (concat (directory-file-name repo) "-other/")))
+          (should (= 2 (magit-dash-worktree-kill-buffers repo)))
+          (should-not (buffer-live-p (nth 0 buffers)))
+          (should-not (buffer-live-p (nth 1 buffers)))
+          (should (buffer-live-p (nth 2 buffers)))
+          (should (buffer-live-p (nth 3 buffers)))
+          (should (= 1 (magit-dash-worktree-kill-buffers wt)))
+          (should-not (buffer-live-p (nth 2 buffers))))
+      (seq-do (lambda (buffer)
+                (when (buffer-live-p buffer) (kill-buffer buffer)))
+              buffers)
+      (delete-directory repo t))))
+
+(ert-deftest magit-dash-worktree/kill-buffers-preserves-query-protection ()
+  "A refusing kill query leaves its buffer alive and does not stop cleanup."
+  (let* ((repo (magit-dash-test--make-repo))
+         (guarded (generate-new-buffer " *md-guarded*"))
+         (ordinary (generate-new-buffer " *md-ordinary*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer guarded
+            (setq default-directory repo)
+            (setq-local kill-buffer-query-functions '(ignore)))
+          (with-current-buffer ordinary
+            (setq default-directory repo))
+          (should (= 1 (magit-dash-worktree-kill-buffers repo)))
+          (should (buffer-live-p guarded))
+          (should-not (buffer-live-p ordinary)))
+      (with-current-buffer guarded
+        (setq-local kill-buffer-query-functions nil))
+      (kill-buffer guarded)
+      (when (buffer-live-p ordinary) (kill-buffer ordinary))
+      (delete-directory repo t))))
+
+(ert-deftest magit-dash-worktree/kill-buffers-invalid-directory ()
+  "A directory outside a Git worktree cannot trigger buffer cleanup."
+  (let ((dir (make-temp-file "md-no-repo-" t)))
+    (unwind-protect
+        (should-error (magit-dash-worktree-kill-buffers dir) :type 'user-error)
+      (delete-directory dir t))))
+
+
+(ert-deftest magit-dash-worktree/kill-buffers-keeps-modified-file ()
+  "Refusing the normal modified-file prompt preserves unsaved changes."
+  (let* ((repo (magit-dash-test--make-repo))
+         (buffer (find-file-noselect (expand-file-name "a.txt" repo)))
+         (prompted nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (setq buffer-file-name (expand-file-name "a.txt" repo))
+            (setq default-directory repo)
+            (insert "unsaved changes"))
+          (cl-letf (((symbol-function 'yes-or-no-p)
+                     (lambda (&rest _) (setq prompted t) nil)))
+            (should (= 0 (magit-dash-worktree-kill-buffers repo))))
+          (should prompted)
+          (should (buffer-live-p buffer))
+          (should (buffer-modified-p buffer)))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer (set-buffer-modified-p nil))
+        (kill-buffer buffer))
+      (delete-directory repo t))))
+
+(ert-deftest magit-dash-worktree/kill-buffers-preserves-dashboard ()
+  "A dashboard's working directory does not make it a cleanup target."
+  (let* ((repo (magit-dash-test--make-repo))
+         (buffer (generate-new-buffer " *md-dashboard*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (setq default-directory repo))
+          (seq-do
+           (lambda (mode)
+             (with-current-buffer buffer (setq major-mode mode))
+             (should (= 0 (magit-dash-worktree-kill-buffers repo)))
+             (should (buffer-live-p buffer)))
+           '(magit-dash-mode magit-dash-pr-dashboard-mode
+             magit-dash-stack-mode magit-dash-actionable-mode)))
+      (when (buffer-live-p buffer) (kill-buffer buffer))
+      (delete-directory repo t))))
 
 (provide 'test-magit-dash-worktree)
 ;;; test-magit-dash-worktree.el ends here

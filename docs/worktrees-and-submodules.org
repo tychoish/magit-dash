@@ -26,6 +26,8 @@
 
 * Key Functions and Options
 
+- ~magit-dash-worktree-kill-buffers~: Prompt for a worktree and close its file and directory-associated buffers, confirming modified buffers and honoring process and kill-query protections. Nested worktrees and dashboards remain open.
+
 - [[file:api.org::#magit-dash-worktree-add][~magit-dash-worktree-add~]]: Prompt to create a new git worktree with automatic symlink seeding.
 - [[file:api.org::#magit-dash-worktree-delete][~magit-dash-worktree-delete~]]: Select and prune an existing git worktree safely.
 - [[file:api.org::#magit-dash-worktree-sync-symlinks][~magit-dash-worktree-sync-symlinks~]]: Re-evaluate and link missing symlinks across worktrees.

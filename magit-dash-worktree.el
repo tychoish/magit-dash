@@ -534,6 +534,64 @@ modified, staged or untracked files, and also when git fails.  All the
     (mapcar (lambda (path) (assoc path results)) paths)))
 
 ;;;###autoload
+(defun magit-dash-worktree-kill-buffers (&optional path)
+  "Kill buffers belonging to the Git worktree at PATH.
+Interactively, prompt for a directory, defaulting to the dashboard row or
+current worktree.  With PATH nil, use that default without prompting.
+Include file buffers and non-file buffers whose `default-directory' is
+in this worktree, preserving buffers for nested or sibling worktrees and
+repository dashboards.  Normal modified-file, process and kill-query
+prompts remain active; a refused kill leaves that buffer alive.
+Return the number of buffers actually killed."
+  (interactive
+   (list (read-directory-name
+          "Kill buffers for worktree: "
+          (or (when (derived-mode-p 'magit-dash-mode)
+                (magit-dash-repo-path (magit-dash--repo-at-point)))
+              (magit-toplevel)
+              default-directory)
+          nil t)))
+  (let* ((path (or path
+                   (when (derived-mode-p 'magit-dash-mode)
+                     (magit-dash-repo-path (magit-dash--repo-at-point)))
+                   default-directory))
+         (root (and (file-directory-p path) (magit-toplevel path))))
+    (unless root
+      (user-error "Not a Git worktree directory: %s" path))
+    (setq root (file-name-as-directory (file-truename root)))
+    (let ((buffers
+           (seq-filter
+            (lambda (buffer)
+              (with-current-buffer buffer
+                (unless (or (minibufferp)
+                            (derived-mode-p 'magit-dash-mode
+                                            'magit-dash-pr-dashboard-mode
+                                            'magit-dash-stack-mode
+                                            'magit-dash-actionable-mode))
+                  (let ((directory (if buffer-file-name
+                                       (file-name-directory buffer-file-name)
+                                     default-directory)))
+                    (and directory
+                         (equal (file-remote-p directory) (file-remote-p root))
+                         (or (file-equal-p directory root)
+                             (file-in-directory-p directory root))
+                         (when-let* ((top (magit-toplevel directory)))
+                           (equal root (file-name-as-directory
+                                        (file-truename top)))))))))
+            (buffer-list)))
+          (killed 0))
+      (seq-do (lambda (buffer)
+                (when (and (buffer-live-p buffer)
+                           (if (buffer-modified-p buffer)
+                               (kill-buffer-ask buffer)
+                             (kill-buffer buffer)))
+                  (setq killed (1+ killed))))
+              buffers)
+      (message "Killed %d buffer(s) for %s; retained %d"
+               killed (abbreviate-file-name root) (- (length buffers) killed))
+      killed)))
+
+;;;###autoload
 (defun magit-dash-worktree-delete ()
   "Delete the worktree at point after checking it for deletion risks.
 Signals `user-error' when the current row is not a worktree, when it has
