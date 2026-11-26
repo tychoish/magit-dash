@@ -365,9 +365,10 @@
     (should (equal "Repo" (car (aref fmt 1))))
     (should (equal "PR#" (car (aref fmt 2))))
     (should (equal "Status" (car (aref fmt 3))))
-    (should (equal "Title" (car (aref fmt 4))))
-    (should (equal "WT" (car (aref fmt 5))))
-    (should (equal "Updated" (car (aref fmt 6))))))
+    (should (equal "Drift" (car (aref fmt 4))))
+    (should (equal "Title" (car (aref fmt 5))))
+    (should (equal "WT" (car (aref fmt 6))))
+    (should (equal "Updated" (car (aref fmt 7))))))
 
 (ert-deftest magit-dash-pr/build-format-fallback-no-entries ()
   "When no entries exist, Repo column falls back to available window space (min 12)."
@@ -506,7 +507,7 @@
   (should (eq t (alist-get 'title magit-dash-pr-columns)))
   (should (eq t (alist-get 'worktree magit-dash-pr-columns)))
   (should (eq t (alist-get 'updated magit-dash-pr-columns)))
-  (should (equal '(repo pr author status title worktree updated comments review approvals threads)
+  (should (equal '(repo pr author status drift title worktree updated comments review approvals threads)
                  (magit-dash-pr--active-columns)))
   (let ((was-on (bound-and-true-p magit-dash-global-mode)))
     (unwind-protect
@@ -531,7 +532,7 @@
 (ert-deftest magit-dash-pr/build-entry-respects-arbitrary-columns ()
   "build-entry outputs only the active columns."
   (let ((magit-dash-pr-columns
-         '((org . nil) (repo . t) (pr . t) (author . nil) (base . nil) (ci . nil) (title . nil) (worktree . nil) (updated . nil) (age . nil) (comments . nil) (review . nil) (approvals . nil) (threads . nil) (status . nil)))
+         '((org . nil) (repo . t) (pr . t) (author . nil) (base . nil) (ci . nil) (drift . nil) (title . nil) (worktree . nil) (updated . nil) (age . nil) (comments . nil) (review . nil) (approvals . nil) (threads . nil) (status . nil)))
         (pr '((number . 10) (title . "T") (updatedAt . "") (comments . 0))))
     (let* ((entry (magit-dash-pr-dashboard--build-entry pr "owner/repo"))
            (vec (cadr entry)))
@@ -623,14 +624,15 @@
     (should (equal "bugfix/issue-15" (plist-get id :head-ref)))
     ;; PR# column is aref 1 -> "15"
     (should (equal "15" (substring-no-properties (aref vec 1))))
-    ;; Status includes CI before merge, divergence and stack indicators.
-    (should (string-prefix-p "x " (substring-no-properties (aref vec 2))))
-    ;; Title column is aref 3 -> "Fix stuff"
-    (should (equal "Fix stuff" (substring-no-properties (aref vec 3))))
-    ;; WT column is aref 4 -> "·"
-    (should (equal "·" (substring-no-properties (aref vec 4))))
-    ;; Updated column is aref 5
-    (should-not (string-empty-p (aref vec 5)))))
+    ;; Status shows CI without clean/stack- clutter; Drift is its own column.
+    (should (equal "x" (substring-no-properties (aref vec 2))))
+    (should (equal "" (substring-no-properties (aref vec 3))))
+    ;; Title column is aref 4 -> "Fix stuff"
+    (should (equal "Fix stuff" (substring-no-properties (aref vec 4))))
+    ;; WT column is aref 5 -> "·"
+    (should (equal "·" (substring-no-properties (aref vec 5))))
+    ;; Updated column is aref 6
+    (should-not (string-empty-p (aref vec 6)))))
 
 
 ;;; Worktree commands & review tests

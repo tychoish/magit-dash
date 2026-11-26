@@ -16,11 +16,13 @@
                (statusCheckRollup . ((state . "SUCCESS"))))))
     (setf (map-elt magit-dash-pr-dashboard--comparisons '("o/r" "base" "head"))
           '(3 . 2))
-    (let ((status (magit-dash-pr-dashboard--format-status pr "o/r" nil)))
+    (let ((status (magit-dash-pr-dashboard--format-status pr "o/r" nil))
+          (drift (magit-dash-pr-dashboard--format-drift pr "o/r")))
       (should (string-match-p "✓" status))
       (should (string-match-p "conflict" status))
-      (should (string-match-p "↑3↓2" status))
-      (should (string-match-p "stack-" status)))))
+      (should-not (string-match-p "stack-" status))
+      (should-not (string-match-p "↑" status))
+      (should (equal "↑3↓2" (substring-no-properties drift))))))
 
 (ert-deftest magit-dash-pr-dashboard-status-stack-is-repository-scoped ()
   (let* ((pr '((number . 7) (baseRefName . "parent") (headRefName . "child")))
@@ -28,8 +30,8 @@
           (list (list (list :repo "o/r" :pr '((number . 6) (headRefName . "parent"))) []))))
     (should (string-match-p "stack#6"
                             (magit-dash-pr-dashboard--format-status pr "o/r" nil)))
-    (should (string-match-p "stack-"
-                            (magit-dash-pr-dashboard--format-status pr "other/r" nil)))))
+    (should-not (string-match-p "stack"
+                                (magit-dash-pr-dashboard--format-status pr "other/r" nil)))))
 
 (ert-deftest magit-dash-pr-dashboard-status-stack-root ()
   (let* ((pr '((number . 6) (baseRefName . "main") (headRefName . "parent")
@@ -38,12 +40,15 @@
           (list (list (list :repo "o/r" :pr '((number . 7) (baseRefName . "parent"))) [])))
          (status (magit-dash-pr-dashboard--format-status pr "o/r" nil)))
     (should (string-match-p "stack#7" status))
-    (should (string-match-p "clean" status))))
+    (should-not (string-match-p "clean" status))))
 
 (ert-deftest magit-dash-pr-dashboard-status-unknown ()
-  (let ((status (magit-dash-pr-dashboard--format-status '((number . 7)) "o/r" nil)))
-    (should (string-match-p "merge?" status))
-    (should (string-match-p "↑?↓?" status))))
+  (let ((status (magit-dash-pr-dashboard--format-status '((number . 7)) "o/r" nil))
+        (drift (magit-dash-pr-dashboard--format-drift '((number . 7)) "o/r")))
+    (should-not (string-match-p "merge\\?" status))
+    (should-not (string-match-p "clean" status))
+    (should-not (string-match-p "stack-" status))
+    (should (equal "" drift))))
 
 (ert-deftest magit-dash-pr-dashboard-comparison-async-cache-and-stale-results ()
   (with-temp-buffer
@@ -70,8 +75,8 @@
         (setf (map-elt pr 'headRefOid) "new")
         (magit-dash-pr-dashboard--enrich-comparisons (current-buffer) default-directory)
         (should (= 2 (length calls)))
-        (should (string-match-p "↑?↓?"
-                                (magit-dash-pr-dashboard--format-status pr "o/r" nil)))
+        (should (equal ""
+                       (magit-dash-pr-dashboard--format-drift pr "o/r")))
         (funcall (caddar calls) "failure" 1)
         (should-not (map-elt magit-dash-pr-dashboard--comparisons '("o/r" "base" "new")))))))
 
@@ -107,11 +112,11 @@
         (setf (map-elt pr 'headRefOid) "new")
         (funcall (car callbacks) "{\"ahead_by\":3,\"behind_by\":2}")
         (should (= 2 (length callbacks)))
-        (should (string-match-p "↑?↓?"
-                                (magit-dash-pr-dashboard--format-status pr "o/r" nil)))
+        (should (equal ""
+                       (magit-dash-pr-dashboard--format-drift pr "o/r")))
         (funcall (car callbacks) "{\"ahead_by\":0,\"behind_by\":0}")
-        (should (string-match-p "↑0↓0"
-                                (magit-dash-pr-dashboard--format-status pr "o/r" nil)))))))
+        (should (equal ""
+                       (magit-dash-pr-dashboard--format-drift pr "o/r")))))))
 
 
 (ert-deftest magit-dash-pr-dashboard-comparison-launch-failure-continues ()
@@ -204,6 +209,41 @@
                (seq-position (magit-dash-pr--active-columns) 'title)))
     (setf (map-elt magit-dash-pr-columns 'ci) t)
     (should (memq 'ci (magit-dash-pr--active-columns)))))
+
+(ert-deftest magit-dash-pr-dashboard-status-repo-min-width-and-appr-fallback ()
+  "Repo keeps at least 5 cols (4 visible chars + ellipsis) and Appr falls back to reviewDecision."
+  (let* ((entries '(((:repo "owner/long-repo-name") [])))
+         (fmt (magit-dash-pr-dashboard--build-format 60 entries)))
+    (should (>= (cadr (aref fmt 0)) 5)))
+  (should (equal "✓" (substring-no-properties
+                      (magit-dash-pr-dashboard--format-approvals
+                       nil '((reviewDecision . "APPROVED"))))))
+  (should (equal "!" (substring-no-properties
+                      (magit-dash-pr-dashboard--format-approvals
+                       nil '((reviewDecision . "CHANGES_REQUESTED"))))))
+  (should (equal "0/?" (substring-no-properties
+                        (magit-dash-pr-dashboard--format-approvals
+                         nil '((reviewDecision . "REVIEW_REQUIRED")))))))
+
+(ert-deftest magit-dash-pr-dashboard-status-collect-fills-missing-rows ()
+  "After author batch completes, missing rows are fetched individually to populate Appr/Thr."
+  (let ((fetched nil)
+        batch-done)
+    (cl-letf (((symbol-function 'magit-dash-pr-status-collect-all-async)
+               (lambda (on-done &rest _) (setq batch-done on-done) #'ignore))
+              ((symbol-function 'magit-dash-pr-dashboard--refresh-status)
+               (lambda (_buf key _pr _dir done)
+                 (push key fetched)
+                 (funcall done))))
+      (with-temp-buffer
+        (magit-dash-pr-dashboard-mode)
+        (setq tabulated-list-entries
+              (list (magit-dash-pr-dashboard--build-entry '((number . 1)) "o/r")
+                    (magit-dash-pr-dashboard--build-entry '((number . 2)) "o/r")))
+        (magit-dash-pr-dashboard--set-status "o/r" 1 '(:approvals 1 :required 1))
+        (magit-dash-pr-dashboard--collect-statuses (current-buffer) "/d")
+        (funcall batch-done nil)
+        (should (equal '(("o/r" . 2)) fetched))))))
 
 (provide 'test-magit-dash-pr-dashboard-status)
 ;;; test-magit-dash-pr-dashboard-status.el ends here

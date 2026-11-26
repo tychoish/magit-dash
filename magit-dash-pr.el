@@ -422,7 +422,7 @@ Can be:
   :group 'magit-dash)
 
 (defconst magit-dash-pr--default-columns
-  '((org . nil) (repo . t) (pr . t) (author . t) (ci . nil) (title . t) (base . nil) (worktree . t) (updated . t) (age . nil) (comments . t) (review . t) (approvals . t) (threads . t) (new . nil) (status . t))
+  '((org . nil) (repo . t) (pr . t) (author . t) (ci . nil) (status . t) (drift . t) (title . t) (base . nil) (worktree . t) (updated . t) (age . nil) (comments . t) (review . t) (approvals . t) (threads . t) (new . nil))
   "Default enabled state of each PR dashboard column.
 Columns missing from a persisted `magit-dash-pr-columns' fall back to this.")
 
@@ -433,8 +433,11 @@ Persisted across sessions via `savehist-additional-variables'.")
 
 
 (defconst magit-dash-pr--all-columns
-  '(org repo pr author ci status title base worktree updated age comments review approvals threads new)
-  "All available PR dashboard columns in display order.")
+  '(org repo pr author ci status drift title base worktree updated age comments review approvals threads new)
+  "All available PR dashboard columns in display order.
+Grouped into identity (org, repo, pr, author), branch/CI status (ci, status,
+drift), details (title, base, worktree, updated, age, comments), and review
+status (review, approvals, threads, new).")
 
 (defconst magit-dash-pr--column-defs
   '((org      . ("Org"     10 t))
@@ -443,6 +446,8 @@ Persisted across sessions via `savehist-additional-variables'.")
     (author   . ("Author"  14 t))
     (base     . ("Base"    12 t))
     (ci       . ("CI"      3  t))
+    (status   . ("Status"  14 t))
+    (drift    . ("Drift"   8  t))
     (title    . ("Title"   38 t))
     (worktree . ("WT"      3  t))
     (updated  . ("Updated" 8  nil))
@@ -451,8 +456,7 @@ Persisted across sessions via `savehist-additional-variables'.")
     (review   . ("Review"  14 t))
     (approvals . ("Appr"   6  t))
     (threads  . ("Thr"     3  t))
-    (new      . ("New"     4  t))
-    (status   . ("Status"  26 t)))
+    (new      . ("New"     4  t)))
   "Alist of COLUMN-SYMBOL to default (LABEL WIDTH SORTABLE) for PR columns.
 Org and Repo widths are computed dynamically in
 `magit-dash-pr-dashboard--build-format'.")
@@ -673,11 +677,12 @@ Uses active columns.  WIDTH is available window width; when nil,
                              (+ acc (cadr (alist-get col magit-dash-pr--column-defs)))
                            acc))
                        active 0))
-         (avail-repo (max (length "Repo")
+         (min-repo-width 5)
+         (avail-repo (max min-repo-width
                           (- (or width (window-width)) (+ fixed-width org-width 2))))
-         (repo-cap (and raw-repo (> raw-repo 0) (max (length "Repo") (+ raw-repo 3))))
+         (repo-cap (and raw-repo (> raw-repo 0) (max min-repo-width (+ raw-repo 3))))
          (repo-width (if repo-cap
-                         (min avail-repo repo-cap)
+                         (max min-repo-width (min avail-repo repo-cap))
                        (max 12 avail-repo))))
     (apply #'vector
            (seq-map (lambda (col)
@@ -840,17 +845,32 @@ A nil value records an unsuccessful attempt until the next refresh.")
 (defvar-local magit-dash-pr-dashboard--comparison-pending nil
   "Hash table of SHA comparison keys currently being fetched.")
 
+(defun magit-dash-pr-dashboard--format-drift (pr repo)
+  "Format base/head commit drift for PR in REPO.
+Returns an empty string when counts are unknown or the branch is up to date
+(0 ahead and 0 behind)."
+  (let ((counts (and magit-dash-pr-dashboard--comparisons
+                     (map-elt magit-dash-pr-dashboard--comparisons
+                              (list repo (map-elt pr 'baseRefOid)
+                                    (map-elt pr 'headRefOid))))))
+    (if (not (consp counts))
+        ""
+      (let ((ahead (car counts))
+            (behind (cdr counts)))
+        (if (and (zerop ahead) (zerop behind))
+            ""
+          (propertize
+           (concat (when (> ahead 0) (format "↑%d" ahead))
+                   (when (> behind 0) (format "↓%d" behind)))
+           'help-echo (format "%d ahead, %d behind the PR base" ahead behind)))))))
+
 (defun magit-dash-pr-dashboard--format-status (pr repo status)
-  "Return combined merge status for PR in REPO using cached review STATUS.
-Stack relationships are inferred only from PRs currently displayed in REPO.
-Missing mergeability or comparison counts are displayed explicitly as unknown."
+  "Return combined branch/CI status for PR in REPO using cached review STATUS.
+Shows CI glyph, plus `conflict' only when conflicting and `stack#N' only
+when a stack relationship exists among displayed PRs in REPO."
   (let* ((number (map-elt pr 'number))
          (base (map-elt pr 'baseRefName))
          (head (map-elt pr 'headRefName))
-         (counts (and magit-dash-pr-dashboard--comparisons
-                      (map-elt magit-dash-pr-dashboard--comparisons
-                               (list repo (map-elt pr 'baseRefOid)
-                                     (map-elt pr 'headRefOid)))))
          (related (seq-find
                    (lambda (entry)
                      (let ((other (plist-get (car entry) :pr)))
@@ -863,23 +883,16 @@ Missing mergeability or comparison counts are displayed explicitly as unknown."
          (conflict (or (equal mergeable "CONFLICTING")
                        (equal (map-elt pr 'mergeStateStatus) "DIRTY"))))
     (string-join
-     (list (magit-dash-pr-dashboard--format-ci
-            (or (magit-dash-pr--parse-status-rollup (map-elt pr 'statusCheckRollup))
-                (plist-get status :ci)))
-           (cond (conflict (propertize "conflict" 'face 'error))
-                 ((equal mergeable "MERGEABLE") "clean")
-                 (t (propertize "merge?" 'face 'shadow)))
-           (propertize
-            (if (consp counts)
-                (format "↑%d↓%d" (car counts) (cdr counts))
-              "↑?↓?")
-            'help-echo "Commits ahead/behind the PR base; ? means not yet available")
-           (if related
-               (propertize
-                (format "stack#%d" (map-elt (plist-get (car related) :pr) 'number))
-                'help-echo "Related PR in the displayed stack (matching base/head branches)")
-             (propertize "stack-" 'face 'shadow
-                         'help-echo "No stack relationship among displayed PRs")))
+     (delq nil
+           (list (magit-dash-pr-dashboard--format-ci
+                  (or (magit-dash-pr--parse-status-rollup (map-elt pr 'statusCheckRollup))
+                      (plist-get status :ci)))
+                 (when conflict
+                   (propertize "conflict" 'face 'error))
+                 (when related
+                   (propertize
+                    (format "stack#%d" (map-elt (plist-get (car related) :pr) 'number))
+                    'help-echo "Related PR in the displayed stack (matching base/head branches)"))))
      " ")))
 
 (defun magit-dash-pr-dashboard--finish-comparison (buf dir pending key output)
@@ -1039,31 +1052,38 @@ row replaces a warm-start one."
                 (list key (plist-get pr key)))
               magit-dash-pr-dashboard--status-keys))
 
-(defun magit-dash-pr-dashboard--format-approvals (status)
+(defun magit-dash-pr-dashboard--format-approvals (status &optional pr)
   "Format the approvals cell for STATUS as approved/required.
 A trailing `!' marks requested changes; requested reviewers are in the
-help text.  Blank without a valid STATUS."
-  (if (not (and (magit-dash-pr-dashboard--valid-status-p status)
-                (numberp (plist-get status :approvals))))
-      ""
-    (let* ((approvals (plist-get status :approvals))
-           (required (plist-get status :required))
-           (changes (plist-get status :changes-requested))
-           (blocked (and changes (not (eql changes 0))))
-           (text (concat (if (numberp required)
-                             (format "%d/%d" approvals required)
-                           (number-to-string approvals))
-                         (if blocked "!" "")))
-           (requested (plist-get status :requested)))
-      (propertize text
-                  'face (cond
-                         (blocked 'error)
-                         ((and (numberp required) (>= approvals required)) 'success)
-                         (t 'warning))
-                  'help-echo (concat (if blocked "Changes requested. " "")
-                                     (if requested
-                                         (concat "Requested: " (string-join requested ", "))
-                                       "No pending review requests"))))))
+help text.  When STATUS is absent, falls back to `reviewDecision' on PR."
+  (if (and (magit-dash-pr-dashboard--valid-status-p status)
+           (numberp (plist-get status :approvals)))
+      (let* ((approvals (plist-get status :approvals))
+             (required (plist-get status :required))
+             (changes (plist-get status :changes-requested))
+             (blocked (and changes (not (eql changes 0))))
+             (text (concat (if (numberp required)
+                               (format "%d/%d" approvals required)
+                             (number-to-string approvals))
+                           (if blocked "!" "")))
+             (requested (plist-get status :requested)))
+        (propertize text
+                    'face (cond
+                           (blocked 'error)
+                           ((and (numberp required) (>= approvals required)) 'success)
+                           (t 'warning))
+                    'help-echo (concat (if blocked "Changes requested. " "")
+                                       (if requested
+                                           (concat "Requested: " (string-join requested ", "))
+                                         "No pending review requests"))))
+    (pcase (and pr (map-elt pr 'reviewDecision))
+      ("APPROVED"
+       (propertize "✓" 'face 'success 'help-echo "Approved"))
+      ("CHANGES_REQUESTED"
+       (propertize "!" 'face 'error 'help-echo "Changes requested"))
+      ("REVIEW_REQUIRED"
+       (propertize "0/?" 'face 'warning 'help-echo "Review required"))
+      (_ ""))))
 
 (defun magit-dash-pr-dashboard--format-threads (status)
   "Format the open unresolved thread count of STATUS; blank when zero or unknown."
@@ -1574,8 +1594,10 @@ marks freshly fetched data and is never dimmed."
                                    (plist-get status :ci))))
                              ('status
                               (magit-dash-pr-dashboard--format-status pr repo-name status))
+                             ('drift
+                              (magit-dash-pr-dashboard--format-drift pr repo-name))
                              ('approvals
-                              (magit-dash-pr-dashboard--format-approvals status))
+                              (magit-dash-pr-dashboard--format-approvals status pr))
                              ('threads
                               (magit-dash-pr-dashboard--format-threads status))
                              ('new
@@ -1979,22 +2001,64 @@ match are left blank."
         (when changed
           (magit-dash-pr-dashboard--rebuild-keys changed))))))
 
+(defun magit-dash-pr-dashboard--collect-missing-statuses (buf dir cancelled-p)
+  "Fetch review status for rows in BUF that still lack one, using DIR.
+CANCELLED-P is a zero-arg predicate; stops launching tasks once non-nil."
+  (when (and (buffer-live-p buf) (not (funcall cancelled-p)))
+    (let ((missing
+           (with-current-buffer buf
+             (seq-filter
+              (lambda (entry)
+                (let ((id (car entry)))
+                  (and (stringp (plist-get id :repo))
+                       (integerp (plist-get id :number))
+                       (not (magit-dash-pr-dashboard--meaningful-status-p
+                             (magit-dash-pr-dashboard--status
+                              (plist-get id :repo) (plist-get id :number)))))))
+              (or magit-dash-pr-dashboard--all-entries
+                  tabulated-list-entries)))))
+      (when missing
+        (magit-dash-pr--run-limited
+         (seq-map
+          (lambda (entry)
+            (let* ((id (car entry))
+                   (key (magit-dash-pr-dashboard--entry-key id))
+                   (pr (plist-get id :pr)))
+              (lambda (done)
+                (if (or (funcall cancelled-p) (not (buffer-live-p buf)))
+                    (funcall done)
+                  (magit-dash-pr-dashboard--refresh-status buf key pr dir done)))))
+          missing)
+         magit-dash-pr-refresh-max-processes)))))
+
 (defun magit-dash-pr-dashboard--collect-statuses (buf dir)
-  "Collect review status for the author's open PRs into BUF's rows.
-Rows fill as results arrive.  Cancels a collection still running for BUF."
+  "Collect review status for open PRs into BUF's rows.
+Runs the author batch first, then fills any remaining displayed rows
+(such as other authors' PRs) via `magit-dash-pr-status-fetch-one'.
+Cancels any collection still running for BUF."
   (require 'magit-dash-pr-status)
   (with-current-buffer buf
     (magit-dash-pr-dashboard--cancel-status-collection)
-    (setq magit-dash-pr-dashboard--status-cancel
-          (magit-dash-pr-status-collect-all-async
-           (lambda (prs)
-             (magit-dash-pr-dashboard--fill-statuses buf prs))
-           (lambda (err)
-             (message "magit-gh: review status unavailable: %s" err))
-           dir
-           #'ignore
-           (lambda (prs _notes _pending)
-             (magit-dash-pr-dashboard--fill-statuses buf prs))))))
+    (let* ((cancelled nil)
+           (cancel-batch
+            (magit-dash-pr-status-collect-all-async
+             (lambda (prs)
+               (unless cancelled
+                 (magit-dash-pr-dashboard--fill-statuses buf prs)
+                 (magit-dash-pr-dashboard--collect-missing-statuses
+                  buf dir (lambda () cancelled))))
+             (lambda (err)
+               (message "magit-gh: review status unavailable: %s" err))
+             dir
+             #'ignore
+             (lambda (prs _notes _pending)
+               (unless cancelled
+                 (magit-dash-pr-dashboard--fill-statuses buf prs))))))
+      (setq magit-dash-pr-dashboard--status-cancel
+            (lambda ()
+              (setq cancelled t)
+              (when (functionp cancel-batch)
+                (funcall cancel-batch)))))))
 
 (defun magit-dash-pr-dashboard--refresh-status (buf key pr dir &optional done)
   "Fetch the status of KEY (REPO . NUMBER) for BUF and store it with PR.
