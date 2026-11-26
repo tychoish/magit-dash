@@ -16,6 +16,11 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+    env:
+      # An explicit list replaces the action's Package-Requires discovery.
+      ELISP_CI_DEPENDENCIES: >-
+        hitl magit annotated-completing-read gen mcpkit sprite magit-dash
+        org transient projectile diff-review
     strategy:
       fail-fast: false
       matrix:
