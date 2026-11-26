@@ -1276,10 +1276,60 @@ Returns (:uncommitted BOOL :untracked BOOL :submodule-dirty BOOL)."
           :untracked untracked
           :submodule-dirty submodule-dirty)))
 
+(defun magit-dash--other-remote-refs (branch branch-info remote-refs remotes)
+  "Return BRANCH's existing tracking refs on other configured REMOTES.
+BRANCH-INFO lists local refs with tab-separated upstream remote names.
+REMOTE-REFS lists full remote ref names.  The primary remote is the one
+used by @{u} (the existing ↑/↓ comparison), or origin when unset."
+  (unless (string-empty-p branch)
+    (let* ((local-ref (concat "refs/heads/" branch "\t"))
+           (primary (when-let* ((line (seq-find
+                                      (lambda (line) (string-prefix-p local-ref line))
+                                      branch-info)))
+                      (substring line (length local-ref))))
+           (primary (if (or (null primary) (string-empty-p primary))
+                        "origin"
+                      primary)))
+      (seq-keep
+       (lambda (remote)
+         (let ((ref (concat "refs/remotes/" remote "/" branch)))
+           (when (and (not (equal remote primary)) (member ref remote-refs))
+             ref)))
+       remotes))))
+
+(defun magit-dash--remote-behind-count (output)
+  "Return the nonnegative count in Git OUTPUT, or nil when unavailable."
+  (when (and (stringp output)
+             (string-match-p "\\`[0-9]+\\'" (string-trim output)))
+    (string-to-number output)))
+
+(defun magit-dash--collect-other-remote-behind-async (path refs callback)
+  "Count commits missing from HEAD in REFS at PATH, then call CALLBACK.
+Return an alist of short remote ref names and positive behind counts.
+A nil count is explicitly unknown; zero counts are omitted."
+  (let (counts run)
+    (setq run
+          (lambda (remaining)
+            (if-let* ((ref (car remaining)))
+                (magit-dash--run-git
+                 path (list "rev-list" "--count" (concat "HEAD.." ref))
+                 (lambda (output)
+                   (let ((count (magit-dash--remote-behind-count output)))
+                     (when (or (null count) (> count 0))
+                       (push (cons (substring ref (length "refs/remotes/")) count) counts)))
+                   (funcall run (cdr remaining)))
+                 (lambda (_output _code)
+                   (push (cons (substring ref (length "refs/remotes/")) nil) counts)
+                   (funcall run (cdr remaining))))
+              (funcall callback (nreverse counts)))))
+    (funcall run refs)))
+
 (defun magit-dash--collect-stats (repo)
   "Synchronously collect git stats for REPO and store them in the cache.
 Returns a plist with keys :branch :remote-origin :behind :ahead :dirty
-:uncommitted-files :fetch-age :updated-age :head-hash :recent-log."
+:uncommitted-files :fetch-age :updated-age :head-hash :recent-log.
+:other-remote-behind lists missing commits on other remotes of this branch;
+its counts are positive integers or nil when unavailable."
   (let* ((path (magit-dash-repo-path repo))
          (default-directory path)
          (branch (or (magit-git-string "branch" "--show-current") ""))
@@ -1290,6 +1340,18 @@ Returns a plist with keys :branch :remote-origin :behind :ahead :dirty
          (ahead (string-to-number
                  (or (ignore-errors (magit-git-string "rev-list" "--count" "@{u}..HEAD"))
                      "0")))
+         (other-remote-behind
+          (seq-keep
+           (lambda (ref)
+             (let ((count (magit-dash--remote-behind-count
+                           (magit-git-string "rev-list" "--count" (concat "HEAD.." ref)))))
+               (when (or (null count) (> count 0))
+                 (cons (substring ref (length "refs/remotes/")) count))))
+           (magit-dash--other-remote-refs
+            branch
+            (magit-git-lines "for-each-ref" "--format=%(refname)%09%(upstream:remotename)" "refs/heads")
+            (magit-git-lines "for-each-ref" "--format=%(refname)" "refs/remotes")
+            (magit-git-lines "remote"))))
          (porcelain-lines (magit-git-lines "status" "--porcelain"))
          (classified (magit-dash--classify-porcelain-status path porcelain-lines))
          (dirty (not (null porcelain-lines)))
@@ -1302,6 +1364,7 @@ Returns a plist with keys :branch :remote-origin :behind :ahead :dirty
                       :remote-origin remote-origin
                       :behind behind
                       :ahead ahead
+                      :other-remote-behind other-remote-behind
                       :dirty dirty
                       :commit-ts (if (string-empty-p commit-ts) 0 (string-to-number commit-ts))
                       :uncommitted (plist-get classified :uncommitted)
@@ -1328,7 +1391,10 @@ accumulating their outputs before assembling the stats plist."
                          '("rev-list" "--count" "@{u}..HEAD")
                          '("status" "--porcelain")
                          '("log" "--oneline" "-10")
-                         '("log" "-1" "--format=%ct")))
+                         '("log" "-1" "--format=%ct")
+                         '("for-each-ref" "--format=%(refname)%09%(upstream:remotename)" "refs/heads")
+                         '("for-each-ref" "--format=%(refname)" "refs/remotes")
+                         '("remote")))
 	 outputs run)
     (setq run
           (lambda (remaining)
@@ -1365,8 +1431,16 @@ accumulating their outputs before assembling the stats plist."
                                     :head-hash (magit-dash--head-hash path)
                                     :fetched-at (float-time)
                                     :recent-log recent-log)))
-                  (magit-dash-gh--cache-set-if-current path :stats stats token)
-                  (funcall callback stats))
+                  (magit-dash--collect-other-remote-behind-async
+                   path
+                   (magit-dash--other-remote-refs
+                    branch (split-string (or (nth 7 outputs) "") "\n" t)
+                    (split-string (or (nth 8 outputs) "") "\n" t)
+                    (split-string (or (nth 9 outputs) "") "\n" t))
+                   (lambda (counts)
+                     (setq stats (plist-put stats :other-remote-behind counts))
+                     (magit-dash-gh--cache-set-if-current path :stats stats token)
+                     (funcall callback stats))))
               (magit-dash--run-git
                path (car remaining)
                (lambda (output)
@@ -2578,18 +2652,34 @@ See `magit-dash-render-branch-name-as-basename'."
           (magit-dash--format-age (plist-get stats :fetch-age))
           (magit-dash--format-age (plist-get stats :updated-age))))
 
-(defun magit-dash--format-status (ahead behind dirty &optional untracked submodule-dirty is-pr)
+(defun magit-dash--format-status (ahead behind dirty &optional untracked submodule-dirty is-pr other-remote-behind)
   "Format AHEAD, BEHIND, and dirty states into a compact status indicator.
 Each non-zero/non-nil value contributes a segment; segments are joined with
 a single space.  Returns an empty string when everything is clean and synced.
 DIRTY may be non-nil for uncommitted changes, or UNTRACKED and SUBMODULE-DIRTY
 can distinguish untracked files (\"?\") and submodule updates (\"S\").
-IS-PR when non-nil adds `magit-dash-status-pr-badge' (\"PR\")."
+IS-PR when non-nil adds `magit-dash-status-pr-badge' (\"PR\").
+OTHER-REMOTE-BEHIND maps remote refs to missing commits, displayed as →N.
+The ↑/↓ counts compare @{u}; → counts compare the exact current branch on
+other remotes.  Each → tooltip names its ref; nil counts display →?."
   (let ((parts nil))
     (when (> ahead 0)
       (push (propertize (format "↑%d" ahead) 'face 'warning) parts))
     (when (> behind 0)
       (push (propertize (format "↓%d" behind) 'face 'font-lock-comment-face) parts))
+    (seq-do
+     (lambda (entry)
+       (push (propertize
+              (if (cdr entry)
+                  (format "→%d" (cdr entry))
+                "→?")
+              'face 'font-lock-comment-face
+              'help-echo (if (cdr entry)
+                             (format "%s: HEAD is behind by %d commit(s)"
+                                     (car entry) (cdr entry))
+                           (format "%s: behind count unavailable" (car entry))))
+             parts))
+     other-remote-behind)
     (when (or (and (not untracked) (not submodule-dirty) (eq dirty t))
               (and (plistp dirty) (plist-get dirty :uncommitted))
               (and (not (plistp dirty)) dirty))
@@ -2733,8 +2823,9 @@ Rows are matched here by repo path instead, with line/column fallbacks."
 (defun magit-dash--build-format (repos)
   "Return the tabulated-list format vector for REPOS using enabled columns.
 Name and Branch are sized to their longest value (Name + 2, Branch + 1),
-but each is capped at 25% of the window width.  All other columns have
-fixed widths and are right-aligned."
+but each is capped at 25% of the window width.  Status widens for extra
+remote divergence indicators.  Other columns have fixed widths and are
+right-aligned."
   (let* ((window-cols (or (ignore-errors
                             (window-width (or (get-buffer-window (current-buffer) t)
                                               (selected-window))))
@@ -2757,12 +2848,28 @@ fixed widths and are right-aligned."
                                             "")))))
                       repos 0))
          (name-width (min cap (max (length "Name") (+ raw-name 2))))
-         (branch-width (min cap (max 8 (1+ raw-branch)))))
+         (branch-width (min cap (max 8 (1+ raw-branch))))
+         (status-width
+          (seq-reduce
+           (lambda (width repo)
+             (max width
+                  (+ (cadr (alist-get 'status magit-dash--column-defs))
+                     (seq-reduce
+                      (lambda (extra entry)
+                        (+ extra 1 (length (if (cdr entry)
+                                              (format "→%d" (cdr entry))
+                                            "→?"))))
+                      (plist-get (magit-dash-gh--cache-get
+                                  (magit-dash-repo-path repo) :stats)
+                                 :other-remote-behind)
+                      0))))
+           repos (cadr (alist-get 'status magit-dash--column-defs)))))
     (apply #'vector
            (seq-map (lambda (col)
                       (pcase col
                         ('name   `("Name"   ,name-width   t))
                         ('branch `("Branch" ,branch-width t))
+                        ('status `("Status" ,status-width nil :right-align t))
                         (_       (append (alist-get col magit-dash--column-defs)
                                          '(:right-align t)))))
                     (magit-dash--active-columns)))))
@@ -3143,7 +3250,8 @@ until `magit-dash--populate-stats-async' updates them."
                             dirty)
                           untracked
                           sm-dirty
-                          is-pr)))
+                          is-pr
+                          (plist-get stats :other-remote-behind))))
                       ('worktree
                        (magit-dash--format-worktree repo))
                       ('sync
@@ -3180,6 +3288,10 @@ until `magit-dash--populate-stats-async' updates them."
                          (magit-dash--build-entry repo)
                        entry))
                    tabulated-list-entries))
+    (let ((format (magit-dash--build-format (seq-map #'car tabulated-list-entries))))
+      (unless (equal tabulated-list-format format)
+        (setq tabulated-list-format format)
+        (tabulated-list-init-header)))
     (magit-dash--print)))
 
 (defun magit-dash--update-entry-all-buffers (repo)
