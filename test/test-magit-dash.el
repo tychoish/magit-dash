@@ -2157,8 +2157,6 @@ they are not consulted even when their own auto-* flags are set."
 
 (ert-deftest magit-dash/agent-shell-project-buffers-p-checks-functions ()
   "`magit-dash--agent-shell-project-buffers-p' delegates to available project buffer fns."
-  (require 'agent-shell-workflow nil t)
-  (require 'agent-shell-menu nil t)
   (let ((repo (magit-dash-repo--make :name "r" :path "/tmp/r")))
     ;; Menu project buffers returns non-nil
     (cl-letf* (((symbol-function 'magit-dash--repo-at-point) (lambda () repo))
@@ -3601,6 +3599,16 @@ The bug was that add-text-properties returns t, not the modified string."
 
 ;;;; Missing repos and git clone operations
 
+(defun magit-dash-test--call-with-temp-git-repo (fn)
+  "Create a temporary git repository and call FN with its path."
+  (let ((dir (make-temp-file "magit-dash-test-repo-" t)))
+    (unwind-protect
+        (progn
+          (unless (zerop (call-process "git" nil nil nil "init" "-q" dir))
+            (error "git init failed in %s" dir))
+          (funcall fn dir))
+      (delete-directory dir t))))
+
 (ert-deftest magit-dash/repo-missing-p-detects-missing-dir ()
   "repo-missing-p returns t for non-existent directory."
   (let ((repo (magit-dash-repo--make :name "nonexistent" :path "/tmp/definitely-not-here-12345")))
@@ -3618,8 +3626,10 @@ The bug was that add-text-properties returns t, not the modified string."
 
 (ert-deftest magit-dash/clone-repo-errors-when-destination-exists ()
   "clone-repo signals user-error when repository already exists at path."
-  (let ((repo (magit-dash-repo--make :name "exists" :path default-directory)))
-    (should-error (magit-dash-clone-repo repo) :type 'user-error)))
+  (magit-dash-test--call-with-temp-git-repo
+   (lambda (dir)
+     (let ((repo (magit-dash-repo--make :name "exists" :path dir)))
+       (should-error (magit-dash-clone-repo repo) :type 'user-error)))))
 
 (ert-deftest magit-dash/clone-repo-spawns-git-clone ()
   "clone-repo runs git clone with the specified URL and path."
@@ -3742,8 +3752,10 @@ The bug was that add-text-properties returns t, not the modified string."
 
 (ert-deftest magit-dash/bootstrap-repo-errors-when-repo-exists ()
   "bootstrap-repo signals user-error when destination repository already exists."
-  (let ((repo (magit-dash-repo--make :name "exists" :path default-directory :repo "/srv/git/exists.git")))
-    (should-error (magit-dash-bootstrap-repo repo) :type 'user-error)))
+  (magit-dash-test--call-with-temp-git-repo
+   (lambda (dir)
+     (let ((repo (magit-dash-repo--make :name "exists" :path dir :repo "/srv/git/exists.git")))
+       (should-error (magit-dash-bootstrap-repo repo) :type 'user-error)))))
 
 (ert-deftest magit-dash/bootstrap-repo-delegates-to-clone-repo ()
   "bootstrap-repo calls clone-repo with upstream repo and destination."
