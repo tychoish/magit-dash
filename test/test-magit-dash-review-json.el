@@ -71,11 +71,20 @@
      (let ((copy (magit-dash-review-json-deep-copy arg)))
        (unless (map-elt copy "cr_id")
          (setf (map-elt copy "cr_id") (setq magit-dash-review-json-test/next-id (1+ magit-dash-review-json-test/next-id))))
-       (setf magit-dash-review-json-test/store
+       (setq magit-dash-review-json-test/store
              (append (seq-remove (lambda (c) (equal (map-elt c "cr_id") (map-elt copy "cr_id")))
                                  magit-dash-review-json-test/store)
                      (list copy)))
-       copy))))
+       copy))
+    ('delete
+     (when magit-dash-review-json-test/fail
+       (error "network down"))
+     (let ((found (seq-some (lambda (c) (equal (map-elt c "cr_id") arg))
+                            magit-dash-review-json-test/store)))
+       (setq magit-dash-review-json-test/store
+             (seq-remove (lambda (c) (equal (map-elt c "cr_id") arg))
+                         magit-dash-review-json-test/store))
+       found))))
 
 (defmacro magit-dash-review-json-test/with-stub (&rest body)
   "Run BODY with the stubbed code-review and an empty store."
@@ -672,13 +681,16 @@
 (defmacro magit-dash-review-json-test/with-fake-api (&rest body)
   "Run BODY with `code-review-api-*' faked in memory and the default seam."
   (declare (indent 0))
-  `(let ((magit-dash-review-json-test/fake (list :comments nil :verdict nil :viewed nil :analysis nil :worktree t))
+  `(let ((magit-dash-review-json-test/fake (list :comments nil :pullreq nil :verdict nil :viewed nil :analysis nil :worktree t))
          (magit-dash-review-json-code-review-function #'magit-dash-review-json-code-review-default)
          (magit-dash-review-json-source-function (lambda (_key) magit-dash-review-json-test/source))
          (magit-dash-review-json-test/source nil)
          (magit-dash-review-json-dry-run nil)
          (next 1))
-     (cl-letf (((symbol-function 'code-review-api-comments)
+     (cl-letf (((symbol-function 'code-review-api-pullreq)
+                (lambda (_repo _number)
+                  (copy-tree (plist-get magit-dash-review-json-test/fake :pullreq))))
+               ((symbol-function 'code-review-api-comments)
                 (lambda (_repo _number)
                   (copy-tree (plist-get magit-dash-review-json-test/fake :comments))))
                ((symbol-function 'code-review-api-upsert-comment)
@@ -711,6 +723,16 @@
                                                        (plist-get magit-dash-review-json-test/fake :comments))
                                            (list new))))
                       new))))
+               ((symbol-function 'code-review-api-delete-comment)
+                (lambda (_repo _number id &rest keys)
+                  (let* ((comments (plist-get magit-dash-review-json-test/fake :comments))
+                         (target (seq-find (lambda (c) (equal (plist-get c :id) id)) comments)))
+                    (when (and target (not (eq (plist-get target :status) 'draft)))
+                      (user-error "Comment %s was sent to the forge and is read-only" id))
+                    (when (and target (not (plist-get keys :dry-run)))
+                      (plist-put magit-dash-review-json-test/fake :comments
+                                 (seq-remove (lambda (c) (equal (plist-get c :id) id)) comments)))
+                    (and target t))))
                ((symbol-function 'code-review-api-verdict)
                 (lambda (_repo _number) (plist-get magit-dash-review-json-test/fake :verdict)))
                ((symbol-function 'code-review-api-set-verdict)
@@ -1060,6 +1082,7 @@
   (let ((saved (seq-map (lambda (f) (cons f (symbol-function f)))
                         (seq-filter #'fboundp
                                     '(code-review-api-comments code-review-api-upsert-comment
+                                      code-review-api-pullreq code-review-api-delete-comment
                                       code-review-api-verdict code-review-api-set-verdict
                                       code-review-api-viewed code-review-api-set-viewed
                                       code-review-api-analysis code-review-api-analysis-available-p)))))
@@ -1134,9 +1157,12 @@
     (add-to-list 'load-path (expand-file-name "test" dir))
     (unless (and (locate-library "code-review-api") (locate-library "code-review-test-helpers"))
       (ert-fail (format "%s exists but code-review-api or its test helpers are missing" dir)))
-    (require 'code-review)
-    (require 'code-review-api)
-    (require 'code-review-test-helpers))
+    (let ((load-prefer-newer t))
+      (require 'code-review)
+      (require 'code-review-api)
+      (unless (fboundp 'code-review-api-pullreq)
+        (load (expand-file-name "code-review-api.el" dir) nil t))
+      (require 'code-review-test-helpers)))
   (eval
    '(code-review-test--with-db
       (code-review-db--pullreq-create
@@ -1224,6 +1250,277 @@
                  plist)))
       (magit-dash-review-json--op-write '("o/r" . 1) comment))
     (should (equal '("draft reply") bodies))))
+
+;;; cr-api-pullreq tests
+
+(ert-deftest magit-dash-review-json/api-pullreq-populates-code-review-metadata ()
+  (magit-dash-review-json-test/with-fake-api
+    (plist-put magit-dash-review-json-test/fake :pullreq
+               '(:id "PR_uuid1" :account "alice" :head-oid "abc" :url "u" :state "OPEN"))
+    (let* ((table (magit-dash-review-json-export '("owner/repo" . 42)))
+           (cr (map-elt table "code_review")))
+      (should (hash-table-p cr))
+      (should (equal "PR_uuid1" (map-elt cr "pullreq_id")))
+      (should (equal "alice" (map-elt cr "account"))))
+    ;; Does not overwrite existing values or write nil account.
+    (let* ((existing (magit-dash-review-json-test/table))
+           (cr-in (make-hash-table :test #'equal)))
+      (setf (map-elt cr-in "account") "kept-account")
+      (setf (map-elt existing "code_review") cr-in)
+      (setq magit-dash-review-json-test/source existing)
+      (plist-put magit-dash-review-json-test/fake :pullreq
+                 '(:id "PR_uuid2" :account nil :head-oid "def"))
+      (let ((cr-out (map-elt (magit-dash-review-json-export '("owner/repo" . 42)) "code_review")))
+        (should (equal "PR_uuid2" (map-elt cr-out "pullreq_id")))
+        (should (equal "kept-account" (map-elt cr-out "account")))))
+    ;; Nil account without existing does not insert null key.
+    (setq magit-dash-review-json-test/source nil)
+    (plist-put magit-dash-review-json-test/fake :pullreq '(:id "PR_uuid3" :account nil))
+    (let ((cr-out (map-elt (magit-dash-review-json-export '("owner/repo" . 42)) "code_review")))
+      (should (equal "PR_uuid3" (map-elt cr-out "pullreq_id")))
+      (should-not (map-contains-key cr-out "account")))))
+
+(ert-deftest magit-dash-review-json/api-pullreq-skips-with-message-when-unavailable ()
+  (let ((old (and (fboundp 'code-review-api-pullreq) (symbol-function 'code-review-api-pullreq))))
+    (unwind-protect
+        (let ((start (with-current-buffer (get-buffer-create "*Messages*") (point-max)))
+              (message-log-max t)
+              (magit-dash-review-json-code-review-function #'magit-dash-review-json-code-review-default))
+          (when old (fmakunbound 'code-review-api-pullreq))
+          (should-not (funcall magit-dash-review-json-code-review-function 'pullreq '("o/r" . 1)))
+          (should (string-match-p "skipping pullreq, code-review-api-pullreq is not available"
+                                  (with-current-buffer "*Messages*"
+                                    (buffer-substring-no-properties start (point-max))))))
+      (when old (fset 'code-review-api-pullreq old)))))
+
+(ert-deftest magit-dash-review-json/real-api-pullreq-export ()
+  "Real `code-review-api-pullreq' populates pullreq_id and account on export."
+  (let ((dir (expand-file-name "~/src/code-review")))
+    (unless (file-directory-p dir)
+      (ert-skip "~/src/code-review does not exist"))
+    (add-to-list 'load-path dir)
+    (add-to-list 'load-path (expand-file-name "test" dir))
+    (let ((load-prefer-newer t))
+      (require 'code-review)
+      (require 'code-review-api)
+      (unless (fboundp 'code-review-api-pullreq)
+        (load (expand-file-name "code-review-api.el" dir) nil t))
+      (require 'code-review-test-helpers)))
+  (eval
+   '(code-review-test--with-db
+      (code-review-db--pullreq-create
+       (code-review-github-repo :owner "owner" :repo "repo" :number "42"))
+      (let ((pr (code-review-db-get-pullreq)))
+        (oset pr saved t)
+        (code-review-db-update pr)
+        (let ((code-review-gh--pr-accounts (make-hash-table :test #'equal))
+              (code-review-gh-default-account nil))
+          (code-review-gh-register-pr-account pr "real-alice")
+          (let* ((magit-dash-review-json-code-review-function #'magit-dash-review-json-code-review-default)
+                 (magit-dash-review-json-source-function #'ignore)
+                 (exported (magit-dash-review-json-export '("owner/repo" . 42)))
+                 (cr (map-elt exported "code_review")))
+            (should (equal (oref pr id) (map-elt cr "pullreq_id")))
+            (should (equal "real-alice" (map-elt cr "account")))))))
+   t))
+
+;;; fu-draft-dedupe tests
+
+(ert-deftest magit-dash-review-json/import-dedupe-deletes-stale-draft-matching-sent-comment ()
+  (magit-dash-review-json-test/with-fake-api
+    (let* ((sent-cr-id (+ (ash 1 40) 10))
+           (dup-draft-id (+ (ash 1 44) 100))
+           (other-draft-id (+ (ash 1 44) 200))
+           (orphan-draft-id (+ (ash 1 44) 300))
+           (sent-json (magit-dash-review-json-test/comment nil "Published body"))
+           (orphan-sent (magit-dash-review-json-test/comment nil "Submitted via GraphQL"))
+           (deleted-ids nil))
+      (setf (map-elt sent-json "id") "s1")
+      (setf (map-elt sent-json "origin") "github")
+      (setf (map-elt sent-json "status") "sent")
+      (setf (map-elt sent-json "gh_comment_id") "PRRC_1")
+      (setf (map-elt sent-json "remote_id") "PRRC_1")
+      (setf (map-elt orphan-sent "id") "s2")
+      (setf (map-elt orphan-sent "origin") "github")
+      (setf (map-elt orphan-sent "status") "sent")
+      (setf (map-elt orphan-sent "gh_database_id") 999)
+      (setf (map-elt orphan-sent "path") "b.el")
+      (setf (map-elt orphan-sent "cr_id") orphan-draft-id)
+      (plist-put magit-dash-review-json-test/fake :comments
+                 (list (list :id sent-cr-id :remote-id "PRRC_1" :path "a.el" :line 3
+                             :body "Published body" :status 'sent)
+                       (list :id dup-draft-id :remote-id nil :path "a.el" :line 3
+                             :body "Published body" :status 'draft)
+                       (list :id orphan-draft-id :remote-id nil :path "b.el" :line 3
+                             :body "Submitted via GraphQL" :status 'draft)
+                       (list :id other-draft-id :remote-id nil :path "c.el" :line 9
+                             :body "Keep this unrelated draft" :status 'draft)))
+      (let ((orig-del (symbol-function 'code-review-api-delete-comment)))
+        (cl-letf (((symbol-function 'code-review-api-delete-comment)
+                   (lambda (repo number id &rest keys)
+                     (push id deleted-ids)
+                     (apply orig-del repo number id keys))))
+          (let ((result (magit-dash-review-json-import
+                         (magit-dash-review-json-test/table sent-json orphan-sent))))
+            (should (= 2 (plist-get result :deleted)))
+            (should (= 2 (plist-get result :skipped)))
+            (should (= 0 (plist-get result :added)))
+            (should (equal (sort deleted-ids #'<)
+                           (list dup-draft-id orphan-draft-id)))
+            (let ((remaining-ids (seq-map (lambda (c) (plist-get c :id))
+                                          (plist-get magit-dash-review-json-test/fake :comments))))
+              (should (equal (sort remaining-ids #'<)
+                             (list sent-cr-id other-draft-id))))))))))
+
+(ert-deftest magit-dash-review-json/import-dedupe-dry-run-reports-deleted-without-deleting ()
+  (magit-dash-review-json-test/with-fake-api
+    (let* ((dup-draft-id (+ (ash 1 44) 101))
+           (sent-json (magit-dash-review-json-test/comment nil "Already on GitHub"))
+           (delete-called nil))
+      (setf (map-elt sent-json "origin") "github")
+      (setf (map-elt sent-json "status") "sent")
+      (setf (map-elt sent-json "gh_comment_id") "PRRC_2")
+      (plist-put magit-dash-review-json-test/fake :comments
+                 (list (list :id dup-draft-id :remote-id nil :path "a.el" :line 3
+                             :body "Already on GitHub" :status 'draft)))
+      (setq magit-dash-review-json-test/source
+            (magit-dash-review-json-test/table sent-json))
+      (cl-letf (((symbol-function 'code-review-api-delete-comment)
+                 (lambda (&rest _) (setq delete-called t) t)))
+        (let ((result (magit-dash-review-json-import-dry-run '("owner/repo" . 42))))
+          (should (plist-get result :dry-run))
+          (should (= 1 (plist-get result :deleted)))
+          (should-not delete-called)
+          (should (= 1 (length (plist-get magit-dash-review-json-test/fake :comments)))))))))
+
+(ert-deftest magit-dash-review-json/import-never-deletes-for-draft-or-pending-json-comment ()
+  (magit-dash-review-json-test/with-fake-api
+    (let* ((d1-id (+ (ash 1 44) 102))
+           (d2-id (+ (ash 1 44) 103))
+           (d1 (magit-dash-review-json-test/draft "d1" "Draft body" d1-id))
+           (d2 (magit-dash-review-json-test/draft "d2" "Pending body" d2-id)))
+      (setf (map-elt d1 "status") "draft")
+      (setf (map-elt d2 "status") "pending")
+      (setf (map-elt d2 "path") "b.el")
+      (plist-put magit-dash-review-json-test/fake :comments
+                 (list (list :id d1-id :path "a.el" :line 3 :body "Draft body" :status 'draft)
+                       (list :id d2-id :path "b.el" :line 3 :body "Pending body" :status 'draft)))
+      (let ((result (magit-dash-review-json-import (magit-dash-review-json-test/table d1 d2))))
+        (should (= 0 (plist-get result :deleted)))
+        (should (= 2 (length (plist-get magit-dash-review-json-test/fake :comments))))))))
+
+(ert-deftest magit-dash-review-json/import-file-wins-overwrites-ui-draft-edit ()
+  (magit-dash-review-json-test/with-fake-api
+    (let* ((d-id (+ (ash 1 44) 104))
+           (draft (magit-dash-review-json-test/draft "d1" "File body" d-id)))
+      (plist-put magit-dash-review-json-test/fake :comments
+                 (list (list :id d-id :path "a.el" :line 3 :body "UI edited body" :status 'draft)))
+      (let ((result (magit-dash-review-json-import (magit-dash-review-json-test/table draft))))
+        (should (= 1 (plist-get result :updated)))
+        (should (= 0 (plist-get result :deleted)))
+        (should (equal "File body"
+                       (plist-get (car (plist-get magit-dash-review-json-test/fake :comments)) :body)))))))
+
+(ert-deftest magit-dash-review-json/real-api-dedupe-deletes-published-draft ()
+  "Real `code-review-api-delete-comment' prunes a published duplicate draft."
+  (let ((dir (expand-file-name "~/src/code-review")))
+    (unless (file-directory-p dir)
+      (ert-skip "~/src/code-review does not exist"))
+    (add-to-list 'load-path dir)
+    (add-to-list 'load-path (expand-file-name "test" dir))
+    (let ((load-prefer-newer t))
+      (require 'code-review)
+      (require 'code-review-api)
+      (unless (fboundp 'code-review-api-pullreq)
+        (load (expand-file-name "code-review-api.el" dir) nil t))
+      (require 'code-review-test-helpers)))
+  (eval
+   '(code-review-test--with-db
+      (code-review-db--pullreq-create
+       (code-review-github-repo :owner "owner" :repo "repo" :number "42"))
+      (let ((pr (code-review-db-get-pullreq)))
+        (oset pr saved t)
+        (code-review-db-update pr))
+      (let* ((draft (magit-dash-review-json-test/draft "d1" "Will be published"))
+             (draft-cr-id (magit-dash-review-json-draft-id draft))
+             (sent (magit-dash-review-json-test/comment nil "Will be published"))
+             (magit-dash-review-json-code-review-function #'magit-dash-review-json-code-review-default)
+             (magit-dash-review-json-dry-run nil))
+        (code-review-api-upsert-comment
+         "owner/repo" 42 (list :id draft-cr-id :path "a.el" :line 3 :body "Will be published"))
+        (should (= 1 (length (code-review-api-comments "owner/repo" 42))))
+        (setf (map-elt sent "origin") "github")
+        (setf (map-elt sent "status") "sent")
+        (setf (map-elt sent "gh_comment_id") "PRRC_real1")
+        (let* ((source (magit-dash-review-json-test/table sent))
+               (magit-dash-review-json-source-function (lambda (_key) source))
+               (dry (magit-dash-review-json-import-dry-run '("owner/repo" . 42))))
+          (should (= 1 (plist-get dry :deleted)))
+          (should (= 1 (length (code-review-api-comments "owner/repo" 42)))))
+        (let ((live (magit-dash-review-json-import (magit-dash-review-json-test/table sent))))
+          (should (= 1 (plist-get live :deleted)))
+          (should-not (code-review-api-comments "owner/repo" 42)))))
+   t))
+
+;;; fu-diff-review-buffer tests
+
+(ert-deftest magit-dash-review-json/refuse-action-errors-on-modified-buffer ()
+  (magit-dash-review-json-test/with-temp-dir
+    (let* ((file (expand-file-name "pr-1.json" dir))
+           (_ (magit-dash-review-json-write-file file (magit-dash-review-json-test/table)))
+           (before (magit-dash-review-json-test/slurp file))
+           (buf (find-file-noselect file))
+           (magit-dash-review-json-modified-buffer-action 'refuse))
+      (unwind-protect
+          (progn
+            (with-current-buffer buf (goto-char (point-max)) (insert " "))
+            (should-error (magit-dash-review-json-read-for-write file) :type 'user-error)
+            (should-error (magit-dash-review-json-write-file file (magit-dash-review-json-test/unicode-table))
+                          :type 'user-error)
+            (should (with-current-buffer buf (buffer-modified-p)))
+            (should (equal before (magit-dash-review-json-test/slurp file))))
+        (with-current-buffer buf (set-buffer-modified-p nil))
+        (kill-buffer buf)))))
+
+(ert-deftest magit-dash-review-json/write-file-cas-detects-external-modification ()
+  (magit-dash-review-json-test/with-temp-dir
+    (let ((file (expand-file-name "pr-1.json" dir)))
+      (magit-dash-review-json-write-file file (magit-dash-review-json-test/table))
+      (magit-dash-review-json-write-file file (magit-dash-review-json-test/table))
+      (let* ((bak-mid (magit-dash-review-json-test/slurp (concat file ".bak")))
+             (pair (magit-dash-review-json-read-with-stamp file))
+             (stamp (cdr pair)))
+        (with-temp-file file (insert "{\"external\":true}\n"))
+        (let ((ext (magit-dash-review-json-test/slurp file)))
+          (should-error (magit-dash-review-json-write-file
+                         file (magit-dash-review-json-test/unicode-table) stamp)
+                        :type 'magit-dash-review-json-conflict)
+          (should (equal ext (magit-dash-review-json-test/slurp file)))
+          (should (equal bak-mid (magit-dash-review-json-test/slurp (concat file ".bak"))))
+          (should-not (directory-files dir nil "\\.tmp-")))))))
+
+(ert-deftest magit-dash-review-json/read-for-write-does-not-poison-later-direct-write ()
+  (magit-dash-review-json-test/with-temp-dir
+    (let ((default-directory (file-name-as-directory dir)))
+      (call-process "git" nil nil nil "init" "-q" ".")
+      (let* ((review-dir (expand-file-name ".git/review" dir))
+             (file (expand-file-name "pr-1.json" review-dir)))
+        (magit-dash-review-json-write-file file (magit-dash-review-json-test/table))
+        (should (hash-table-p (magit-dash-review-json-read-for-write file)))
+        (should (= 0 (magit-dash-review-json-relocate-worktree dir "/nonexistent/" "/new/")))
+        (with-temp-file file (insert "{\"external\":true}\n"))
+        (magit-dash-review-json-write-file file (magit-dash-review-json-test/unicode-table))
+        (should (equal "é日😀"
+                       (map-elt (aref (map-elt (magit-dash-review-json-read-file file) "comments") 0)
+                                "body")))))))
+
+(ert-deftest magit-dash-review-json/write-file-cas-detects-missing-expected ()
+  (magit-dash-review-json-test/with-temp-dir
+    (let ((file (expand-file-name "pr-new.json" dir)))
+      (with-temp-file file (insert "{\"created\":1}\n"))
+      (should-error (magit-dash-review-json-write-file file (magit-dash-review-json-test/table) :missing)
+                    :type 'magit-dash-review-json-conflict)
+      (should (equal "{\"created\":1}\n" (magit-dash-review-json-test/slurp file))))))
 
 (provide 'test-magit-dash-review-json)
 ;;; test-magit-dash-review-json.el ends here

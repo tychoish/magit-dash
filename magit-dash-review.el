@@ -141,10 +141,27 @@ worktree."
 Comments code-review numbered on import get their cr_id written back into
 FILE, so editing one later updates it instead of adding a second copy."
   (when magit-dash-review-use-code-review-adapter
-    (let ((result (magit-dash-review-json-import merged)))
+    (let ((stamp (magit-dash-review-json-file-stamp file))
+          (result (magit-dash-review-json-import merged)))
       (when (plist-get result :assigned)
-        (magit-dash-review--write-json-file
-         file (magit-dash-review-json-apply-assigned merged result))
+        (condition-case nil
+            (magit-dash-review--write-json-file
+             file (magit-dash-review-json-apply-assigned merged result) stamp)
+          (magit-dash-review-json-conflict
+           (let* ((pair (magit-dash-review-json-read-with-stamp file))
+                  (fresh (car pair))
+                  (fresh-stamp (cdr pair))
+                  (comments (append (or (map-elt fresh "comments") []) nil))
+                  (merged-comments (or (map-elt merged "comments") [])))
+             (seq-do (lambda (pair)
+                       (when-let* ((src (and (< (car pair) (length merged-comments))
+                                             (aref merged-comments (car pair))))
+                                   (cid (map-elt src "id"))
+                                   (target (seq-find (lambda (c) (equal (map-elt c "id") cid))
+                                                     comments)))
+                         (setf (map-elt target "cr_id") (cdr pair))))
+                     (plist-get result :assigned))
+             (magit-dash-review--write-json-file file fresh fresh-stamp))))
         (magit-dash-review--refresh-visiting-buffer file)))))
 
 ;;; Core Path & Git Helpers
@@ -393,47 +410,62 @@ FILE with unsaved edits is not refreshed.  Returns the updated comment hash tabl
     (setf (map-elt reply-ht "at") timestamp)
     (setf (map-elt reply-ht "body") body)
 
-    (if (and live-buf
-             (with-current-buffer live-buf (derived-mode-p 'diff-review-mode))
-             (fboundp 'diff-review--modify-comments))
-        (with-current-buffer live-buf
-          (diff-review--modify-comments
-           (lambda ()
-             (let ((target (seq-find
-                            (lambda (c)
-                              (or (equal (map-elt c "id") comment-id)
-                                  (equal (map-elt c "gh_thread_id") comment-id)))
-                            diff-review--comments)))
-               (unless target
-                 (error "No comment with id %s in %s" comment-id file))
-               (setf (map-elt target "replies")
-                     (vconcat (or (map-elt target "replies") [])
-                              (vector reply-ht)))
-               (when should-resolve
-                 (setf (map-elt target "resolved") t)
-                 (setf (map-elt target "local_resolved") t)
-                 (map-delete target "gh_reopened"))
-               (setq updated-comment target)))))
-      (let* ((data (magit-dash-review--read-for-write file))
-             (comments (or (map-elt data "comments") []))
-             (target (seq-find
-                      (lambda (c)
-                        (or (equal (map-elt c "id") comment-id)
-                            (equal (map-elt c "gh_thread_id") comment-id)))
-                      comments)))
-        (unless target
-          (error "No comment with id %s in %s" comment-id file))
-        (setf (map-elt target "replies")
-              (vconcat (or (map-elt target "replies") [])
-                       (vector reply-ht)))
-        (when should-resolve
-          (setf (map-elt target "resolved") t)
-          (setf (map-elt target "local_resolved") t)
-          (map-delete target "gh_reopened"))
-        (setf (map-elt data "comments") comments)
-        (magit-dash-review--write-json-file file data)
-        (setq updated-comment target)
-        (magit-dash-review--refresh-visiting-buffer file)))
+    (cond
+     ((and live-buf
+           (with-current-buffer live-buf (derived-mode-p 'diff-review-mode))
+           (fboundp 'diff-review--modify-comments))
+      (magit-dash-review-json-save-visiting-buffer file)
+      (with-current-buffer live-buf
+        (diff-review--modify-comments
+         (lambda ()
+           (let ((target (seq-find
+                          (lambda (c)
+                            (or (equal (map-elt c "id") comment-id)
+                                (equal (map-elt c "gh_thread_id") comment-id)))
+                          diff-review--comments)))
+             (unless target
+               (error "No comment with id %s in %s" comment-id file))
+             (setf (map-elt target "replies")
+                   (vconcat (or (map-elt target "replies") [])
+                            (vector reply-ht)))
+             (when should-resolve
+               (setf (map-elt target "resolved") t)
+               (setf (map-elt target "local_resolved") t)
+               (map-delete target "gh_reopened"))
+             (setq updated-comment target))))))
+     (t
+      (let ((attempt 0)
+            (done nil))
+        (while (not done)
+          (setq attempt (1+ attempt))
+          (let* ((pair (magit-dash-review-json-read-with-stamp file))
+                 (data (car pair))
+                 (stamp (cdr pair))
+                 (comments (or (map-elt data "comments") []))
+                 (target (seq-find
+                          (lambda (c)
+                            (or (equal (map-elt c "id") comment-id)
+                                (equal (map-elt c "gh_thread_id") comment-id)))
+                          comments)))
+            (unless target
+              (error "No comment with id %s in %s" comment-id file))
+            (setf (map-elt target "replies")
+                  (vconcat (or (map-elt target "replies") [])
+                           (vector reply-ht)))
+            (when should-resolve
+              (setf (map-elt target "resolved") t)
+              (setf (map-elt target "local_resolved") t)
+              (map-delete target "gh_reopened"))
+            (setf (map-elt data "comments") comments)
+            (condition-case err
+                (progn
+                  (magit-dash-review--write-json-file file data stamp)
+                  (setq updated-comment target)
+                  (setq done t))
+              (magit-dash-review-json-conflict
+               (when (>= attempt 3)
+                 (signal (car err) (cdr err)))))))
+        (magit-dash-review--refresh-visiting-buffer file))))
     updated-comment))
 
 (defun magit-dash-review-current-hunk ()
@@ -547,6 +579,34 @@ Returns a plist (:review-file :root :base :head :path :line :end-line :hunk
     (find-file-noselect review-file))
   review-file)
 
+(defun magit-dash-review--merge-and-write (file remote-meta transcoded &optional allow-missing)
+  "Read FILE, merge REMOTE-META and TRANSCODED, and write atomically.
+When ALLOW-MISSING is non-nil, FILE need not exist yet.  Retries up to 3
+times if `magit-dash-review-json-conflict' signals because FILE changed
+on disk between read and write."
+  (let ((attempt 0)
+        (done nil)
+        (merged nil))
+    (while (not done)
+      (setq attempt (1+ attempt))
+      (let* ((exists (file-exists-p file))
+             (_ (when exists (magit-dash-review-json-save-visiting-buffer file)))
+             (stamp (if exists (magit-dash-review-json-file-stamp file) :missing))
+             (existing (cond
+                        (exists
+                         (magit-dash-review--read-for-write file))
+                        (allow-missing nil)
+                        (t (error "Review file not readable: %s" file)))))
+        (setq merged (magit-dash-review--merge-json existing remote-meta transcoded))
+        (condition-case err
+            (progn
+              (magit-dash-review--write-json-file file merged stamp)
+              (setq done t))
+          (magit-dash-review-json-conflict
+           (when (>= attempt 3)
+             (signal (car err) (cdr err)))))))
+    merged))
+
 ;;;###autoload
 (defun magit-dash-review-pr (&optional pr-number-or-url repo-dir)
   "Hydrate and open a native-buffer `diff-review' session for PR-NUMBER-OR-URL.
@@ -599,11 +659,8 @@ PR metadata and GraphQL reviewThreads, performs a three-way merge into
      (t
       ;; Read only now, after every network call above, so edits made
       ;; meanwhile are merged rather than overwritten.
-      (let ((merged (magit-dash-review--merge-json
-                     (and (file-exists-p review-file)
-                          (magit-dash-review--read-for-write review-file))
-                     remote-meta transcoded)))
-        (magit-dash-review--write-json-file review-file merged)
+      (let ((merged (magit-dash-review--merge-and-write
+                     review-file remote-meta transcoded t)))
         (magit-dash-review--maybe-mirror merged review-file)
         (magit-dash-review--refresh-visiting-buffer review-file)
         (magit-dash-review--maybe-import-viewed review-file slug pr-num dir))))
@@ -623,8 +680,10 @@ so `diff-review' compares the live working tree against BASE-REF (default
          (review-file (expand-file-name
                        (format "review/worktree-%s.json" wt-name)
                        common-dir))
-         (existing-ht (and (file-exists-p review-file)
-                           (magit-dash-review--read-for-write review-file)))
+         (pair (when (file-exists-p review-file)
+                 (magit-dash-review-json-read-with-stamp review-file)))
+         (existing-ht (car pair))
+         (stamp (if pair (cdr pair) :missing))
          (data (or existing-ht (make-hash-table :test #'equal))))
     (setf (map-elt data "format") "diff-review/1")
     (setf (map-elt data "root") wt-dir)
@@ -634,7 +693,7 @@ so `diff-review' compares the live working tree against BASE-REF (default
       (setf (map-elt data "viewed") (make-hash-table :test #'equal)))
     (unless (vectorp (map-elt data "comments"))
       (setf (map-elt data "comments") []))
-    (magit-dash-review--write-json-file review-file data)
+    (magit-dash-review--write-json-file review-file data stamp)
     (magit-dash-review--refresh-visiting-buffer review-file)
     (magit-dash-review--open-front-end review-file)))
 
@@ -683,9 +742,7 @@ so `diff-review' compares the live working tree against BASE-REF (default
        (t
         ;; Merge against a fresh read: the file may have changed while the
         ;; network calls above ran.
-        (let ((merged (magit-dash-review--merge-json
-                       (magit-dash-review--read-for-write file) remote-meta transcoded)))
-          (magit-dash-review--write-json-file file merged)
+        (let ((merged (magit-dash-review--merge-and-write file remote-meta transcoded)))
           (magit-dash-review--maybe-mirror merged file)
           (magit-dash-review--refresh-visiting-buffer file)
           (magit-dash-review--maybe-import-viewed file slug pr-num wt-dir)
@@ -1100,7 +1157,9 @@ blocks Emacs while GitHub answers."
 The legacy body of `magit-dash-review-submit'; see there."
   (let ((lock (magit-dash-review--cr-lock file)))
     (unwind-protect
-        (let* ((data (magit-dash-review--read-for-write file))
+        (let* ((pair (magit-dash-review-json-read-with-stamp file))
+               (data (car pair))
+               (save-stamp (cdr pair))
                (_pending (when (map-elt data "submit_pending")
                            (user-error "%s has an unfinished code-review submit (`submit_pending'): turn `magit-dash-review-submit-via-code-review' back on so it is reconciled first, or run M-x magit-dash-review-clear-submit-pending" file)))
                (md (map-elt data "magit_dash"))
@@ -1120,7 +1179,8 @@ The legacy body of `magit-dash-review-submit'; see there."
                (errors nil)
                (save (lambda ()
                        (setf (map-elt data "comments") (vconcat comments))
-                       (magit-dash-review--write-json-file file data)))
+                       (magit-dash-review--write-json-file file data save-stamp)
+                       (setq save-stamp (magit-dash-review-json-file-stamp file))))
                (pending-rev (map-elt data "pending_review"))
                (pending-valid
                 (and (hash-table-p pending-rev)
@@ -1487,7 +1547,9 @@ when given), \"c:ID\" (the comment becomes sent: `gh_comment_id' and
 \"t:THREAD\" (the local resolved state is now GitHub's).  FILE is read fresh
 \(through the modified-buffer guard) and written at once, so a crash loses
 nothing acknowledged.  Return non-nil when something was stamped."
-  (let* ((data (magit-dash-review--read-for-write file))
+  (let* ((pair (magit-dash-review-json-read-with-stamp file))
+         (data (car pair))
+         (stamp (cdr pair))
          (comments (append (or (map-elt data "comments") []) nil))
          (key (and (stringp id) (substring id 2)))
          (stamped nil))
@@ -1539,7 +1601,7 @@ nothing acknowledged.  Return non-nil when something was stamped."
         (map-delete c "local_resolved")
         (setq stamped t))))
     (when stamped
-      (magit-dash-review--write-json-file file data))
+      (magit-dash-review--write-json-file file data stamp))
     stamped))
 
 (defun magit-dash-review--cr-reply-items (comments)
@@ -1693,9 +1755,11 @@ else: per item the id, kind, a hash and the text of the body, the path, lines,
 parent comment and (review) event; the summary is the review item's body.
 BASELINE is what GitHub had, HEAD the commit the send was made for, VERDICT
 the plist (:state S :head H) the review carries."
-  (let ((data (magit-dash-review--read-for-write file))
-        (record (make-hash-table :test #'equal))
-        (base (make-hash-table :test #'equal)))
+  (let* ((pair (magit-dash-review-json-read-with-stamp file))
+         (data (car pair))
+         (stamp (cdr pair))
+         (record (make-hash-table :test #'equal))
+         (base (make-hash-table :test #'equal)))
     (setf (map-elt record "at") (format-time-string "%FT%T%:z"))
     (setf (map-elt record "head") (or head ""))
     (setf (map-elt base "reviews") (vconcat (plist-get baseline :reviews)))
@@ -1723,7 +1787,7 @@ the plist (:state S :head H) the review carries."
                         e))
                     items)))
     (setf (map-elt data "submit_pending") record)
-    (magit-dash-review--write-json-file file data)))
+    (magit-dash-review--write-json-file file data stamp)))
 
 (defun magit-dash-review--cr-record-items (record)
   "Return the items alist (ID . (KIND . ITEM)) rebuilt from the entries of RECORD."
@@ -1832,7 +1896,9 @@ Only a lock still holding this owner's token is removed."
 (defun magit-dash-review--cr-pending-drop (file ids)
   "Remove the item IDS (strings or `review') from the pending record of FILE.
 The record goes when no item is left.  Nothing is written when FILE has none."
-  (let* ((data (magit-dash-review--read-for-write file))
+  (let* ((pair (magit-dash-review-json-read-with-stamp file))
+         (data (car pair))
+         (stamp (cdr pair))
          (record (map-elt data "submit_pending"))
          (names (seq-map (lambda (id) (format "%s" id)) ids)))
     (when (hash-table-p record)
@@ -1843,7 +1909,7 @@ The record goes when no item is left.  Nothing is written when FILE has none."
           (setf (map-elt record "items") (vconcat left)))
          (t
           (map-delete data "submit_pending")))
-        (magit-dash-review--write-json-file file data)))))
+        (magit-dash-review--write-json-file file data stamp)))))
 
 (defun magit-dash-review--cr-describe (entry)
   "Return a short name for the pending record ENTRY: its id and path:line."
@@ -2580,7 +2646,9 @@ messages and the rest still run."
 
 (defun magit-dash-review--viewed-synced-set (file path blob)
   "Record in FILE that GitHub has PATH viewed at BLOB, or (nil BLOB) not viewed."
-  (let* ((data (magit-dash-review--read-for-write file))
+  (let* ((pair (magit-dash-review-json-read-with-stamp file))
+         (data (car pair))
+         (stamp (cdr pair))
          (md (map-elt data "magit_dash")))
     (when (hash-table-p md)
       (let ((synced (cond
@@ -2593,7 +2661,7 @@ messages and the rest still run."
          (t
           (map-delete synced path)))
         (setf (map-elt md "viewed_synced") synced)
-        (magit-dash-review--write-json-file file data)))))
+        (magit-dash-review--write-json-file file data stamp)))))
 
 (defun magit-dash-review--sync-viewed (file key dir account)
   "Mirror the viewed marks of FILE for PR KEY to code-review and GitHub.
@@ -2676,7 +2744,9 @@ and is not imported back."
   (magit-dash-review--gh-viewed-state
    slug pr-num dir account
    (lambda (_pr-id head states _truncated)
-     (let* ((data (magit-dash-review--read-for-write file))
+     (let* ((pair (magit-dash-review-json-read-with-stamp file))
+            (data (car pair))
+            (stamp (cdr pair))
             (md (map-elt data "magit_dash"))
             (reviewed (map-elt md "head_oid"))
             (api (funcall magit-dash-review-json-code-review-function 'viewed (cons slug pr-num)))
@@ -2709,7 +2779,7 @@ and is not imported back."
          (when (> added 0)
            (setf (map-elt data "viewed") local)
            (setf (map-elt md "viewed_synced") synced)
-           (magit-dash-review--write-json-file file data)
+           (magit-dash-review--write-json-file file data stamp)
            (magit-dash-review--refresh-visiting-buffer file))))))))
 
 (defun magit-dash-review--maybe-import-viewed (file slug pr-num dir)
@@ -2850,7 +2920,9 @@ MODE is one of:
 (defun magit-dash-review--insert-draft-comment (review-file path line end-line author body)
   "Insert a `status: \"draft\"' comment into REVIEW-FILE and return its table."
   (let* ((file (expand-file-name review-file))
-         (data (magit-dash-review--read-for-write file))
+         (pair (magit-dash-review-json-read-with-stamp file))
+         (data (car pair))
+         (stamp (cdr pair))
          (comments (append (or (map-elt data "comments") []) nil))
          (c-ht (make-hash-table :test #'equal))
          (id (magit-dash-review--unique-id
@@ -2866,7 +2938,7 @@ MODE is one of:
     (setf (map-elt c-ht "resolved") :false)
     (setf (map-elt c-ht "replies") [])
     (setf (map-elt data "comments") (vconcat comments (list c-ht)))
-    (magit-dash-review--write-json-file file data)
+    (magit-dash-review--write-json-file file data stamp)
     (magit-dash-review--refresh-visiting-buffer file)
     c-ht))
 
@@ -2950,7 +3022,9 @@ Uses `gptel-request' when available, falling back to `agent-shell'."
                     (magit-dash-review--current-review-file)
                     (user-error "No active review JSON file"))))
          (cid (or comment-id (plist-get ctx :comment-id)))
-         (data (magit-dash-review--read-for-write file))
+         (pair (magit-dash-review-json-read-with-stamp file))
+         (data (car pair))
+         (stamp (cdr pair))
          (comments (append (or (map-elt data "comments") []) nil))
          (target (if cid
                      (seq-find (lambda (c) (equal (map-elt c "id") cid)) comments)
@@ -2959,7 +3033,7 @@ Uses `gptel-request' when available, falling back to `agent-shell'."
       (user-error "No draft comment found to promote in %s" file))
     (setf (map-elt target "status") "accepted")
     (setf (map-elt data "comments") (vconcat comments))
-    (magit-dash-review--write-json-file file data)
+    (magit-dash-review--write-json-file file data stamp)
     (magit-dash-review--refresh-visiting-buffer file)
     target))
 
@@ -2981,7 +3055,9 @@ Uses `gptel-request' when available, falling back to `agent-shell'."
 Stores criteria metadata under `\"ears_criteria\"' and updates or inserts a
 review-wide summary comment thread (`id: \"ears-criteria\"')."
   (let* ((file (expand-file-name review-file))
-         (data (magit-dash-review--read-for-write file))
+         (pair (magit-dash-review-json-read-with-stamp file))
+         (data (car pair))
+         (stamp (cdr pair))
          (comments (append (or (map-elt data "comments") []) nil)))
     (when criteria-list
       (let* ((bullets (mapconcat #'magit-dash-review--format-ears-criterion
@@ -3031,7 +3107,7 @@ review-wide summary comment thread (`id: \"ears-criteria\"')."
             (setf (map-elt c-ht "replies") [])
             (setq comments (append comments (list c-ht)))))))
     (setf (map-elt data "comments") (vconcat comments))
-    (magit-dash-review--write-json-file file data)
+    (magit-dash-review--write-json-file file data stamp)
     (magit-dash-review--refresh-visiting-buffer file)
     data))
 

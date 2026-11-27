@@ -3625,5 +3625,74 @@ alist of path to state, :head GitHub's head.  Seam and gh calls are logged."
         (magit-dash-review--maybe-import-viewed "/tmp/x" "o/r" 1 "/tmp")
         (should called)))))
 
+(ert-deftest magit-dash-review/refuse-action-protects-append-reply ()
+  (magit-dash-review-test/with-temp-dir
+    (let* ((file (magit-dash-review-test/submit-file (list (magit-dash-review-test/gh-thread "a"))))
+           (buf (find-file-noselect file))
+           (before (with-temp-buffer (insert-file-contents file) (buffer-string)))
+           (magit-dash-review-json-modified-buffer-action 'refuse))
+      (unwind-protect
+          (progn
+            (with-current-buffer buf (goto-char (point-max)) (insert "unsaved"))
+            (should-error (magit-dash-review-append-reply file "a" "me" "reply")
+                          :type 'user-error)
+            (should (equal before (with-temp-buffer (insert-file-contents file) (buffer-string))))
+            (let ((called nil))
+              (cl-letf (((symbol-function 'diff-review--modify-comments)
+                         (lambda (_fn) (setq called t))))
+                (with-current-buffer buf
+                  (setq-local major-mode 'diff-review-mode))
+                (should-error (magit-dash-review-append-reply file "a" "me" "reply")
+                              :type 'user-error)
+                (should-not called))))
+        (with-current-buffer buf (set-buffer-modified-p nil))
+        (kill-buffer buf)))))
+
+(ert-deftest magit-dash-review/sync-retries-and-merges-on-cas-conflict ()
+  "External edits between sync's fresh read and write trigger retry, not clobber."
+  (magit-dash-review-test/with-temp-dir
+    (let ((file (expand-file-name "review/pr-12.json" default-directory))
+          (injected nil)
+          (reads 0))
+      (magit-dash-review-test/sync-fixture file)
+      (let ((orig-read (symbol-function 'magit-dash-review--read-for-write)))
+        (cl-letf (((symbol-function 'magit-dash-review--read-for-write)
+                   (lambda (f)
+                     (let ((res (funcall orig-read f)))
+                       (setq reads (1+ reads))
+                       (when (and (not injected) (equal (expand-file-name f) (expand-file-name file)))
+                         (setq injected t)
+                         ;; Simulate an external writer appending a comment after read.
+                         (let ((ext (magit-dash-review--read-json-file f))
+                               (c (make-hash-table :test #'equal)))
+                           (setf (map-elt c "id") "ext1")
+                           (setf (map-elt c "body") "external concurrent edit")
+                           (setf (map-elt ext "comments") (vector c))
+                           (with-temp-file f
+                             (insert (encode-coding-string
+                                      (json-serialize ext :null-object nil :false-object :false)
+                                      'utf-8)))))
+                       res))))
+          (magit-dash-review-test/with-sync-stubs nil
+            (should (equal file (magit-dash-review-sync file))))))
+      (should (>= reads 2))
+      (should (equal '("external concurrent edit")
+                     (seq-map (lambda (c) (map-elt c "body"))
+                              (map-elt (magit-dash-review--read-json-file file) "comments")))))))
+
+(ert-deftest magit-dash-review/non-writing-paths-never-poison-later-direct-write ()
+  "Read-only, skipped, and failing callers must not leave stale CAS state."
+  (magit-dash-review-test/with-temp-dir
+    (let ((file (magit-dash-review-test/submit-file nil)))
+      (let ((magit-dash-review-json-code-review-function (lambda (&rest _) nil)))
+        (magit-dash-review--sync-viewed file '("owner/repo" . 99) default-directory nil))
+      (cl-letf (((symbol-function 'magit-dash-review-current-hunk) (lambda () nil)))
+        (should-error (magit-dash-review-promote-draft file) :type 'user-error))
+      (should-error (magit-dash-review-append-reply file "missing-id" "me" "reply") :type 'error)
+      (with-temp-file file (insert "{\"external\":1}\n"))
+      (let ((fresh (magit-dash-review-test/c "comments" [])))
+        (magit-dash-review--write-json-file file fresh)
+        (should (equal [] (map-elt (magit-dash-review--read-json-file file) "comments")))))))
+
 (provide 'test-magit-dash-review)
 ;;; test-magit-dash-review.el ends here

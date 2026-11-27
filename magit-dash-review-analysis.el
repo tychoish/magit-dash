@@ -399,16 +399,27 @@ safe from a sentinel.  Return nil when ANALYSIS is empty (nothing written),
 `written' when written and the visiting buffer, if any, is current, and
 `buffer-skipped' when written but a modified visiting buffer was left alone."
   (when (and (hash-table-p analysis) (> (map-length analysis) 0))
-    (magit-dash-review-json-save-visiting-buffer file)
-    (let* ((data (magit-dash-review-json-read-file file))
-           (code-review (if (hash-table-p (map-elt data "code_review"))
-                            (map-elt data "code_review")
-                          (make-hash-table :test #'equal))))
-      (when magit-dash-review-json-last-read-fallback
-        (user-error "%s is corrupt (only its backup parses); not overwriting it" file))
-      (setf (map-elt code-review "analysis") analysis)
-      (setf (map-elt data "code_review") code-review)
-      (magit-dash-review-json-write-file file data)
+    (let ((attempt 0)
+          (done nil))
+      (while (not done)
+        (setq attempt (1+ attempt))
+        (magit-dash-review-json-save-visiting-buffer file)
+        (let* ((stamp (magit-dash-review-json-file-stamp file))
+               (data (magit-dash-review-json-read-file file))
+               (code-review (if (hash-table-p (map-elt data "code_review"))
+                                (map-elt data "code_review")
+                              (make-hash-table :test #'equal))))
+          (when magit-dash-review-json-last-read-fallback
+            (user-error "%s is corrupt (only its backup parses); not overwriting it" file))
+          (setf (map-elt code-review "analysis") analysis)
+          (setf (map-elt data "code_review") code-review)
+          (condition-case err
+              (progn
+                (magit-dash-review-json-write-file file data stamp)
+                (setq done t))
+            (magit-dash-review-json-conflict
+             (when (>= attempt 3)
+               (signal (car err) (cdr err)))))))
       (if (magit-dash-review-json-refresh-visiting-buffer file)
           'written
         'buffer-skipped))))
