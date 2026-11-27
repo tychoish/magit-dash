@@ -117,6 +117,16 @@ Nil or 0 disables the cache."
   :type '(choice (const :tag "No cache" nil) number)
   :group 'magit-dash)
 
+(defcustom magit-dash-gh-token-lookup-timeout 5
+  "Seconds to wait for `gh auth token' before timing out.
+Bounds both asynchronous token priming and the synchronous fallback."
+  :type '(choice (const :tag "No timeout" nil) number)
+  :group 'magit-dash)
+
+(defvar magit-dash-gh-stderr-grace 2
+  "Seconds to wait for a failed `gh' call's stderr to finish arriving.
+Only a fallback: normally the stderr process's own sentinel ends the wait.")
+
 (defcustom magit-dash-gh-message-max-length 500
   "Longest `gh' output, in characters, echoed into messages and error strings."
   :type 'integer
@@ -125,9 +135,51 @@ Nil or 0 disables the cache."
 (defvar magit-dash-gh--token-cache (make-hash-table :test #'equal)
   "Tokens by (USER . HOST), each value (TOKEN . TIME).")
 
+(defvar magit-dash-gh--token-pending (make-hash-table :test #'equal)
+  "In-flight async token lookups by (USER . HOST).")
+
+(defun magit-dash-gh--settle-token-pending (key entry token err)
+  "Settle pending token lookup ENTRY for KEY with TOKEN or ERR.
+Cancels timers, kills live process and buffers, removes ENTRY from
+`magit-dash-gh--token-pending', caches TOKEN on success, and invokes
+each callback while isolating errors."
+  (unless (plist-get entry :settled)
+    (plist-put entry :settled t)
+    (when (timerp (plist-get entry :timer))
+      (cancel-timer (plist-get entry :timer)))
+    (when (timerp (plist-get entry :grace))
+      (cancel-timer (plist-get entry :grace)))
+    (when (eq (map-elt magit-dash-gh--token-pending key) entry)
+      (map-delete magit-dash-gh--token-pending key))
+    (when-let* ((proc (plist-get entry :proc)))
+      (when (process-live-p proc)
+        (delete-process proc)))
+    (when-let* ((buf (plist-get entry :buf)))
+      (when (buffer-live-p buf)
+        (kill-buffer buf)))
+    (when-let* ((errbuf (plist-get entry :errbuf)))
+      (when (buffer-live-p errbuf)
+        (kill-buffer errbuf)))
+    (when token
+      (setf (map-elt magit-dash-gh--token-cache key)
+            (cons token (current-time))))
+    (seq-do (lambda (cb)
+              (condition-case cb-err
+                  (funcall cb token err)
+                (error
+                 (message "magit-gh: token lookup callback failed: %s"
+                          (magit-dash-gh--sanitize (error-message-string cb-err))))))
+            (nreverse (plist-get entry :callbacks)))))
+
 (defun magit-dash-gh-reset-token-cache ()
-  "Forget every cached account token."
+  "Forget every cached account token and settle pending token lookups."
   (interactive)
+  (seq-do (lambda (pair)
+            (magit-dash-gh--settle-token-pending
+             (car pair) (cdr pair) nil
+             "magit-gh: token lookup cancelled by cache reset"))
+          (map-pairs magit-dash-gh--token-pending))
+  (clrhash magit-dash-gh--token-pending)
   (clrhash magit-dash-gh--token-cache))
 
 (defconst magit-dash-gh--secret-regexp
@@ -142,28 +194,208 @@ Nil or 0 disables the cache."
         (concat (substring redacted 0 magit-dash-gh-message-max-length) "...[truncated]")
       redacted)))
 
-(defun magit-dash-gh--account-token (user &optional host)
-  "Return the auth token for USER on HOST using `gh auth token'.
-HOST defaults to \"github.com\".  A successful lookup is reused for
-`magit-dash-gh-token-ttl' seconds.  Signals `user-error' if token
-resolution fails; the token is never put in a message."
+(defun magit-dash-gh--cached-account-token (user &optional host)
+  "Return cached token for USER on HOST when valid within TTL, else nil."
+  (let* ((h (or host "github.com"))
+         (hit (map-elt magit-dash-gh--token-cache (cons user h))))
+    (when (and hit
+               (numberp magit-dash-gh-token-ttl)
+               (> magit-dash-gh-token-ttl 0)
+               (< (float-time (time-since (cdr hit))) magit-dash-gh-token-ttl))
+      (car hit))))
+
+(defun magit-dash-gh--prime-account-token-async (user &optional host callback)
+  "Resolve and cache the auth token for USER on HOST asynchronously.
+HOST defaults to \"github.com\".  Deduplicates concurrent lookups per
+\(USER . HOST) and bounds execution to `magit-dash-gh-token-lookup-timeout'
+seconds.  When CALLBACK is non-nil, calls it with (TOKEN ERR) on completion,
+or immediately when cached."
   (let* ((h (or host "github.com"))
          (key (cons user h))
-         (hit (map-elt magit-dash-gh--token-cache key)))
-    (if (and hit
-             (numberp magit-dash-gh-token-ttl)
-             (< (float-time (time-since (cdr hit))) magit-dash-gh-token-ttl))
-        (car hit)
-      (with-temp-buffer
-        (let* ((code (apply #'call-process "gh" nil (list (current-buffer) t) nil
-                            (list "auth" "token" "-u" user "-h" h)))
-               (output (string-trim (buffer-string))))
-          (unless (eql code 0)
-            (user-error "magit-gh: failed to obtain token for account '%s' on host '%s': %s"
-                        user h (magit-dash-gh--sanitize output)))
-          (setf (map-elt magit-dash-gh--token-cache key)
-                (cons output (current-time)))
-          output)))))
+         (cached (magit-dash-gh--cached-account-token user h))
+         (existing (map-elt magit-dash-gh--token-pending key)))
+    (cond
+     (cached
+      (when callback
+        (funcall callback cached nil))
+      cached)
+     ((and existing
+           (not (plist-get existing :settled))
+           (process-live-p (plist-get existing :proc)))
+      (when callback
+        (plist-put existing :callbacks (cons callback (plist-get existing :callbacks))))
+      (plist-get existing :proc))
+     (t
+      (let* ((buf (generate-new-buffer " *magit-dash-gh-token*"))
+             (errbuf (generate-new-buffer " *magit-dash-gh-token-err*"))
+             (entry (list :proc nil
+                          :timer nil
+                          :grace nil
+                          :buf buf
+                          :errbuf errbuf
+                          :callbacks (when callback (list callback))
+                          :settled nil))
+             (status nil)
+             (code nil)
+             (err-done nil)
+             (finish-proc
+              (lambda ()
+                (unless (plist-get entry :settled)
+                  (let ((stdout (if (buffer-live-p buf)
+                                    (with-current-buffer buf
+                                      (string-trim (buffer-string)))
+                                  ""))
+                        (stderr (if (buffer-live-p errbuf)
+                                    (with-current-buffer errbuf
+                                      (string-trim (buffer-string)))
+                                  "")))
+                    (if (and (eq status 'exit)
+                             (eql code 0)
+                             (not (string-empty-p stdout)))
+                        (magit-dash-gh--settle-token-pending key entry stdout nil)
+                      (let ((detail (string-trim
+                                     (concat stdout
+                                             (if (and (not (string-empty-p stdout))
+                                                      (not (string-empty-p stderr)))
+                                                 "\n"
+                                               "")
+                                             stderr))))
+                        (magit-dash-gh--settle-token-pending
+                         key entry nil
+                         (format "magit-gh: failed to obtain token for account '%s' on host '%s': %s"
+                                 user h (magit-dash-gh--sanitize detail))))))))))
+        (setf (map-elt magit-dash-gh--token-pending key) entry)
+        (when (and (numberp magit-dash-gh-token-lookup-timeout)
+                   (> magit-dash-gh-token-lookup-timeout 0))
+          (plist-put
+           entry :timer
+           (run-with-timer
+            magit-dash-gh-token-lookup-timeout nil
+            (lambda ()
+              (unless (plist-get entry :settled)
+                (magit-dash-gh--settle-token-pending
+                 key entry nil
+                 (format "magit-gh: timed out obtaining token for account '%s' on host '%s'"
+                         user h)))))))
+        (let ((proc
+               (condition-case err
+                   (make-process
+                    :name "magit-gh-token"
+                    :buffer buf
+                    :stderr errbuf
+                    :command (list "gh" "auth" "token" "-u" user "-h" h)
+                    :connection-type 'pipe
+                    :noquery t
+                    :sentinel
+                    (lambda (p _event)
+                      (when (and (memq (process-status p) '(exit signal))
+                                 (not (plist-get entry :settled)))
+                        (setq status (process-status p))
+                        (setq code (process-exit-status p))
+                        (cond
+                         ((or (and (eq status 'exit) (eql code 0)) err-done)
+                          (funcall finish-proc))
+                         (t
+                          (plist-put
+                           entry :grace
+                           (run-with-timer magit-dash-gh-stderr-grace
+                                           nil finish-proc)))))))
+                 (error
+                  (magit-dash-gh--settle-token-pending
+                   key entry nil
+                   (format "magit-gh: failed to obtain token for account '%s' on host '%s': %s"
+                           user h (magit-dash-gh--sanitize (error-message-string err))))
+                  nil))))
+          (when proc
+            (if (plist-get entry :settled)
+                (progn
+                  (when (process-live-p proc)
+                    (delete-process proc))
+                  (when (buffer-live-p buf)
+                    (kill-buffer buf))
+                  (when (buffer-live-p errbuf)
+                    (kill-buffer errbuf)))
+              (if-let* ((errproc (get-buffer-process errbuf)))
+                  (set-process-sentinel
+                   errproc
+                   (lambda (p _event)
+                     (unless (process-live-p p)
+                       (setq err-done t)
+                       (when (and code (not (plist-get entry :settled)))
+                         (funcall finish-proc)))))
+                (setq err-done t))
+              (plist-put entry :proc proc)))
+          (unless (plist-get entry :settled)
+            proc)))))))
+
+(defalias 'magit-dash-gh-prime-account-token #'magit-dash-gh--prime-account-token-async)
+
+(defun magit-dash-gh--account-token (user &optional host callback)
+  "Return the auth token for USER on HOST using `gh auth token'.
+HOST defaults to \"github.com\".  A successful lookup is reused for
+`magit-dash-gh-token-ttl' seconds.
+
+When CALLBACK is non-nil, resolves asynchronously via
+`magit-dash-gh--prime-account-token-async' (calling CALLBACK with
+\(TOKEN ERR)) without blocking the UI thread; returns a cached token
+immediately when available.
+
+When CALLBACK is nil, returns a cached token immediately or uses a bounded
+synchronous fallback (up to `magit-dash-gh-token-lookup-timeout' seconds).
+The synchronous fallback exists for synchronous callers such as
+`magit-dash-gh-with-account'; async callers should prime tokens via
+`magit-dash-gh--prime-account-token-async' to avoid UI-thread blocking.
+Signals `user-error' if lookup fails or times out; tokens are never logged."
+  (let* ((h (or host "github.com"))
+         (hit (magit-dash-gh--cached-account-token user h)))
+    (cond
+     (hit
+      (when callback
+        (funcall callback hit nil))
+      hit)
+     (callback
+      (magit-dash-gh--prime-account-token-async user h callback)
+      nil)
+     (t
+      (let ((result nil)
+            (done nil)
+            (deadline (when (and (numberp magit-dash-gh-token-lookup-timeout)
+                                 (> magit-dash-gh-token-lookup-timeout 0))
+                        (+ (float-time) magit-dash-gh-token-lookup-timeout 0.2))))
+        (magit-dash-gh--prime-account-token-async
+         user h
+         (lambda (tok err)
+           (setq result (cons tok err))
+           (setq done t)))
+        (while (and (not done)
+                    (or (null deadline) (< (float-time) deadline)))
+          (accept-process-output nil 0.05))
+        (unless done
+          (let ((key (cons user h))
+                (timeout-msg (format "magit-gh: timed out obtaining token for account '%s' on host '%s'"
+                                     user h)))
+            (when-let* ((pending (map-elt magit-dash-gh--token-pending key)))
+              (magit-dash-gh--settle-token-pending key pending nil timeout-msg))
+            (user-error "%s" timeout-msg)))
+        (if (cdr result)
+            (user-error "%s" (cdr result))
+          (car result)))))))
+
+(defun magit-dash-gh--call-with-token (host token fn)
+  "Call FN with `process-environment' configured for HOST and TOKEN.
+When TOKEN is nil, calls FN unchanged."
+  (if (null token)
+      (funcall fn)
+    (let* ((h (or host "github.com"))
+           (env-var (if (string= h "github.com")
+                        "GH_TOKEN"
+                      "GH_ENTERPRISE_TOKEN"))
+           (process-environment
+            (cons (format "%s=%s" env-var token)
+                  (if (not (string= h "github.com"))
+                      (cons (format "GH_HOST=%s" h) process-environment)
+                    process-environment))))
+      (funcall fn))))
 
 (defun magit-dash-gh--call-with-account (account fn)
   "Call FN with `process-environment' configured for ACCOUNT.
@@ -173,16 +405,12 @@ When ACCOUNT is given, resolves the token via `magit-dash-gh--account-token'
 and binds GH_TOKEN (or GH_ENTERPRISE_TOKEN) in `process-environment'."
   (if (null account)
       (funcall fn)
-    (let* ((user (if (stringp account) account (plist-get account :user)))
+    (let* ((user (if (stringp account)
+                     account
+                   (plist-get account :user)))
            (host (or (when (listp account) (plist-get account :host)) "github.com"))
-           (token (magit-dash-gh--account-token user host))
-           (env-var (if (string= host "github.com") "GH_TOKEN" "GH_ENTERPRISE_TOKEN"))
-           (process-environment
-            (cons (format "%s=%s" env-var token)
-                  (if (not (string= host "github.com"))
-                      (cons (format "GH_HOST=%s" host) process-environment)
-                    process-environment))))
-      (funcall fn))))
+           (token (magit-dash-gh--account-token user host)))
+      (magit-dash-gh--call-with-token host token fn))))
 
 (defmacro magit-dash-gh-with-account (account &rest body)
   "Execute BODY with environment configured for ACCOUNT.
@@ -958,10 +1186,6 @@ Return (EXIT-CODE . OUTPUT)."
 (defvar magit-dash-gh-retry-delay 3
   "Seconds before the first async retry; doubles on each further retry.")
 
-(defvar magit-dash-gh-stderr-grace 2
-  "Seconds to wait for a failed `gh' call's stderr to finish arriving.
-Only a fallback: normally the stderr process's own sentinel ends the wait.")
-
 (defun magit-dash-gh--retry-process (args dir on-success on-error attempt cancelled-p handle)
   "Timer entry for a retry of `magit-dash-gh--run-process'.
 A failure to start the retry calls ON-ERROR (or messages) instead of
@@ -976,6 +1200,103 @@ escaping from the timer, so the caller always hears a final outcome."
          (if on-error
              (funcall on-error msg 1)
            (message "magit-gh: gh %s retry failed: %s" (car args) msg)))))))
+
+(defun magit-dash-gh--spawn-process (args dir host token on-success &optional on-error attempt cancelled-p handle)
+  "Spawn async `gh' process with ARGS in DIR using HOST and TOKEN.
+See `magit-dash-gh--run-process' for ON-SUCCESS, ON-ERROR, ATTEMPT,
+CANCELLED-P, and HANDLE semantics."
+  (magit-dash-gh--call-with-token
+   host token
+   (lambda ()
+     (let* ((default-directory dir)
+            (buf (generate-new-buffer " *magit-dash-proc*"))
+            (errbuf (generate-new-buffer " *magit-dash-proc-err*"))
+            (code nil)
+            (err-done nil)
+            (done nil)
+            (grace nil)
+            (finish
+             (lambda ()
+               (unless done
+                 (setq done t)
+                 (when (timerp grace)
+                   (cancel-timer grace))
+                 (let* ((stdout (if (buffer-live-p buf)
+                                    (with-current-buffer buf (buffer-string))
+                                  ""))
+                        (output (if (= code 0)
+                                    stdout
+                                  (concat stdout
+                                          (if (buffer-live-p errbuf)
+                                              (with-current-buffer errbuf
+                                                (buffer-string))
+                                            "")))))
+                   (when (buffer-live-p buf)
+                     (kill-buffer buf))
+                   (when (buffer-live-p errbuf)
+                     (kill-buffer errbuf))
+                   (when (consp handle)
+                     (setcar handle nil))
+                   (cond
+                    ((and cancelled-p (funcall cancelled-p))
+                     nil)
+                    ((= code 0)
+                     (funcall on-success output))
+                    ((and (< (or attempt 1) magit-dash-gh-retry-attempts)
+                          (string-match-p "HTTP 50[234]" output))
+                     (let ((delay (* magit-dash-gh-retry-delay
+                                     (expt 2 (1- (or attempt 1)))
+                                     (+ 1.0 (/ (random 250) 1000.0)))))
+                       (message "magit-gh: gh %s hit a gateway error, retrying in %.1fs"
+                                (car args) delay)
+                       (let ((timer (run-with-timer delay nil #'magit-dash-gh--retry-process
+                                                    args dir on-success on-error
+                                                    (1+ (or attempt 1)) cancelled-p handle)))
+                         (when (consp handle)
+                           (setcdr handle timer)))))
+                    (on-error
+                     (funcall on-error (magit-dash-gh--sanitize output) code))
+                    (t
+                     (message "magit-gh: gh %s exited %d: %s"
+                              (car args) code
+                              (magit-dash-gh--sanitize (string-trim output)))))))))
+            (proc (condition-case err
+                      (make-process
+                       :name "magit-gh"
+                       :buffer buf
+                       :stderr errbuf
+                       :command (cons "gh" args)
+                       :connection-type 'pipe
+                       :noquery t
+                       :sentinel
+                       (lambda (proc _event)
+                         (when (memq (process-status proc) '(exit signal))
+                           (setq code (process-exit-status proc))
+                           (cond
+                            ((or (= code 0) err-done)
+                             (funcall finish))
+                            (t
+                             (setq grace (run-with-timer magit-dash-gh-stderr-grace
+                                                         nil finish)))))))
+                    (error
+                     (kill-buffer buf)
+                     (kill-buffer errbuf)
+                     (signal (car err) (cdr err))))))
+       (with-current-buffer buf
+         (setq default-directory dir))
+       (if-let* ((errproc (get-buffer-process errbuf)))
+           (set-process-sentinel
+            errproc
+            (lambda (p _event)
+              (unless (process-live-p p)
+                (setq err-done t)
+                (when (and code (not done))
+                  (funcall finish)))))
+         (setq err-done t))
+       (when (consp handle)
+         (setcar handle proc)
+         (setcdr handle nil))
+       proc))))
 
 (defun magit-dash-gh--run-process (args dir on-success &optional on-error attempt cancelled-p handle)
   "Run `gh' with ARGS in DIR asynchronously.
@@ -998,7 +1319,9 @@ caller can stop whichever is live (see `magit-dash-gh--handle-cancel').
 When DIR no longer exists on disk (for example a worktree removed outside
 magit-dash), ON-ERROR is called directly instead of letting `make-process'
 signal.  A `make-process' failure kills its buffers and re-signals.
-Return the process, or nil."
+When DIR uses a configured account whose token is not cached yet, the
+token is primed asynchronously before spawning `gh' so the UI thread does
+not block.  Return the process, or nil."
   (cond
    ((and cancelled-p (funcall cancelled-p))
     nil)
@@ -1009,96 +1332,43 @@ Return the process, or nil."
         (message "magit-gh: gh %s failed: %s" (car args) msg))
       nil))
    (t
-    (magit-dash-gh-with-account (magit-dash-gh--repo-account dir)
-      (let* ((default-directory dir)
-             (buf (generate-new-buffer " *magit-dash-proc*"))
-             (errbuf (generate-new-buffer " *magit-dash-proc-err*"))
-             (code nil)
-             (err-done nil)
-             (done nil)
-             (grace nil)
-             (finish
-              (lambda ()
-                (unless done
-                  (setq done t)
-                  (when (timerp grace)
-                    (cancel-timer grace))
-                  (let* ((stdout (if (buffer-live-p buf)
-                                     (with-current-buffer buf (buffer-string))
-                                   ""))
-                         (output (if (= code 0)
-                                     stdout
-                                   (concat stdout
-                                           (if (buffer-live-p errbuf)
-                                               (with-current-buffer errbuf
-                                                 (buffer-string))
-                                             "")))))
-                    (when (buffer-live-p buf)
-                      (kill-buffer buf))
-                    (when (buffer-live-p errbuf)
-                      (kill-buffer errbuf))
-                    (when (consp handle)
-                      (setcar handle nil))
-                    (cond
-                     ((and cancelled-p (funcall cancelled-p))
-                      nil)
-                     ((= code 0)
-                      (funcall on-success output))
-                     ((and (< (or attempt 1) magit-dash-gh-retry-attempts)
-                           (string-match-p "HTTP 50[234]" output))
-                      (let ((delay (* magit-dash-gh-retry-delay
-                                      (expt 2 (1- (or attempt 1)))
-                                      (+ 1.0 (/ (random 250) 1000.0)))))
-                        (message "magit-gh: gh %s hit a gateway error, retrying in %.1fs"
-                                 (car args) delay)
-                        (let ((timer (run-with-timer delay nil #'magit-dash-gh--retry-process
-                                                     args dir on-success on-error
-                                                     (1+ (or attempt 1)) cancelled-p handle)))
-                          (when (consp handle)
-                            (setcdr handle timer)))))
-                     (on-error
-                      (funcall on-error (magit-dash-gh--sanitize output) code))
-                     (t
-                      (message "magit-gh: gh %s exited %d: %s"
-                               (car args) code
-                               (magit-dash-gh--sanitize (string-trim output)))))))))
-             (proc (condition-case err
-                       (make-process
-                        :name "magit-gh"
-                        :buffer buf
-                        :stderr errbuf
-                        :command (cons "gh" args)
-                        :connection-type 'pipe
-                        :noquery t
-                        :sentinel
-                        (lambda (proc _event)
-                          (when (memq (process-status proc) '(exit signal))
-                            (setq code (process-exit-status proc))
-                            (cond
-                             ((or (= code 0) err-done)
-                              (funcall finish))
-                             (t
-                              (setq grace (run-with-timer magit-dash-gh-stderr-grace
-                                                          nil finish)))))))
+    (let ((account (magit-dash-gh--repo-account dir)))
+      (if (null account)
+          (magit-dash-gh--spawn-process
+           args dir nil nil on-success on-error attempt cancelled-p handle)
+        (let* ((user (if (stringp account)
+                         account
+                       (plist-get account :user)))
+               (host (or (when (listp account) (plist-get account :host))
+                         "github.com"))
+               (cached (magit-dash-gh--cached-account-token user host)))
+          (if cached
+              (magit-dash-gh--spawn-process
+               args dir host cached on-success on-error attempt cancelled-p handle)
+            (magit-dash-gh--prime-account-token-async
+             user host
+             (lambda (token err)
+               (unless (and cancelled-p (funcall cancelled-p))
+                 (cond
+                  (err
+                   (if on-error
+                       (funcall on-error err 1)
+                     (message "magit-gh: gh %s failed: %s" (car args) err)))
+                  ((not (file-directory-p dir))
+                   (let ((msg (format "no such directory: %s" dir)))
+                     (if on-error
+                         (funcall on-error msg 1)
+                       (message "magit-gh: gh %s failed: %s" (car args) msg))))
+                  (t
+                   (condition-case spawn-err
+                       (magit-dash-gh--spawn-process
+                        args dir host token on-success on-error attempt cancelled-p handle)
                      (error
-                      (kill-buffer buf)
-                      (kill-buffer errbuf)
-                      (signal (car err) (cdr err))))))
-        (with-current-buffer buf
-          (setq default-directory dir))
-        (if-let* ((errproc (get-buffer-process errbuf)))
-            (set-process-sentinel
-             errproc
-             (lambda (p _event)
-               (unless (process-live-p p)
-                 (setq err-done t)
-                 (when (and code (not done))
-                   (funcall finish)))))
-          (setq err-done t))
-        (when (consp handle)
-          (setcar handle proc)
-          (setcdr handle nil))
-        proc)))))
+                      (let ((msg (magit-dash-gh--sanitize (error-message-string spawn-err))))
+                        (if on-error
+                            (funcall on-error msg 1)
+                          (message "magit-gh: gh %s failed: %s" (car args) msg))))))))))
+            nil)))))))
 
 (defun magit-dash-gh--handle-cancel (handle)
   "Kill the process and cancel the retry timer tracked by HANDLE, if live."

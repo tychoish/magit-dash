@@ -1358,7 +1358,8 @@
   (with-temp-buffer
     (magit-dash-pr-test/rows-fixture)
     (let ((calls nil))
-      (cl-letf (((symbol-function 'magit-dash-gh--run-process)
+      (cl-letf (((symbol-function 'magit-dash-pr--prime-account-logins) #'ignore)
+                ((symbol-function 'magit-dash-gh--run-process)
                  (lambda (args _dir on-success &optional _on-error _attempt)
                    (push args calls)
                    (funcall on-success "{\"number\":2,\"title\":\"two v2\",\"state\":\"OPEN\"}")))
@@ -1886,7 +1887,8 @@
         (setq tabulated-list-entries
               (list (magit-dash-pr-dashboard--build-entry '((number . 1)) "bad")
                     (magit-dash-pr-dashboard--build-entry '((number . 2)) "o/r")))
-        (cl-letf (((symbol-function 'magit-dash-gh--run-process)
+        (cl-letf (((symbol-function 'magit-dash-pr--prime-account-logins) #'ignore)
+                  ((symbol-function 'magit-dash-gh--run-process)
                    (lambda (args &rest _) (push args views)))
                   ((symbol-function 'magit-dash-pr-status-fetch-one)
                    (lambda (slug number &rest _)
@@ -1930,6 +1932,7 @@
   `(let ((magit-dash-pr--account-logins (make-hash-table :test #'equal)))
      (cl-letf (((symbol-function 'magit-dash-gh--repo-account)
                 (lambda (&rest _) (and ,login (list :user ,login :host "github.com"))))
+               ((symbol-function 'magit-dash-gh--prime-account-token-async) #'ignore)
                ((symbol-function 'magit-dash-gh--run-process) #'ignore))
        ,@body)))
 
@@ -2318,7 +2321,8 @@
           (views nil)
           (view-done nil)
           (fetches nil))
-      (cl-letf (((symbol-function 'magit-dash-gh--run-process)
+      (cl-letf (((symbol-function 'magit-dash-pr--prime-account-logins) #'ignore)
+                ((symbol-function 'magit-dash-gh--run-process)
                  (lambda (args _dir on-success &rest _)
                    (push args views)
                    (setq view-done on-success)
@@ -3154,6 +3158,125 @@ spawns (which also error, so no network)."
                           (magit-dash-pr--clean-worktree-for-entry
                            (list :number 19 :repo "o/r" :pr nil) nil)))
               (should-not (file-directory-p wt)))))
+      (delete-directory repo t))))
+
+(ert-deftest magit-dash-pr/prime-account-logins-dedupes-unregistered-repos-per-host ()
+  "Priming spawns at most one async gh api user process per host across unregistered repos."
+  (let ((repo-a (make-temp-file "repo-a-" t))
+        (repo-b (make-temp-file "repo-b-" t))
+        (repo-ghe (make-temp-file "repo-ghe-" t))
+        (spawned nil))
+    (unwind-protect
+        (let ((magit-dash-repo-list nil)
+              (magit-dash-pr--account-logins (make-hash-table :test #'equal))
+              (magit-dash-pr--repo-hosts (make-hash-table :test #'equal)))
+          (call-process "git" nil nil nil "-C" repo-a "init" "-q")
+          (call-process "git" nil nil nil "-C" repo-a "remote" "add" "origin"
+                        "git@github.com:o/a.git")
+          (call-process "git" nil nil nil "-C" repo-b "init" "-q")
+          (call-process "git" nil nil nil "-C" repo-b "remote" "add" "origin"
+                        "https://github.com/o/b.git")
+          (call-process "git" nil nil nil "-C" repo-ghe "init" "-q")
+          (call-process "git" nil nil nil "-C" repo-ghe "remote" "add" "origin"
+                        "git@ghe.example.com:o/c.git")
+          (cl-letf (((symbol-function 'magit-dash-gh--repo-dir) (lambda () repo-a))
+                    ((symbol-function 'magit-dash-gh--run-process)
+                     (lambda (args dir &rest _)
+                       (push (cons dir args) spawned)
+                       nil)))
+            ;; Default priming with empty magit-dash-repo-list still primes current repo.
+            (magit-dash-pr--prime-account-logins)
+            (should (= 1 (length spawned)))
+            ;; Burst across unregistered repos on same and different hosts:
+            ;; github.com is already pending, so only ghe.example.com spawns.
+            (magit-dash-pr--prime-account-logins (list repo-a repo-b repo-ghe repo-b))
+            (should (= 2 (length spawned)))
+            (should (equal '("github.com" "ghe.example.com")
+                           (nreverse (seq-map (lambda (c) (cadr (member "--hostname" (cdr c))))
+                                              spawned))))
+            ;; Repeat burst inside retry window spawns 0 more processes.
+            (magit-dash-pr--prime-account-logins (list repo-a repo-b repo-ghe))
+            (should (= 2 (length spawned)))))
+      (delete-directory repo-a t)
+      (delete-directory repo-b t)
+      (delete-directory repo-ghe t))))
+
+(ert-deftest magit-dash-pr/unregistered-repo-worktree-and-refresh-entries-prime-logins ()
+  "Worktree calculations and refresh-entries prime unregistered repos non-blockingly."
+  (let ((repo (make-temp-file "unreg-repo-" t))
+        (spawned nil)
+        (callbacks nil)
+        (adds 0))
+    (unwind-protect
+        (let ((magit-dash-repo-list nil)
+              (magit-dash-pr--account-logins (make-hash-table :test #'equal))
+              (magit-dash-pr--repo-hosts (make-hash-table :test #'equal))
+              (entry (list :number 12 :repo "o/unreg" :repo-dir repo
+                           :pr '((author . ((login . "me")))
+                                 (headRefName . "feat")))))
+          (call-process "git" nil nil nil "-C" repo "init" "-q")
+          (call-process "git" nil nil nil "-C" repo "remote" "add" "origin"
+                        "git@ghe.example.com:o/unreg.git")
+          (cl-letf (((symbol-function 'magit-dash-gh--repo-account) #'ignore)
+                    ((symbol-function 'magit-dash-gh--repo-dir) (lambda () repo))
+                    ((symbol-function 'magit-dash-gh--run-process)
+                     (lambda (args dir on-success &rest _)
+                       (push (cons dir args) spawned)
+                       (when (equal (car args) "api")
+                         (push on-success callbacks))
+                       nil))
+                    ((symbol-function 'magit-dash-pr-status-fetch-one) #'ignore))
+            ;; 1. refresh-entries primes entry's unregistered repo without blocking.
+            (with-temp-buffer
+              (magit-dash-pr-dashboard-mode)
+              (setq tabulated-list-entries (list (list entry [])))
+              (magit-dash-pr-dashboard-refresh-entries (list entry)))
+            (should (= 1 (length (seq-filter (lambda (c) (equal (cadr c) "api")) spawned))))
+            ;; 2. Before login resolves, first worktree calculation does not block and yields cr-12.
+            (should (equal "cr-12"
+                           (file-name-nondirectory
+                            (magit-dash-pr-dashboard--worktree-path entry))))
+            ;; Still only 1 api user lookup in flight.
+            (should (= 1 (length (seq-filter (lambda (c) (equal (cadr c) "api")) spawned))))
+            ;; 3. Once primed, own PR for unregistered repo becomes pr-12.
+            (funcall (car callbacks) "me\n")
+            (should (equal "pr-12"
+                           (file-name-nondirectory
+                            (magit-dash-pr-dashboard--worktree-path entry))))
+            ;; 4. Fresh compute-worktree-path call also primes when cache is reset.
+            (clrhash magit-dash-pr--account-logins)
+            (magit-dash-pr--compute-worktree-path repo "cr-12" entry)
+            (should (= 2 (length (seq-filter (lambda (c) (equal (cadr c) "api")) spawned))))
+            ;; Complete second prime and verify create-worktree-for-entry creates pr-12.
+            (funcall (car callbacks) "me\n")
+            (magit-dash-pr-test--with-fake-git repo adds
+              (let ((created (magit-dash-pr--create-worktree-for-entry entry)))
+                (should (equal "pr-12" (file-name-nondirectory created)))
+                (should (= 1 adds))))))
+      (delete-directory repo t))))
+
+(ert-deftest magit-dash-pr/prime-account-logins-primes-configured-account-token ()
+  "Priming a repo with :gh-account caches its login and primes its token async."
+  (let* ((repo (make-temp-file "cfg-repo-" t))
+         (r (magit-dash-repo--make :name "cfg" :path repo
+                                   :gh-account "corp" :gh-host "ghe.example.com"))
+         (magit-dash-repo-list (list r))
+         (magit-dash-pr--account-logins (make-hash-table :test #'equal))
+         (magit-dash-pr--repo-hosts (make-hash-table :test #'equal))
+         (token-primes nil)
+         (api-calls nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'magit-dash-gh--repo-dir) #'ignore)
+                  ((symbol-function 'magit-dash-gh--prime-account-token-async)
+                   (lambda (user &optional host _cb)
+                     (push (list user host) token-primes)))
+                  ((symbol-function 'magit-dash-gh--run-process)
+                   (lambda (args &rest _) (push args api-calls) nil)))
+          (magit-dash-pr--prime-account-logins)
+          (should (equal '(("corp" "ghe.example.com")) token-primes))
+          (should (equal "corp" (map-elt magit-dash-pr--account-logins
+                                         '("corp" . "ghe.example.com"))))
+          (should-not api-calls))
       (delete-directory repo t))))
 
 
