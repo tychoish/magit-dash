@@ -19,6 +19,8 @@
 
 (require 'cl-lib)
 (require 'map)
+(require 'seq)
+(require 'subr-x)
 (require 'transient)
 
 (require 'annotated-completing-read)
@@ -32,6 +34,9 @@
 (declare-function magit-dash-gh-workflow-run "magit-dash-gh-actions")
 (declare-function magit-dash-pr-fetch "magit-dash-pr")
 (declare-function magit-dash-pr--confirm-delete "magit-dash-pr")
+(declare-function magit-dash-pr-clean-merged-worktrees "magit-dash-pr")
+(declare-function magit-dash-pr-delete-worktree "magit-dash-pr")
+(declare-function magit-dash-worktree-main-dir "magit-dash-worktree")
 (declare-function magit-dash-worktree-risks "magit-dash-worktree")
 (declare-function magit-dash-worktree-uncommitted-changes-p "magit-dash-worktree")
 (declare-function magit-dash-open "magit-dash")
@@ -68,20 +73,20 @@ Each value is a plist containing data like :stats, :pr-counts, etc.")
 (defun magit-dash-gh--cache-request (path key)
   "Register and return a new request token for PATH and KEY."
   (let ((token (cons nil nil)))
-    (puthash (cons path key) token magit-dash-gh--cache-requests)
+    (setf (map-elt magit-dash-gh--cache-requests (cons path key)) token)
     token))
 
 (defun magit-dash-gh--cache-set-if-current (path key value token)
   "Cache VALUE for PATH and KEY if TOKEN is still current."
-  (when (eq token (gethash (cons path key) magit-dash-gh--cache-requests))
+  (when (eq token (map-elt magit-dash-gh--cache-requests (cons path key)))
     (magit-dash-gh--cache-set path key value)))
 
 (defun magit-dash-gh--refresh-current-p (guards path)
   "Return non-nil when PATH's scheduled refresh in GUARDS is current.
 Nil GUARDS means that the work was not scheduled by a refresh."
   (or (null guards)
-      (eq (gethash path guards)
-          (gethash (cons path :refresh) magit-dash-gh--cache-requests))))
+      (eq (map-elt guards path)
+          (map-elt magit-dash-gh--cache-requests (cons path :refresh)))))
 
 (defun magit-dash-gh--cache-get (path key)
   "Return the value for KEY in the cache for repo at PATH."
@@ -93,13 +98,13 @@ Nil GUARDS means that the work was not scheduled by a refresh."
     (setf (map-elt magit-dash-gh--cache path) (plist-put plist key value))))
 
 (defun magit-dash-gh--cache-remove (path &optional key)
-  "Remove data for repo at PATH. If KEY is nil, remove all data."
+  "Remove data for repo at PATH.  If KEY is nil, remove all data."
   (if key
-      (remhash (cons path key) magit-dash-gh--cache-requests)
-    (maphash (lambda (request-key _token)
-               (when (equal (car request-key) path)
-                 (remhash request-key magit-dash-gh--cache-requests)))
-             magit-dash-gh--cache-requests))
+      (map-delete magit-dash-gh--cache-requests (cons path key))
+    (seq-do (lambda (request-key)
+              (when (equal (car request-key) path)
+                (map-delete magit-dash-gh--cache-requests request-key)))
+            (map-keys magit-dash-gh--cache-requests)))
   (if key
       (setf (map-elt magit-dash-gh--cache path)
             (seq-mapcat (lambda (pair) (unless (eq (car pair) key) pair))
@@ -466,20 +471,22 @@ Also emits a warning for any accounts that fail to authenticate."
   (interactive)
   (let* ((target-repos (or repos (and (boundp 'magit-dash-repo-list) magit-dash-repo-list)))
          (results nil))
-    (dolist (repo target-repos)
-      (when-let* ((account (magit-dash-repo-gh-account repo))
-                  (host (or (magit-dash-repo-gh-host repo) "github.com")))
-        (condition-case err
-            (progn
-              (magit-dash-gh--account-token account host)
-              (push (cons (magit-dash-repo-name repo) 'ok) results))
-          (error
-           (let ((msg (error-message-string err)))
-             (display-warning 'magit-dash
-                              (format "Failed to authenticate account '%s' for repo '%s': %s"
-                                      account (magit-dash-repo-name repo) msg)
-                              :warning)
-             (push (cons (magit-dash-repo-name repo) msg) results))))))
+    (seq-do
+     (lambda (repo)
+       (when-let* ((account (magit-dash-repo-gh-account repo))
+                   (host (or (magit-dash-repo-gh-host repo) "github.com")))
+         (condition-case err
+             (progn
+               (magit-dash-gh--account-token account host)
+               (push (cons (magit-dash-repo-name repo) 'ok) results))
+           (error
+            (let ((msg (error-message-string err)))
+              (display-warning 'magit-dash
+                               (format "Failed to authenticate account '%s' for repo '%s': %s"
+                                       account (magit-dash-repo-name repo) msg)
+                               :warning)
+              (push (cons (magit-dash-repo-name repo) msg) results))))))
+     target-repos)
     (nreverse results)))
 
 (defalias 'magit-dash-gh-validate-repo-accounts #'magit-dash-gh-validate-accounts)
@@ -491,13 +498,13 @@ If inside a linked worktree, resolves to the main repository checkout.
 Signals `user-error' when not inside a git repository."
   (let ((top (or (magit-toplevel)
                  (user-error "magit-gh: not inside a git repository"))))
-    (require 'magit-dash-worktree nil t)
     (if (fboundp 'magit-dash-worktree-main-dir)
         (magit-dash-worktree-main-dir top)
       top)))
 
 (defun magit-dash-gh--git-worktrees (repo-dir)
-  "Return a list of alists ((path . PATH) (branch . BRANCH) (head . HEAD)) for REPO-DIR."
+  "Return worktree alists for REPO-DIR.
+Each entry is ((path . PATH) (branch . BRANCH) (head . HEAD))."
   (when (and repo-dir (file-directory-p repo-dir))
     (with-temp-buffer
       (when (zerop (call-process "git" nil (current-buffer) nil
@@ -508,18 +515,21 @@ Signals `user-error' when not inside a git repository."
               (cur-path nil)
               (cur-head nil)
               (cur-branch nil))
-          (dolist (line lines)
-            (cond
-             ((string-prefix-p "worktree " line)
-              (when cur-path
-                (push `((path . ,cur-path) (head . ,cur-head) (branch . ,cur-branch)) worktrees)
-                (setq cur-head nil cur-branch nil))
-              (setq cur-path (string-trim (substring line 9))))
-             ((string-prefix-p "HEAD " line)
-              (setq cur-head (string-trim (substring line 5))))
-             ((string-prefix-p "branch " line)
-              (let ((ref (string-trim (substring line 7))))
-                (setq cur-branch (replace-regexp-in-string "^refs/heads/" "" ref))))))
+          (seq-do
+           (lambda (line)
+             (cond
+              ((string-prefix-p "worktree " line)
+               (when cur-path
+                 (push `((path . ,cur-path) (head . ,cur-head) (branch . ,cur-branch)) worktrees)
+                 (setq cur-head nil)
+                 (setq cur-branch nil))
+               (setq cur-path (string-trim (substring line 9))))
+              ((string-prefix-p "HEAD " line)
+               (setq cur-head (string-trim (substring line 5))))
+              ((string-prefix-p "branch " line)
+               (let ((ref (string-trim (substring line 7))))
+                 (setq cur-branch (replace-regexp-in-string "^refs/heads/" "" ref))))))
+           lines)
           (when cur-path
             (push `((path . ,cur-path) (head . ,cur-head) (branch . ,cur-branch)) worktrees))
           (nreverse worktrees))))))
@@ -714,14 +724,14 @@ PR and DEFAULT-BRANCH are as for `magit-dash-gh--commit-verified'."
    (magit-dash-gh--branch-tip branch path) pr path default-branch))
 
 (defun magit-dash-gh--prune-scan ()
-  "Re-scan all local branches against the closed/merged PR cache and git merged status.
+  "Re-scan local branches against the closed/merged PR cache and git status.
 Merges fresh GitHub data into the in-memory table stored in `:closed-prs'
 (seeded from disk on first call), persists the result, and rebuilds
-`:candidates'. Excludes the default branch and the currently checked-out
+`:candidates'.  Excludes the default branch and the currently checked-out
 branch, catching squash-merged branches whose remote tracking ref is gone
 as well as branches merged locally in git.
 Also scans for worktrees associated with merged branches or PRs.
-Stale marked branches are dropped from `:marked'. Returns new candidates."
+Stale marked branches are dropped from `:marked'.  Returns new candidates."
   (let* ((path (magit-dash-gh--repo-dir))
          (default-directory path)
          (state (magit-dash-gh--cache-get path :prune-state))
@@ -743,40 +753,44 @@ Stale marked branches are dropped from `:marked'. Returns new candidates."
          (merged-worktrees nil))
     ;; 1. Collect candidate branches: a closed PR matched by name only counts
     ;; when the branch tip is that PR's head, merged, or on a remote.
-    (dolist (branch (magit-list-local-branch-names))
-      (unless (member branch protected)
-        (let ((pr (or (map-elt closed-prs branch)
-                      (when (string-prefix-p "wt/" branch)
-                        (map-elt closed-prs (substring branch 3))))))
-          (cond
-           ((and pr (magit-dash-gh--branch-verified branch pr path def-branch))
-            (push (cons branch pr) candidates))
-           ((member branch git-merged)
-            (push (cons branch '((number . nil) (state . "MERGED")
-                                 (title . "merged into default branch (git)")))
-                  candidates))))))
+    (seq-do
+     (lambda (branch)
+       (unless (member branch protected)
+         (let ((pr (or (map-elt closed-prs branch)
+                       (when (string-prefix-p "wt/" branch)
+                         (map-elt closed-prs (substring branch 3))))))
+           (cond
+            ((and pr (magit-dash-gh--branch-verified branch pr path def-branch))
+             (push (cons branch pr) candidates))
+            ((member branch git-merged)
+             (push (cons branch '((number . nil) (state . "MERGED")
+                                  (title . "merged into default branch (git)")))
+                   candidates))))))
+     (magit-list-local-branch-names))
     (setq candidates (nreverse candidates))
     ;; 2. Collect merged worktrees, verified the same way by their HEAD.
-    (dolist (wt sub-wts)
-      (let* ((wt-path (alist-get 'path wt))
-             (wt-branch (alist-get 'branch wt))
-             (name (file-name-nondirectory (directory-file-name wt-path)))
-             (named-pr (or (when wt-branch (map-elt closed-prs wt-branch))
-                           (when (and wt-branch (string-prefix-p "wt/" wt-branch))
-                             (map-elt closed-prs (substring wt-branch 3)))
-                           (map-elt closed-prs name)
-                           (when (string-prefix-p "wt/" name)
-                             (map-elt closed-prs (substring name 3)))))
-             (matched-pr (cond
-                          ((and named-pr
-                                (magit-dash-gh--commit-verified
-                                 (alist-get 'head wt) named-pr path def-branch))
-                           named-pr)
-                          ((and wt-branch (member wt-branch git-merged))
-                           '((number . nil) (state . "MERGED")
-                             (title . "branch merged in git"))))))
-        (when matched-pr
-          (push (cons wt-path (cons wt-branch matched-pr)) merged-worktrees))))
+    (seq-do
+     (lambda (wt)
+       (let* ((wt-path (alist-get 'path wt))
+              (wt-branch (alist-get 'branch wt))
+              (name (file-name-nondirectory (directory-file-name wt-path)))
+              (named-pr (or (when wt-branch (map-elt closed-prs wt-branch))
+                            (when (and wt-branch (string-prefix-p "wt/" wt-branch))
+                              (map-elt closed-prs (substring wt-branch 3)))
+                            (map-elt closed-prs name)
+                            (when (string-prefix-p "wt/" name)
+                              (map-elt closed-prs (substring name 3)))))
+              (matched-pr (cond
+                           ((and named-pr
+                                 (magit-dash-gh--commit-verified
+                                  (alist-get 'head wt) named-pr path def-branch))
+                            named-pr)
+                           ((and wt-branch (member wt-branch git-merged))
+                            '((number . nil) (state . "MERGED")
+                              (title . "branch merged in git"))))))
+         (when matched-pr
+           (push (cons wt-path (cons wt-branch matched-pr)) merged-worktrees))))
+     sub-wts)
     (setq merged-worktrees (nreverse merged-worktrees))
     (magit-dash-gh--cache-set path
      :prune-state (list :candidates candidates
@@ -994,15 +1008,14 @@ Throws `magit-dash-gh--prune-exit' to terminate the menu loop."
      ((equal label "refresh")
       (magit-dash-gh--prune-scan))
      ((equal label "clean merged worktrees")
-      (require 'magit-dash-pr nil t)
       (if (fboundp 'magit-dash-pr-clean-merged-worktrees)
           (magit-dash-pr-clean-merged-worktrees path t)
         (user-error "magit-dash-pr-clean-merged-worktrees is not available"))
       (magit-dash-gh--prune-scan))
      ((equal label "clean worktrees & prune all branches")
-      (require 'magit-dash-pr nil t)
-      (when (fboundp 'magit-dash-pr-clean-merged-worktrees)
-        (magit-dash-pr-clean-merged-worktrees path t))
+      (if (fboundp 'magit-dash-pr-clean-merged-worktrees)
+          (magit-dash-pr-clean-merged-worktrees path t)
+        (message "magit-gh: magit-dash-pr-clean-merged-worktrees unavailable; skipping worktree cleanup"))
       (when candidates
         (magit-dash-gh--prune-delete-branches (seq-map #'car candidates) path t))
       (magit-dash-gh--prune-scan))
@@ -1017,7 +1030,6 @@ Throws `magit-dash-gh--prune-exit' to terminate the menu loop."
      ((assoc label candidates)
       (magit-dash-gh--prune-delete-branches (list label) path nil))
      ((assoc label merged-wts)
-      (require 'magit-dash-pr nil t)
       (if (fboundp 'magit-dash-pr-delete-worktree)
           (let* ((entry (cdr (assoc label merged-wts)))
                  (pr (cdr entry))
@@ -1148,22 +1160,23 @@ The leaf name is produced by `magit-dash-gh-collect-name-function'."
 KVS is a flat list of alternating string KEY and VALUE arguments."
   (let ((ht (make-hash-table :test #'equal)))
     (while kvs
-      (puthash (pop kvs) (pop kvs) ht))
+      (setf (map-elt ht (pop kvs)) (pop kvs)))
     ht))
 
 (defun magit-dash-gh--file-table (path type)
   "Return a string-keyed hash-table representing a collected file entry."
-  (let ((ht (make-hash-table :test #'equal)))
-    (puthash "path" path ht)
-    (puthash "type" type ht)
-    ht))
+  (map-into (list (cons "path" path)
+                  (cons "type" type))
+            '(hash-table :test equal)))
 
 (defun magit-dash-gh--write-index (dir data)
   "Write DATA hash-table as an index file inside DIR.
 Format is controlled by `magit-dash-gh-collect-index-format'."
   (pcase magit-dash-gh-collect-index-format
     ('yaml
-     (unless (require 'yaml nil t)
+     (unless (or (fboundp 'yaml-encode)
+                 (and (locate-library "yaml")
+                      (require 'yaml)))
        (user-error "magit-gh: yaml format requires the `yaml' package"))
      (with-temp-file (expand-file-name "index.yaml" dir)
        (insert (yaml-encode data))))
@@ -1451,20 +1464,20 @@ blocking `gh repo view' network calls."
 ;;; Account switching
 
 (defun magit-dash-gh--parse-auth-hosts-json (json-str)
-  "Parse JSON-STR from `gh auth status --json hosts' into a list of account plists.
+  "Parse JSON-STR from `gh auth status --json hosts' into account plists.
 Returns a list of (:host HOST :user USER :active ACTIVE-P) plists."
   (let* ((parsed (json-parse-string json-str :object-type 'alist :array-type 'list :false-object :false))
-         (hosts (map-elt parsed 'hosts))
-         (accounts nil))
-    (dolist (host-entry hosts)
-      (let* ((host-name (format "%s" (car host-entry)))
-             (users (cdr host-entry)))
-        (dolist (u users)
-          (push (list :host (or (map-elt u 'host) host-name)
-                      :user (map-elt u 'login)
-                      :active (eq (map-elt u 'active) t))
-                accounts))))
-    (nreverse accounts)))
+         (hosts (map-elt parsed 'hosts)))
+    (thread-last hosts
+                 (seq-mapcat
+                  (lambda (host-entry)
+                    (let ((host-name (format "%s" (car host-entry))))
+                      (seq-map
+                       (lambda (u)
+                         (list :host (or (map-elt u 'host) host-name)
+                               :user (map-elt u 'login)
+                               :active (eq (map-elt u 'active) t)))
+                       (cdr host-entry))))))))
 
 (defun magit-dash-gh--auth-accounts ()
   "Return a list of (:host HOST :user USER :active ACTIVE-P) plists.

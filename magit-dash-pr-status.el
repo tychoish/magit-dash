@@ -293,7 +293,7 @@ Callbacks of a cancelled job are never called."
     (setcdr job nil)))
 
 (defun magit-dash-pr-status--fetch-page-async (q dir first after on-success on-error &optional _attempt _delay job)
-  "Asynchronously fetch one page of FIRST PRs matching Q from DIR starting after cursor AFTER.
+  "Asynchronously fetch one page of FIRST PRs matching Q from DIR after AFTER.
 Call ON-SUCCESS with validated parsed response.
 Call ON-ERROR with error message string on fatal failure, including a
 failure to start `gh'.  Transient 5xx failures are retried only by
@@ -372,31 +372,31 @@ more than `magit-dash-pr-status-max-prs' PRs.  Touches no cache."
 
 (defun magit-dash-pr-status--fetch-search-async (q dir on-success on-error &optional job)
   "Run the PR query for search string Q from DIR asynchronously.
-Calls ON-SUCCESS with the combined parsed response or ON-ERROR with an error string.
+Call ON-SUCCESS with the combined response or ON-ERROR with a message.
 JOB is passed to `magit-dash-pr-status--fetch-page-async'."
   (let ((nodes nil)
-        (first-response nil))
-    (cl-labels
-        ((fetch-next
-          (after)
-          (magit-dash-pr-status--fetch-page-async
-           q dir magit-dash-pr-status-page-size after
-           (lambda (response)
-             (let* ((search (map-nested-elt response '(data search)))
-                    (page-nodes (map-elt search 'nodes))
-                    (next-after (map-nested-elt search '(pageInfo endCursor)))
-                    (more (eq t (map-nested-elt search '(pageInfo hasNextPage)))))
-               (setq first-response (or first-response response))
-               (setq nodes (append nodes page-nodes))
-               (if (and more (or (not (stringp next-after))
-                                 (>= (length nodes) magit-dash-pr-status-max-prs)))
-                   (funcall on-error "GitHub returned more PRs than the query limit")
-                 (if more
-                     (fetch-next next-after)
-                   (setf (map-elt (map-nested-elt first-response '(data search)) 'nodes) nodes)
-                   (funcall on-success first-response)))))
-           on-error nil nil job)))
-      (fetch-next nil))))
+        (first-response nil)
+        (fetch-next nil))
+    (setq fetch-next
+          (lambda (after)
+            (magit-dash-pr-status--fetch-page-async
+             q dir magit-dash-pr-status-page-size after
+             (lambda (response)
+               (let* ((search (map-nested-elt response '(data search)))
+                      (page-nodes (map-elt search 'nodes))
+                      (next-after (map-nested-elt search '(pageInfo endCursor)))
+                      (more (eq t (map-nested-elt search '(pageInfo hasNextPage)))))
+                 (setq first-response (or first-response response))
+                 (setq nodes (append nodes page-nodes))
+                 (if (and more (or (not (stringp next-after))
+                                   (>= (length nodes) magit-dash-pr-status-max-prs)))
+                     (funcall on-error "GitHub returned more PRs than the query limit")
+                   (if more
+                       (funcall fetch-next next-after)
+                     (setf (map-elt (map-nested-elt first-response '(data search)) 'nodes) nodes)
+                     (funcall on-success first-response)))))
+             on-error nil nil job)))
+    (funcall fetch-next nil)))
 
 (defun magit-dash-pr-status--bot-p (author)
   "Return non-nil when review AUTHOR (a GraphQL actor alist) is ignorable."
@@ -412,17 +412,19 @@ REVIEWS is a chronological list of review nodes.  Anything but COMMENTED
 or PENDING is decisive, matching GitHub: a later comment does not retract
 an approval."
   (let ((latest (make-hash-table :test #'equal)))
-    (dolist (review reviews)
-      (when (and review (not (eq review :null)) (or (consp review) (hash-table-p review)))
-        (let ((author (map-elt review 'author))
-              (state (map-elt review 'state)))
-          (unless (or (null author)
-                      (eq author :null)
-                      (not (or (consp author) (hash-table-p author)))
-                      (magit-dash-pr-status--bot-p author)
-                      (member state '("COMMENTED" "PENDING")))
-            (puthash (map-elt author 'login) state latest)))))
-    (hash-table-values latest)))
+    (seq-do
+     (lambda (review)
+       (when (and review (not (eq review :null)) (or (consp review) (hash-table-p review)))
+         (let ((author (map-elt review 'author))
+               (state (map-elt review 'state)))
+           (unless (or (null author)
+                       (eq author :null)
+                       (not (or (consp author) (hash-table-p author)))
+                       (magit-dash-pr-status--bot-p author)
+                       (member state '("COMMENTED" "PENDING")))
+             (setf (map-elt latest (map-elt author 'login)) state)))))
+     reviews)
+    (map-values latest)))
 
 (defun magit-dash-pr-status--approvals (reviews)
   "Count humans in REVIEWS whose latest decisive review is an approval."
@@ -442,10 +444,11 @@ an approval."
 
 (defun magit-dash-pr-status--failing (contexts)
   "Return (NAME . URL) for each failing check in CONTEXTS."
-  (mapcar (lambda (ctx)
-            (cons (or (map-elt ctx 'name) (map-elt ctx 'context) "unknown")
-                  (or (map-elt ctx 'detailsUrl) (map-elt ctx 'targetUrl))))
-          (seq-filter #'magit-dash-pr-status--context-failing-p contexts)))
+  (thread-last contexts
+               (seq-filter #'magit-dash-pr-status--context-failing-p)
+               (seq-map (lambda (ctx)
+                          (cons (or (map-elt ctx 'name) (map-elt ctx 'context) "unknown")
+                                (or (map-elt ctx 'detailsUrl) (map-elt ctx 'targetUrl)))))))
 
 (defun magit-dash-pr-status--ticket (branch)
   "Return the ticket id such as FND-1269 embedded in BRANCH, or nil."
@@ -477,11 +480,11 @@ an approval."
           :merge-state (map-elt node 'mergeStateStatus)
           :approvals (magit-dash-pr-status--approvals reviews)
           :changes-requested (magit-dash-pr-status--changes-requested reviews)
-          :requested (delq nil
-                           (mapcar (lambda (rr)
-                                     (let ((r (map-elt rr 'requestedReviewer)))
-                                       (or (map-elt r 'login) (map-elt r 'name))))
-                                   (map-nested-elt node '(reviewRequests nodes))))
+          :requested (thread-last (map-nested-elt node '(reviewRequests nodes))
+                                  (seq-map (lambda (rr)
+                                             (let ((r (map-elt rr 'requestedReviewer)))
+                                               (or (map-elt r 'login) (map-elt r 'name)))))
+                                  (delq nil))
           :ci (magit-dash-pr--parse-status-rollup contexts)
           :failing (magit-dash-pr-status--failing contexts)
           :threads-open (seq-count (lambda (th) (not (eq (map-elt th 'isOutdated) t)))
@@ -503,28 +506,31 @@ When several PRs share that head branch the first one in PRS wins."
 
 (defun magit-dash-pr-status--annotate-stacks (prs)
   "Return PRS with `:stack-parent' set on each stacked PR."
-  (mapcar (lambda (pr)
-            (plist-put (copy-sequence pr) :stack-parent
-                       (magit-dash-pr-status--stack-parent pr prs)))
-          prs))
+  (seq-map (lambda (pr)
+             (plist-put (copy-sequence pr) :stack-parent
+                        (magit-dash-pr-status--stack-parent pr prs)))
+           prs))
 
 (defun magit-dash-pr-status--annotate-buckets (prs required)
   "Return PRS with `:bucket' set on each PR, given REQUIRED approvals.
 REQUIRED is a count, or a function called with the PR plist that returns
 the count.  Also set `:required' to that count."
-  (mapcar (lambda (pr)
-            (let* ((count (if (functionp required) (funcall required pr) required))
-                   (new (plist-put (copy-sequence pr) :bucket
-                                   (magit-dash-pr-status--bucket pr count))))
-              (plist-put new :required count)))
-          prs))
+  (seq-map (lambda (pr)
+             (let* ((count (if (functionp required)
+                               (funcall required pr)
+                             required))
+                    (new (plist-put (copy-sequence pr) :bucket
+                                    (magit-dash-pr-status--bucket pr count))))
+               (plist-put new :required count)))
+           prs))
 
 (defun magit-dash-pr-status--parse (response required)
   "Return PR plists, sorted by number, parsed from GraphQL RESPONSE.
 REQUIRED is the approval count used to bucket each PR."
   (let* ((nodes (map-nested-elt response '(data search nodes)))
-         (prs (mapcar #'magit-dash-pr-status--node-to-pr
-                      (seq-filter (lambda (n) (map-elt n 'number)) nodes))))
+         (prs (thread-last nodes
+                           (seq-filter (lambda (n) (map-elt n 'number)))
+                           (seq-map #'magit-dash-pr-status--node-to-pr))))
     (magit-dash-pr-status--annotate-buckets
      (magit-dash-pr-status--annotate-stacks
       (sort prs (lambda (a b) (< (plist-get a :number) (plist-get b :number)))))
@@ -541,14 +547,17 @@ REQUIRED is the approval count used to bucket each PR."
 (defun magit-dash-pr-status--required-approvals (slug &optional dir)
   "Return the approvals required for repository SLUG.
 Fall back to `magit-dash-pr-status-required-approvals' when the
-registered value is missing or not a natural number.  DIR identifies the checkout."
+registered value is missing or not a natural number.
+DIR identifies the checkout."
   (let ((value (magit-dash-pr-repo-option
                 slug :required-approvals
                 magit-dash-pr-status-required-approvals dir)))
-    (if (natnump value) value magit-dash-pr-status-required-approvals)))
+    (if (natnump value)
+        value
+      magit-dash-pr-status-required-approvals)))
 
 (defun magit-dash-pr-status--bucket (pr required)
-  "Classify PR into its next step: `fix-ci', `threads', `reviews', `blocked' or `ready'.
+  "Classify PR into `fix-ci', `threads', `reviews', `blocked' or `ready'.
 REQUIRED is the approval count needed.  Earlier buckets win, so a PR with a
 failing check is never ready.  A PR with requested changes is handled as
 `threads' because the next step is to address the feedback."
@@ -677,9 +686,11 @@ cache is never touched."
   (magit-dash-pr-status--check-slug slug)
   (let ((prs (magit-dash-pr-status--collect
               slug dir (magit-dash-pr-status--required-approvals slug dir))))
-    (mapcar (lambda (pr)
-              (if (plist-get pr :repo) pr (plist-put (copy-sequence pr) :repo slug)))
-            prs)))
+    (seq-map (lambda (pr)
+               (if (plist-get pr :repo)
+                   pr
+                 (plist-put (copy-sequence pr) :repo slug)))
+             prs)))
 
 (defun magit-dash-pr-status--targets (dir)
   "Return the search targets for an all-repositories query run from DIR.
@@ -927,8 +938,9 @@ An optional command-line argument names the repository directory."
     (condition-case err
         (let ((result (pcase-let ((`(,slug . ,dir) (magit-dash-pr-status--current)))
                         (magit-dash-pr-status-run slug dir))))
-          (dolist (pr (plist-get result :prs))
-            (princ (concat (magit-dash-pr-status--line pr) "\n"))))
+          (seq-do (lambda (pr)
+                    (princ (concat (magit-dash-pr-status--line pr) "\n")))
+                  (plist-get result :prs)))
       (error
        (message "magit-dash-pr-status: %s" (error-message-string err))
        (kill-emacs 1)))))

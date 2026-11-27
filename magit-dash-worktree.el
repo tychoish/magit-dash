@@ -184,15 +184,18 @@ Combines `magit-dash-worktree-global-symlinks', matching entries from
                                     magit-dash-repo-list))))
          (struct-links (when (and repo-struct (fboundp 'magit-dash-repo-worktree-symlinks))
                          (magit-dash-repo-worktree-symlinks repo-struct)))
-         (map-links (let (found)
-                      (dolist (entry magit-dash-worktree-repo-symlinks)
-                        (let ((key (car entry))
-                              (val (cdr entry)))
-                          (when (or (and repo-name (equal key repo-name))
-                                    (equal (expand-file-name key) path)
-                                    (equal key (file-name-nondirectory (directory-file-name path))))
-                            (setq found (append found (if (listp val) val (list val)))))))
-                      found))
+         (map-links (thread-last magit-dash-worktree-repo-symlinks
+                                 (seq-filter (lambda (entry)
+                                               (let ((key (car entry)))
+                                                 (or (and repo-name (equal key repo-name))
+                                                     (equal (expand-file-name key) path)
+                                                     (equal key (file-name-nondirectory
+                                                                 (directory-file-name path)))))))
+                                 (seq-mapcat (lambda (entry)
+                                               (let ((val (cdr entry)))
+                                                 (if (listp val)
+                                                     val
+                                                   (list val)))))))
          (all (append magit-dash-worktree-global-symlinks map-links struct-links)))
     (delete-dups (seq-filter (lambda (s) (and (stringp s) (not (string-empty-p s)))) all))))
 
@@ -208,29 +211,31 @@ Returns an alist of ((TARGET . SOURCE) ...) for created or active symlinks."
          (targets (or symlinks (magit-dash-worktree-symlinks-for (or main wt))))
          (created '()))
     (unless (equal (file-name-as-directory wt) (file-name-as-directory main))
-      (dolist (rel targets)
-        (let ((src (expand-file-name rel main))
-              (dst (expand-file-name rel wt)))
-          ;; Only link if the source file or directory exists in the main worktree
-          (when (file-exists-p src)
-            (let ((parent-dir (file-name-directory (directory-file-name dst))))
-              (unless (file-directory-p parent-dir)
-                (make-directory parent-dir t)))
-            (cond
-             ;; If destination is already a symlink pointing to source, record it
-             ((and (file-symlink-p dst)
-                   (equal (expand-file-name (file-symlink-p dst) (file-name-directory dst))
-                          src))
-              (push (cons rel src) created))
-             ;; If destination does not exist (or is a stale symlink), create symlink
-             ((or (not (file-exists-p dst)) (file-symlink-p dst))
-              (when (file-symlink-p dst)
-                (delete-file dst))
-              (condition-case nil
-                  (progn
-                    (make-symbolic-link src dst t)
-                    (push (cons rel src) created))
-                (error nil))))))))
+      (seq-do
+       (lambda (rel)
+         (let ((src (expand-file-name rel main))
+               (dst (expand-file-name rel wt)))
+           ;; Only link if the source file or directory exists in the main worktree
+           (when (file-exists-p src)
+             (let ((parent-dir (file-name-directory (directory-file-name dst))))
+               (unless (file-directory-p parent-dir)
+                 (make-directory parent-dir t)))
+             (cond
+              ;; If destination is already a symlink pointing to source, record it
+              ((and (file-symlink-p dst)
+                    (equal (expand-file-name (file-symlink-p dst) (file-name-directory dst))
+                           src))
+               (push (cons rel src) created))
+              ;; If destination does not exist (or is a stale symlink), create symlink
+              ((or (not (file-exists-p dst)) (file-symlink-p dst))
+               (when (file-symlink-p dst)
+                 (delete-file dst))
+               (condition-case nil
+                   (progn
+                     (make-symbolic-link src dst t)
+                     (push (cons rel src) created))
+                 (error nil)))))))
+       targets))
     (nreverse created)))
 
 ;;;###autoload
@@ -259,13 +264,14 @@ worktree, syncs symlinks for all linked worktrees of that repository."
                          (error nil)))
              (count 0))
         (when wt-lines
-          (dolist (line wt-lines)
-            (when (string-prefix-p "worktree " line)
-              (let ((wt-dir (substring line 9)))
-                (unless (equal (file-name-as-directory (expand-file-name wt-dir))
-                               (file-name-as-directory main-dir))
-                  (let ((created (magit-dash-worktree-symlink-worktree wt-dir main-dir)))
-                    (setq count (+ count (length created)))))))))
+          (seq-do (lambda (line)
+                    (when (string-prefix-p "worktree " line)
+                      (let ((wt-dir (substring line 9)))
+                        (unless (equal (file-name-as-directory (expand-file-name wt-dir))
+                                       (file-name-as-directory main-dir))
+                          (let ((created (magit-dash-worktree-symlink-worktree wt-dir main-dir)))
+                            (setq count (+ count (length created))))))))
+                  wt-lines))
         (message "magit-dash-worktree: synced %d symlink(s) across worktrees of %s"
                  count (file-name-nondirectory (directory-file-name main-dir)))))))
 
@@ -511,27 +517,29 @@ DIRTY follows `magit-dash-worktree-uncommitted-changes-p': non-nil for
 modified, staged or untracked files, and also when git fails.  All the
 `git status' processes run at once, so N worktrees cost about one."
   (let (procs results)
-    (dolist (path paths)
-      (if (not (and path (file-directory-p path)))
-          (push (cons path nil) results)
-        (push (cons path (make-process
-                          :name "magit-dash-dirty"
-                          :buffer (generate-new-buffer " *magit-dash-dirty*" t)
-                          :command (append (list "git" "-C" (expand-file-name path))
-                                         magit-dash-worktree--status-args)
-                          :connection-type 'pipe :noquery t :sentinel #'ignore))
-              procs)))
-    (while (seq-some #'process-live-p (mapcar #'cdr procs))
+    (seq-do (lambda (path)
+              (if (not (and path (file-directory-p path)))
+                  (push (cons path nil) results)
+                (push (cons path (make-process
+                                  :name "magit-dash-dirty"
+                                  :buffer (generate-new-buffer " *magit-dash-dirty*" t)
+                                  :command (append (list "git" "-C" (expand-file-name path))
+                                                   magit-dash-worktree--status-args)
+                                  :connection-type 'pipe :noquery t :sentinel #'ignore))
+                      procs)))
+            paths)
+    (while (seq-some #'process-live-p (seq-map #'cdr procs))
       (accept-process-output nil 0.005))
-    (dolist (entry procs)
-      (let ((proc (cdr entry)))
-        (push (cons (car entry)
-                    (or (not (zerop (process-exit-status proc)))
-                        (with-current-buffer (process-buffer proc)
-                          (not (string-empty-p (string-trim (buffer-string)))))))
-              results)
-        (kill-buffer (process-buffer proc))))
-    (mapcar (lambda (path) (assoc path results)) paths)))
+    (seq-do (lambda (entry)
+              (let ((proc (cdr entry)))
+                (push (cons (car entry)
+                            (or (not (zerop (process-exit-status proc)))
+                                (with-current-buffer (process-buffer proc)
+                                  (not (string-empty-p (string-trim (buffer-string)))))))
+                      results)
+                (kill-buffer (process-buffer proc))))
+            procs)
+    (seq-map (lambda (path) (assoc path results)) paths)))
 
 ;;;###autoload
 (defun magit-dash-worktree-kill-buffers (&optional path)
@@ -710,8 +718,8 @@ REPO-DIR is retained for compatibility; the dashboard view determines scope."
 (defun magit-dash-worktree-review-prs (&optional repo-dir)
   "Review existing worktrees in REPO-DIR against GitHub pull requests.
 Prompts to rename worktrees that do not match the canonical PR naming format,
-and prompts to delete worktrees for merged PRs (refusing if uncommitted changes exist).
-Leaves branches intact until branch pruning."
+and prompts to delete worktrees for merged PRs (refusing when uncommitted
+changes exist).  Leaves branches intact until branch pruning."
   (interactive)
   (require 'magit-dash-pr)
   (magit-dash-pr-review-worktrees repo-dir t))
