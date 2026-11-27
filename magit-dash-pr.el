@@ -79,9 +79,7 @@
 
 (defun magit-dash-pr-code-review-available-p ()
   "Return non-nil when `code-review' is installed and available."
-  (or (fboundp 'code-review-start)
-      (and (locate-library "code-review")
-           (ignore-errors (require 'code-review nil t)))))
+  (fboundp 'code-review-start))
 ;;; Configuration
 
 (defvar magit-dash-pr-thread-limit 100
@@ -95,10 +93,12 @@
   "Warn about problems in OPTS, the `:pr' plist registered for repo NAME.
 Unknown keys and a `:required-approvals' that is not a natural number are
 reported; consumers fall back to their defaults for the latter."
-  (cl-loop for (k _) on opts by #'cddr
-           unless (memq k magit-dash-pr-known-options)
-           do (display-warning 'magit-dash
-                               (format "Unknown :pr option %S for %s" k name)))
+  (seq-do (lambda (pair)
+            (let ((k (car pair)))
+              (unless (memq k magit-dash-pr-known-options)
+                (display-warning 'magit-dash
+                                 (format "Unknown :pr option %S for %s" k name)))))
+          (seq-partition opts 2))
   (when (and (plist-member opts :required-approvals)
              (not (natnump (plist-get opts :required-approvals))))
     (display-warning
@@ -147,13 +147,14 @@ Returns a list of plists :id :resolved :path :creator :last-commentor.
 
 (defun magit-dash-pr--thread-table (thread)
   "Convert THREAD plist to a string-keyed hash-table for serialization."
-  (let ((ht (make-hash-table :test #'equal)))
-    (puthash "id"             (or (plist-get thread :id) "")                  ht)
-    (puthash "resolved"       (if (plist-get thread :resolved) t :false)      ht)
-    (puthash "path"           (or (plist-get thread :path) "")                ht)
-    (puthash "creator"        (or (plist-get thread :creator) "")             ht)
-    (puthash "last_commentor" (or (plist-get thread :last-commentor) "")      ht)
-    ht))
+  (map-into (list (cons "id" (or (plist-get thread :id) ""))
+                  (cons "resolved" (if (plist-get thread :resolved)
+                                       t
+                                     :false))
+                  (cons "path" (or (plist-get thread :path) ""))
+                  (cons "creator" (or (plist-get thread :creator) ""))
+                  (cons "last_commentor" (or (plist-get thread :last-commentor) "")))
+            '(hash-table :test equal)))
 
 (defun magit-dash-pr--truncate-text (text max-chars)
   "Truncate TEXT to MAX-CHARS characters, appending \"...\" if truncated."
@@ -163,7 +164,7 @@ Returns a list of plists :id :resolved :path :creator :last-commentor.
 
 (defun magit-dash-pr-parse-unresolved-threads (graphql-response &optional limit max-chars include-resolved)
   "Extract review thread summaries from GRAPHQL-RESPONSE alist.
-Returns a list of plists with keys :id :path :line :outdated :author :body :comments.
+Returns plists with :id :path :line :outdated :author :body :comments.
 When INCLUDE-RESOLVED is non-nil, includes resolved threads as well.
 Caps thread count at LIMIT (default 20, max 50) and each comment's body at
 MAX-CHARS (default 1000)."
@@ -700,7 +701,7 @@ Uses active columns.  WIDTH is available window width; when nil,
                     active))))
 
 (defvar-keymap magit-dash-pr-dashboard-review-map
-  :doc "Review, worktree and CI keys, mounted on `c' in `magit-dash-pr-dashboard-mode-map'."
+  :doc "Review, worktree and CI keys under `c' in PR dashboard."
   "r" #'magit-dash-pr-dashboard-diff-review
   "v" #'magit-dash-pr-dashboard-diff-review
   "w" #'magit-dash-pr-dashboard-create-worktree
@@ -806,28 +807,30 @@ Returns \"SUCCESS\", \"FAILURE\", \"PENDING\", \"ERROR\", or nil."
         (let ((has-failure nil)
               (has-pending nil)
               (has-success nil))
-          (dolist (item items)
-            (when (or (consp item) (hash-table-p item))
-              (let* ((state (when-let* ((s (or (map-elt item 'state) (map-elt item :state))))
-                              (upcase (format "%s" s))))
-                     (status (when-let* ((s (or (map-elt item 'status) (map-elt item :status))))
+          (seq-do
+           (lambda (item)
+             (when (or (consp item) (hash-table-p item))
+               (let* ((state (when-let* ((s (or (map-elt item 'state) (map-elt item :state))))
                                (upcase (format "%s" s))))
-                     (conclusion (when-let* ((c (or (map-elt item 'conclusion) (map-elt item :conclusion))))
-                                   (upcase (format "%s" c)))))
-                (cond
-                 ;; Direct failure conclusion or error/failure state
-                 ((or (member conclusion '("FAILURE" "TIMED_OUT" "STARTUP_FAILURE" "ACTION_REQUIRED" "CANCELLED"))
-                      (member state '("FAILURE" "ERROR")))
-                  (setq has-failure t))
-                 ;; In-progress / pending status or state
-                 ((or (member status '("IN_PROGRESS" "QUEUED" "WAITING" "PENDING" "REQUESTED"))
-                      (equal state "PENDING")
-                      (and (not (equal status "COMPLETED")) (or (null conclusion) (string-empty-p conclusion))))
-                  (setq has-pending t))
-                 ;; Completed success
-                 ((or (member conclusion '("SUCCESS" "NEUTRAL" "SKIPPED"))
-                      (equal state "SUCCESS"))
-                  (setq has-success t))))))
+                      (status (when-let* ((s (or (map-elt item 'status) (map-elt item :status))))
+                                (upcase (format "%s" s))))
+                      (conclusion (when-let* ((c (or (map-elt item 'conclusion) (map-elt item :conclusion))))
+                                    (upcase (format "%s" c)))))
+                 (cond
+                  ;; Direct failure conclusion or error/failure state
+                  ((or (member conclusion '("FAILURE" "TIMED_OUT" "STARTUP_FAILURE" "ACTION_REQUIRED" "CANCELLED"))
+                       (member state '("FAILURE" "ERROR")))
+                   (setq has-failure t))
+                  ;; In-progress / pending status or state
+                  ((or (member status '("IN_PROGRESS" "QUEUED" "WAITING" "PENDING" "REQUESTED"))
+                       (equal state "PENDING")
+                       (and (not (equal status "COMPLETED")) (or (null conclusion) (string-empty-p conclusion))))
+                   (setq has-pending t))
+                  ;; Completed success
+                  ((or (member conclusion '("SUCCESS" "NEUTRAL" "SKIPPED"))
+                       (equal state "SUCCESS"))
+                   (setq has-success t))))))
+           items)
           (cond
            (has-failure "FAILURE")
            (has-pending "PENDING")
@@ -1623,13 +1626,7 @@ marks freshly fetched data and is never dimmed."
                          active))))
             (if (and fetched-at
                      (magit-dash-pr-cache-stale-p (list :fetched-at fetched-at)))
-                (seq-into
-                 (seq-map (lambda (cell)
-                            (let ((copy (copy-sequence cell)))
-                              (add-face-text-property 0 (length copy) 'magit-dash-stale t copy)
-                              copy))
-                          cells)
-                 'vector)
+                (magit-dash-pr-cache-dim-cells cells)
               cells)))))
 
 (defun magit-dash-pr-dashboard--cache-row (pr repo-name &optional search-p)
@@ -2414,7 +2411,7 @@ cannot be loaded."
 
 ;;;###autoload
 (defun magit-dash-pr-dashboard-diff-review (&optional entry)
-  "Open a native-buffer `diff-review' session for the pull request at point (or ENTRY).
+  "Open a native `diff-review' session for the pull request at point or ENTRY.
 Deprecation note: `c r' used to open `code-review' and now opens
 `diff-review' like `c v'; `code-review' stays on `c b' when installed.
 `c r' remains bound for now but will be removed in a future release."
@@ -4139,128 +4136,149 @@ execute it there."
 
 (defun magit-dash-pr--create-batch-async (targets buffer existing missing)
   "Create TARGETS sequentially, updating BUFFER and reporting batch counts."
-  (let ((created 0) (failed 0))
-    (cl-labels
-        ((refresh ()
-           (when (buffer-live-p buffer)
-             (with-current-buffer buffer (magit-dash-pr-dashboard--rebuild-entries))))
-         (next (remaining)
-           (if (null remaining)
-               (progn (refresh)
-                      (message "magit-gh: batch creation complete — %d created, %d existing, %d without local checkout, %d failed"
-                               created existing missing failed))
-             (let* ((target (car remaining)) (entry (car target)) (branch (cdr target))
-                    (repo (plist-get entry :repo)) (number (plist-get entry :number))
-                    (key (magit-dash-pr-dashboard--norm-key repo number))
-                    (dir (magit-dash-pr-dashboard--find-local-path repo))
-                    (path (and dir (magit-dash-pr--compute-worktree-path
-                                    dir (magit-dash-pr--entry-worktree-name entry dir) entry))))
-               (cl-labels ((finish (error-message)
-                             (map-delete magit-dash-pr--pending-worktrees key)
-                             (if error-message
-                                 (progn (cl-incf failed)
-                                        (message "magit-gh: failed to create %s #%d: %s" repo number error-message))
-                               (cl-incf created)
-                               (message "magit-gh: created worktree for %s #%d" repo number))
-                             (refresh)
-                             (next (cdr remaining))))
-                 (cond
-                  ((not (and dir (file-directory-p dir))) (finish "local checkout unavailable"))
-                  ((let* ((main-dir (magit-dash-worktree-main-dir dir))
-                          (pr-data (or (plist-get entry :pr)
-                                       (and branch (list (cons 'number number)
-                                                         (cons 'headRefName branch))))))
-                     (if pr-data
-                         (magit-dash-pr--find-corroborated-worktree main-dir number pr-data repo)
-                       (magit-dash-pr--find-existing-worktree main-dir number)))
-                   (map-delete magit-dash-pr--pending-worktrees key)
-                   (cl-incf existing) (refresh) (next (cdr remaining)))
-                  (t
-                   (message "magit-gh: fetching %s #%d (%s)…" repo number branch)
-                   (magit-dash-pr--run-git-async
-                    dir (list "fetch" "origin" (format "pull/%d/head:%s" number branch))
-                    (lambda (code output)
-                      (if (not (zerop code)) (finish (string-trim output))
-                        (condition-case err
-                            (progn
-                              (make-directory (file-name-directory path) t)
-                              (magit-dash-pr--run-git-async
-                               dir (list "worktree" "add" path branch)
-                               (lambda (add-code add-output)
-                                 (if (not (zerop add-code)) (finish (string-trim add-output))
-                                   (condition-case symlink-error
-                                       (progn
-                                         (when (fboundp 'magit-dash-worktree-symlink-worktree)
-                                           (magit-dash-worktree-symlink-worktree path dir))
-                                         (finish nil))
-                                     (error (finish (error-message-string symlink-error))))))))
-                          (error (finish (error-message-string err))))))))))))))
-      (next targets))))
+  (let ((created 0)
+        (failed 0)
+        (refresh (lambda ()
+                   (when (buffer-live-p buffer)
+                     (with-current-buffer buffer
+                       (magit-dash-pr-dashboard--rebuild-entries)))))
+        (next nil))
+    (setq next
+          (lambda (remaining)
+            (if (null remaining)
+                (progn
+                  (funcall refresh)
+                  (message "magit-gh: batch creation complete — %d created, %d existing, %d without local checkout, %d failed"
+                           created existing missing failed))
+              (let* ((target (car remaining))
+                     (entry (car target))
+                     (branch (cdr target))
+                     (repo (plist-get entry :repo))
+                     (number (plist-get entry :number))
+                     (key (magit-dash-pr-dashboard--norm-key repo number))
+                     (dir (magit-dash-pr-dashboard--find-local-path repo))
+                     (path (and dir (magit-dash-pr--compute-worktree-path
+                                     dir (magit-dash-pr--entry-worktree-name entry dir) entry)))
+                     (finish (lambda (error-message)
+                               (map-delete magit-dash-pr--pending-worktrees key)
+                               (if error-message
+                                   (progn
+                                     (setq failed (1+ failed))
+                                     (message "magit-gh: failed to create %s #%d: %s"
+                                              repo number error-message))
+                                 (setq created (1+ created))
+                                 (message "magit-gh: created worktree for %s #%d" repo number))
+                               (funcall refresh)
+                               (funcall next (cdr remaining)))))
+                (cond
+                 ((not (and dir (file-directory-p dir)))
+                  (funcall finish "local checkout unavailable"))
+                 ((let* ((main-dir (magit-dash-worktree-main-dir dir))
+                         (pr-data (or (plist-get entry :pr)
+                                      (and branch (list (cons 'number number)
+                                                        (cons 'headRefName branch))))))
+                    (if pr-data
+                        (magit-dash-pr--find-corroborated-worktree main-dir number pr-data repo)
+                      (magit-dash-pr--find-existing-worktree main-dir number)))
+                  (map-delete magit-dash-pr--pending-worktrees key)
+                  (setq existing (1+ existing))
+                  (funcall refresh)
+                  (funcall next (cdr remaining)))
+                 (t
+                  (message "magit-gh: fetching %s #%d (%s)…" repo number branch)
+                  (magit-dash-pr--run-git-async
+                   dir (list "fetch" "origin" (format "pull/%d/head:%s" number branch))
+                   (lambda (code output)
+                     (if (not (zerop code))
+                         (funcall finish (string-trim output))
+                       (condition-case err
+                           (progn
+                             (make-directory (file-name-directory path) t)
+                             (magit-dash-pr--run-git-async
+                              dir (list "worktree" "add" path branch)
+                              (lambda (add-code add-output)
+                                (if (not (zerop add-code))
+                                    (funcall finish (string-trim add-output))
+                                  (condition-case symlink-error
+                                      (progn
+                                        (when (fboundp 'magit-dash-worktree-symlink-worktree)
+                                          (magit-dash-worktree-symlink-worktree path dir))
+                                        (funcall finish nil))
+                                    (error (funcall finish (error-message-string symlink-error))))))))
+                         (error (funcall finish (error-message-string err)))))))))))))
+    (funcall next targets)))
 
 (defun magit-dash-pr-dashboard-create-all-worktrees ()
   "Confirm and create worktrees for PRs in the current dashboard view."
   (interactive)
   (unless (derived-mode-p 'magit-dash-pr-dashboard-mode)
     (user-error "Open a PR dashboard and run this command in its buffer"))
-  (let ((targets nil) (existing 0) (missing 0) (queued 0))
-    (dolist (item tabulated-list-entries)
-      (let* ((entry (car item))
-             (repo (plist-get entry :repo))
-             (number (plist-get entry :number))
-             (path (magit-dash-pr-dashboard--find-local-path repo)))
-        (if (not (and path (file-directory-p path)))
-            (setq missing (1+ missing))
-          (let* ((main-dir (magit-dash-worktree-main-dir path))
-                 (pr (plist-get entry :pr))
-                 (known-branch (or (plist-get entry :head-ref)
-                                   (and pr (map-elt pr 'headRefName))))
-                 (corrob-pr (or (and (map-elt pr 'headRefName) pr)
-                                (and known-branch
-                                     (append pr (list (cons 'number number)
-                                                      (cons 'headRefName known-branch)))))))
-            (if (or (map-elt magit-dash-pr--pending-worktrees
-                             (magit-dash-pr-dashboard--norm-key repo number))
-                    (if corrob-pr
-                        (magit-dash-pr--find-corroborated-worktree main-dir number corrob-pr repo)
-                      (magit-dash-pr--find-existing-worktree main-dir number)))
-                (setq existing (1+ existing))
-              (let* ((resolved-pr (or corrob-pr
-                                      (and repo number
-                                           (magit-dash-pr--fetch-pr repo number main-dir))
-                                      pr))
-                     (branch (or (and resolved-pr (map-elt resolved-pr 'headRefName))
-                                 (magit-dash-pr--resolve-remote-branch
-                                  repo number resolved-pr main-dir)))
-                     (check-pr (or (and (map-elt resolved-pr 'headRefName) resolved-pr)
-                                   (append resolved-pr
-                                           (list (cons 'number number)
-                                                 (cons 'headRefName branch)))))
-                     (prepared (copy-sequence entry)))
-                (if (magit-dash-pr--find-corroborated-worktree main-dir number check-pr repo)
-                    (setq existing (1+ existing))
-                  ;; Preserve the reviewed branch for the actual creation.
-                  (setq prepared (plist-put prepared :pr check-pr))
-                  (push (cons prepared branch) targets))))))))
+  (let ((targets nil)
+        (existing 0)
+        (missing 0)
+        (queued 0))
+    (seq-do
+     (lambda (item)
+       (let* ((entry (car item))
+              (repo (plist-get entry :repo))
+              (number (plist-get entry :number))
+              (path (magit-dash-pr-dashboard--find-local-path repo)))
+         (if (not (and path (file-directory-p path)))
+             (setq missing (1+ missing))
+           (let* ((main-dir (magit-dash-worktree-main-dir path))
+                  (pr (plist-get entry :pr))
+                  (known-branch (or (plist-get entry :head-ref)
+                                    (and pr (map-elt pr 'headRefName))))
+                  (corrob-pr (or (and (map-elt pr 'headRefName) pr)
+                                 (and known-branch
+                                      (append pr (list (cons 'number number)
+                                                       (cons 'headRefName known-branch)))))))
+             (if (or (map-elt magit-dash-pr--pending-worktrees
+                              (magit-dash-pr-dashboard--norm-key repo number))
+                     (if corrob-pr
+                         (magit-dash-pr--find-corroborated-worktree main-dir number corrob-pr repo)
+                       (magit-dash-pr--find-existing-worktree main-dir number)))
+                 (setq existing (1+ existing))
+               (let* ((resolved-pr (or corrob-pr
+                                       (and repo number
+                                            (magit-dash-pr--fetch-pr repo number main-dir))
+                                       pr))
+                      (branch (or (and resolved-pr (map-elt resolved-pr 'headRefName))
+                                  (magit-dash-pr--resolve-remote-branch
+                                   repo number resolved-pr main-dir)))
+                      (check-pr (or (and (map-elt resolved-pr 'headRefName) resolved-pr)
+                                    (append resolved-pr
+                                            (list (cons 'number number)
+                                                  (cons 'headRefName branch)))))
+                      (prepared (copy-sequence entry)))
+                 (if (magit-dash-pr--find-corroborated-worktree main-dir number check-pr repo)
+                     (setq existing (1+ existing))
+                   ;; Preserve the reviewed branch for the actual creation.
+                   (setq prepared (plist-put prepared :pr check-pr))
+                   (push (cons prepared branch) targets))))))))
+     tabulated-list-entries)
     (setq targets (nreverse targets))
     (if (null targets)
         (message "magit-gh: no worktrees to create (%d existing, %d without local checkout)"
                  existing missing)
       (with-output-to-temp-buffer "*PR worktrees to create*"
         (princ "Worktrees to create from the current PR view:\n\n")
-        (dolist (target targets)
-          (let ((entry (car target)))
-            (princ (format "%s #%s  %s\n" (plist-get entry :repo)
-                           (plist-get entry :number) (cdr target)))))
+        (seq-do (lambda (target)
+                  (let ((entry (car target)))
+                    (princ (format "%s #%s  %s\n" (plist-get entry :repo)
+                                   (plist-get entry :number) (cdr target)))))
+                targets)
         (princ (format "\n%d existing; %d without local checkout.\n" existing missing)))
       (when (yes-or-no-p (format "Create %d worktree(s) listed in *PR worktrees to create*? "
                                  (length targets)))
         (setq queued (length targets))
-        (dolist (target targets)
-          (let ((entry (car target)))
-            (setf (map-elt magit-dash-pr--pending-worktrees
-                           (magit-dash-pr-dashboard--norm-key
-                            (plist-get entry :repo) (plist-get entry :number)))
-                  t)))
+        (seq-do (lambda (target)
+                  (let ((entry (car target)))
+                    (setf (map-elt magit-dash-pr--pending-worktrees
+                                   (magit-dash-pr-dashboard--norm-key
+                                    (plist-get entry :repo) (plist-get entry :number)))
+                          t)))
+                targets)
         (magit-dash-pr-dashboard--rebuild-entries)
         (magit-dash-pr--create-batch-async targets (current-buffer) existing missing)))
     (list :queued queued :existing existing :missing missing)))
@@ -4359,7 +4377,11 @@ list of check names) and `:last-seen' (a timestamp string).")
 
 (defun magit-dash-pr--failing-names (pr)
   "Return the sorted names of the failing checks of PR."
-  (sort (mapcar (lambda (f) (if (consp f) (car f) f)) (plist-get pr :failing))
+  (sort (seq-map (lambda (f)
+                   (if (consp f)
+                       (car f)
+                     f))
+                 (plist-get pr :failing))
         #'string<))
 
 (defun magit-dash-pr--tracking-snapshot (pr)
@@ -4422,8 +4444,8 @@ The tracking plist holds `:last-seen', `:previous-bucket', `:delta-type'
 `unchanged'), `:delta-reason', `:action-summary', `:failing-checks'
 \(names), `:threads-open', `:approvals', `:stack-parent' and `:ticket'.
 The cache is not modified; see `magit-dash-pr-commit-tracking'."
-  (let* ((previous (gethash (magit-dash-pr--tracking-key pr)
-                            magit-dash-pr--tracking-cache))
+  (let* ((previous (map-elt magit-dash-pr--tracking-cache
+                            (magit-dash-pr--tracking-key pr)))
          (delta (magit-dash-pr--delta pr previous)))
     (plist-put
      (copy-sequence pr) :tracking
@@ -4442,17 +4464,18 @@ The cache is not modified; see `magit-dash-pr-commit-tracking'."
   "Record a snapshot of each PR in PRS in the tracking cache.
 Return PRS.  Call this after consuming `magit-dash-pr-attach-tracking'
 deltas so the next collection compares against this state."
-  (dolist (pr prs)
-    (puthash (magit-dash-pr--tracking-key pr)
-             (magit-dash-pr--tracking-snapshot pr)
-             magit-dash-pr--tracking-cache))
+  (seq-do (lambda (pr)
+            (setf (map-elt magit-dash-pr--tracking-cache
+                           (magit-dash-pr--tracking-key pr))
+                  (magit-dash-pr--tracking-snapshot pr)))
+          prs)
   prs)
 
 (defun magit-dash-pr-tracking-fingerprint (prs)
   "Return a stable md5 hex string over the volatile fields of PRS.
 Covers repo, number, bucket, state, failing checks, open threads and
 approvals, independent of the order of PRS."
-  (let ((rows (mapcar
+  (let ((rows (seq-map
                (lambda (pr)
                  (format "%s#%s|%s|%s|%s|%s|%s"
                          (or (plist-get pr :repo) "") (plist-get pr :number)

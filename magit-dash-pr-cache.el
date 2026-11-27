@@ -125,6 +125,18 @@ When nil, all gone, closed, or merged records are prune candidates."
   "Face for rows whose cached data is older than the stale threshold."
   :group 'magit-dash)
 
+(defun magit-dash-pr-cache-dim-cells (cells)
+  "Return a copy of vector CELLS with `magit-dash-stale' added to strings."
+  (seq-into
+   (seq-map (lambda (cell)
+              (if (stringp cell)
+                  (let ((copy (copy-sequence cell)))
+                    (add-face-text-property 0 (length copy) 'magit-dash-stale t copy)
+                    copy)
+                cell))
+            cells)
+   'vector))
+
 (defun magit-dash-pr-cache-stale-seconds ()
   "Return the stale threshold in seconds."
   (* 60 (max magit-dash-pr-cache-minimum-stale-minutes
@@ -421,8 +433,7 @@ A malformed `:status' is dropped (with a message) but keeps the record."
       (let ((record (with-temp-buffer
                       (let ((coding-system-for-read 'utf-8-unix))
                         (insert-file-contents file))
-                      (let ((read-eval nil))
-                        (read (current-buffer))))))
+                      (read (current-buffer)))))
         (cond
          ((magit-dash-pr-cache--problem record)
           (message "magit-dash-pr-cache: skipping %s: %s"
