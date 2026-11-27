@@ -242,6 +242,231 @@
       (should (equal before (magit-dash-chain-test--git wt "rev-parse" "HEAD")))
       (should-error (magit-dash-update-branch wt :abort t)))))
 
+(ert-deftest magit-dash-update/abort-allows-pure-conflict-with-auto-merged-files ()
+  "Cleanly auto-merged files from base must not block aborting an untouched conflict."
+  (magit-dash-chain-test--with-env (root)
+    (let* ((repo (magit-dash-chain-test--make-repo root)))
+      (magit-dash-chain-test--commit repo "shared.txt" "one\ntwo\n" "shared")
+      (magit-dash-chain-test--commit repo "clean.txt" "clean\n" "clean")
+      (magit-dash-chain-test--git repo "push" "-q" "origin" "main")
+      (let* ((wt (magit-dash-update-test--worktree repo "topic"))
+             (before (progn
+                       (magit-dash-chain-test--commit wt "shared.txt" "one\ntopic\n" "topic edit")
+                       (magit-dash-chain-test--git wt "rev-parse" "HEAD"))))
+        (magit-dash-chain-test--commit repo "shared.txt" "one\nmain\n" "main conflict")
+        (magit-dash-chain-test--commit repo "clean.txt" "clean-main\n" "main clean")
+        (magit-dash-chain-test--commit repo "added.txt" "added\n" "main add")
+        (magit-dash-chain-test--git repo "push" "-q" "origin" "main")
+        (should (eq 'conflict (plist-get (magit-dash-update-branch wt) :outcome)))
+        (should-not (magit-dash-update--abort-staged-files wt (magit-dash-chain--state wt)))
+        (let ((res (magit-dash-update-branch wt :abort t)))
+          (should (eq 'aborted (plist-get res :outcome)))
+          (should-not (plist-get res :stashed)))
+        (should-not (magit-dash-chain--merge-in-progress-p wt))
+        (should (equal before (magit-dash-chain-test--git wt "rev-parse" "HEAD")))
+        (should-not (file-exists-p (expand-file-name "added.txt" wt)))))))
+
+(ert-deftest magit-dash-update/abort-refuses-resolved-staged-file-unattended ()
+  "Aborting refuses without discarding resolved+staged work when unattended."
+  (magit-dash-chain-test--with-env (root)
+    (let* ((repo (magit-dash-chain-test--make-repo root)))
+      (magit-dash-chain-test--commit repo "c1.txt" "one\ntwo\n" "c1")
+      (magit-dash-chain-test--commit repo "c2.txt" "one\ntwo\n" "c2")
+      (magit-dash-chain-test--git repo "push" "-q" "origin" "main")
+      (let ((wt (magit-dash-update-test--worktree repo "topic")))
+        (magit-dash-chain-test--commit wt "c1.txt" "one\ntopic1\n" "topic c1")
+        (magit-dash-chain-test--commit wt "c2.txt" "one\ntopic2\n" "topic c2")
+        (magit-dash-chain-test--commit repo "c1.txt" "one\nmain1\n" "main c1")
+        (magit-dash-chain-test--commit repo "c2.txt" "one\nmain2\n" "main c2")
+        (magit-dash-chain-test--git repo "push" "-q" "origin" "main")
+        (magit-dash-update-branch wt)
+        ;; Resolve and stage only c1.txt while c2.txt remains unmerged.
+        (magit-dash-update-resolve wt '((:file "c1.txt" :take "both")))
+        (should (equal '("c1.txt")
+                       (magit-dash-update--abort-staged-files wt (magit-dash-chain--state wt))))
+        (let ((err (should-error (magit-dash-update-branch wt :abort t) :type 'user-error)))
+          (should (string-match-p "c1\\.txt" (cadr err))))
+        (should (magit-dash-chain--merge-in-progress-p wt))
+        (should (equal "one\ntopic1\nmain1\n"
+                       (with-temp-buffer
+                         (insert-file-contents (expand-file-name "c1.txt" wt))
+                         (buffer-string))))
+        ;; Resolving the remaining file too still refuses until stashed or forced.
+        (magit-dash-update-resolve wt '((:file "c2.txt" :take "theirs")))
+        (should (equal '("c1.txt" "c2.txt")
+                       (magit-dash-update--abort-staged-files wt (magit-dash-chain--state wt))))
+        (should-error (magit-dash-update-branch wt :abort t) :type 'user-error)
+        (should (magit-dash-chain--merge-in-progress-p wt))))))
+
+(ert-deftest magit-dash-update/abort-prompts-and-stashes-when-interactive ()
+  "Interactive abort offers to stash resolved work; declining aborts nothing."
+  (magit-dash-chain-test--with-env (root)
+    (pcase-let* ((`(,_repo . ,wt) (magit-dash-update-test--conflict root))
+                 (before (magit-dash-chain-test--git wt "rev-parse" "HEAD"))
+                 (prompted nil))
+      (magit-dash-update-branch wt)
+      (magit-dash-update-resolve wt '((:file "shared.txt" :take "both")))
+      (cl-letf (((symbol-function 'magit-dash-worktree--unattended-p) (lambda () nil))
+                ((symbol-function 'yes-or-no-p)
+                 (lambda (prompt) (setq prompted prompt) nil)))
+        (should-error (magit-dash-update-branch wt :abort t) :type 'user-error)
+        (should (string-match-p "shared\\.txt" prompted))
+        (should (magit-dash-chain--merge-in-progress-p wt)))
+      (cl-letf (((symbol-function 'magit-dash-worktree--unattended-p) (lambda () nil))
+                ((symbol-function 'yes-or-no-p) (lambda (_prompt) t)))
+        (let ((res (magit-dash-update-branch wt :abort t)))
+          (should (eq 'aborted (plist-get res :outcome)))
+          (should (eq t (plist-get res :stashed)))
+          (should (equal '("shared.txt") (plist-get res :stashed-files)))))
+      (should-not (magit-dash-chain--merge-in-progress-p wt))
+      (should (equal before (magit-dash-chain-test--git wt "rev-parse" "HEAD")))
+      (magit-dash-chain-test--git wt "stash" "pop")
+      (should (equal "one\nfrom topic\nfrom main\n"
+                     (with-temp-buffer
+                       (insert-file-contents (expand-file-name "shared.txt" wt))
+                       (buffer-string)))))))
+
+(ert-deftest magit-dash-update/abort-stash-and-force-options ()
+  "Explicit :stash preserves partial resolution (even with unmerged files); :force discards."
+  (magit-dash-chain-test--with-env (root)
+    (let* ((repo (magit-dash-chain-test--make-repo root)))
+      (magit-dash-chain-test--commit repo "c1.txt" "one\ntwo\n" "c1")
+      (magit-dash-chain-test--commit repo "c2.txt" "one\ntwo\n" "c2")
+      (magit-dash-chain-test--commit repo "del.txt" "del\n" "del")
+      (magit-dash-chain-test--git repo "push" "-q" "origin" "main")
+      (let* ((wt (magit-dash-update-test--worktree repo "topic"))
+             (before (progn
+                       (magit-dash-chain-test--commit wt "c1.txt" "one\ntopic1\n" "topic c1")
+                       (magit-dash-chain-test--commit wt "c2.txt" "one\ntopic2\n" "topic c2")
+                       (magit-dash-chain-test--commit wt "del.txt" "del-topic\n" "topic del")
+                       (magit-dash-chain-test--git wt "rev-parse" "HEAD"))))
+        (magit-dash-chain-test--commit repo "c1.txt" "one\nmain1\n" "main c1")
+        (magit-dash-chain-test--commit repo "c2.txt" "one\nmain2\n" "main c2")
+        (magit-dash-chain-test--git repo "rm" "-q" "del.txt")
+        (magit-dash-chain-test--git repo "commit" "-q" "-m" "main rm del")
+        (magit-dash-chain-test--git repo "push" "-q" "origin" "main")
+        (magit-dash-update-branch wt)
+        ;; Resolve c1.txt and del.txt, leaving c2.txt unmerged.
+        (magit-dash-update-resolve wt '((:file "c1.txt" :take "both")))
+        (magit-dash-chain-test--git wt "rm" "-q" "del.txt")
+        (let ((res (magit-dash-update-branch wt :abort t :stash t)))
+          (should (eq 'aborted (plist-get res :outcome)))
+          (should (eq t (plist-get res :stashed)))
+          (should (equal '("c1.txt" "del.txt") (plist-get res :stashed-files))))
+        (should-not (magit-dash-chain--merge-in-progress-p wt))
+        (should (equal before (magit-dash-chain-test--git wt "rev-parse" "HEAD")))
+        ;; Popping the stash restores both c1.txt and the deletion of del.txt.
+        (magit-dash-chain-test--git wt "stash" "pop")
+        (should (equal "one\ntopic1\nmain1\n"
+                       (with-temp-buffer
+                         (insert-file-contents (expand-file-name "c1.txt" wt))
+                         (buffer-string))))
+        (should-not (file-exists-p (expand-file-name "del.txt" wt)))
+        ;; Clean up working tree and test :force t without stashing.
+        (magit-dash-chain-test--git wt "reset" "--hard" "-q" "HEAD")
+        (magit-dash-update-branch wt)
+        (magit-dash-update-resolve wt '((:file "c1.txt" :take "theirs")))
+        (let ((res (magit-dash-update-branch wt :abort t :force t)))
+          (should (eq 'aborted (plist-get res :outcome)))
+          (should-not (plist-get res :stashed)))
+        (should (equal "" (magit-dash-chain-test--git wt "stash" "list")))))))
+
+(ert-deftest magit-dash-update/abort-guards-unstaged-conflict-resolution ()
+  "Aborting refuses and stashes unstaged full or partial conflict resolutions."
+  (magit-dash-chain-test--with-env (root)
+    (let* ((repo (magit-dash-chain-test--make-repo root)))
+      (magit-dash-chain-test--commit repo "c1.txt" "a\nb\nc\nd\ne\nf\ng\n" "c1")
+      (magit-dash-chain-test--commit repo "c2.txt" "one\ntwo\n" "c2")
+      (magit-dash-chain-test--git repo "push" "-q" "origin" "main")
+      (let* ((wt (magit-dash-update-test--worktree repo "topic"))
+             (before (progn
+                       (magit-dash-chain-test--commit
+                        wt "c1.txt" "a\nb-topic\nc\nd\ne\nf-topic\ng\n" "topic c1")
+                       (magit-dash-chain-test--commit wt "c2.txt" "one\ntopic2\n" "topic c2")
+                       (magit-dash-chain-test--git wt "rev-parse" "HEAD"))))
+        (magit-dash-chain-test--commit
+         repo "c1.txt" "a\nb-main\nc\nd\ne\nf-main\ng\n" "main c1")
+        (magit-dash-chain-test--commit repo "c2.txt" "one\nmain2\n" "main c2")
+        (magit-dash-chain-test--git repo "push" "-q" "origin" "main")
+        (magit-dash-update-branch wt)
+        ;; Partially resolve c1.txt (hunk 0 only) WITHOUT staging.
+        (magit-dash-update-resolve
+         wt '((:file "c1.txt" :hunks ((:index 0 :take "ours")))) nil)
+        (should (equal '("c1.txt")
+                       (magit-dash-update--abort-staged-files wt (magit-dash-chain--state wt))))
+        (should-error (magit-dash-update-branch wt :abort t) :type 'user-error)
+        (should (magit-dash-chain--merge-in-progress-p wt))
+        ;; Fully resolve c1.txt WITHOUT staging; stash and abort.
+        (magit-dash-update-resolve wt '((:file "c1.txt" :take "both")) nil)
+        (let ((expected (with-temp-buffer
+                          (insert-file-contents (expand-file-name "c1.txt" wt))
+                          (buffer-string)))
+              (res (magit-dash-update-branch wt :abort t :stash t)))
+          (should (eq 'aborted (plist-get res :outcome)))
+          (should (eq t (plist-get res :stashed)))
+          (should (equal '("c1.txt") (plist-get res :stashed-files)))
+          (should-not (magit-dash-chain--merge-in-progress-p wt))
+          (should (equal before (magit-dash-chain-test--git wt "rev-parse" "HEAD")))
+          (magit-dash-chain-test--git wt "stash" "apply")
+          (should (equal expected
+                         (with-temp-buffer
+                           (insert-file-contents (expand-file-name "c1.txt" wt))
+                           (buffer-string)))))))))
+
+(ert-deftest magit-dash-update/abort-guards-unstaged-edit-to-auto-merged-file ()
+  "Aborting refuses and stashes unstaged edits to auto-merged files."
+  (magit-dash-chain-test--with-env (root)
+    (let* ((repo (magit-dash-chain-test--make-repo root)))
+      (magit-dash-chain-test--commit repo "shared.txt" "one\ntwo\n" "shared")
+      (magit-dash-chain-test--commit repo "clean.txt" "clean\n" "clean")
+      (magit-dash-chain-test--git repo "push" "-q" "origin" "main")
+      (let* ((wt (magit-dash-update-test--worktree repo "topic"))
+             (before (progn
+                       (magit-dash-chain-test--commit wt "shared.txt" "one\ntopic\n" "topic edit")
+                       (magit-dash-chain-test--git wt "rev-parse" "HEAD"))))
+        (magit-dash-chain-test--commit repo "shared.txt" "one\nmain\n" "main conflict")
+        (magit-dash-chain-test--commit repo "clean.txt" "clean-main\n" "main clean")
+        (magit-dash-chain-test--git repo "push" "-q" "origin" "main")
+        (magit-dash-update-branch wt)
+        (magit-dash-chain-test--write wt "clean.txt" "user-unstaged-edit\n")
+        (should (equal '("clean.txt")
+                       (magit-dash-update--abort-staged-files wt (magit-dash-chain--state wt))))
+        (let ((err (should-error (magit-dash-update-branch wt :abort t) :type 'user-error)))
+          (should (string-match-p "clean\\.txt" (cadr err))))
+        (should (magit-dash-chain--merge-in-progress-p wt))
+        (let ((res (magit-dash-update-branch wt :abort t :stash t)))
+          (should (eq 'aborted (plist-get res :outcome)))
+          (should (eq t (plist-get res :stashed)))
+          (should-not (magit-dash-chain--merge-in-progress-p wt))
+          (should (equal before (magit-dash-chain-test--git wt "rev-parse" "HEAD")))
+          (magit-dash-chain-test--git wt "stash" "apply")
+          (should (equal "user-unstaged-edit\n"
+                         (with-temp-buffer
+                           (insert-file-contents (expand-file-name "clean.txt" wt))
+                           (buffer-string)))))))))
+
+(ert-deftest magit-dash-update/abort-stash-handles-commas-and-gitignored-files ()
+  "Stashing handles filenames with commas and force-added gitignored files."
+  (magit-dash-chain-test--with-env (root)
+    (pcase-let* ((`(,_repo . ,wt) (magit-dash-update-test--conflict root)))
+      (magit-dash-chain-test--write wt ".gitignore" "ign,1.txt\n")
+      (magit-dash-chain-test--git wt "add" ".gitignore")
+      (magit-dash-chain-test--git wt "commit" "-q" "-m" "add gitignore")
+      (magit-dash-update-branch wt)
+      (magit-dash-chain-test--write wt "ign,1.txt" "secret-staged\n")
+      (magit-dash-chain-test--git wt "add" "-f" "ign,1.txt")
+      (magit-dash-chain-test--write wt "ign,1.txt" "secret-wt\n")
+      (let ((res (magit-dash-update-branch wt :abort t :stash t)))
+        (should (eq 'aborted (plist-get res :outcome)))
+        (should (eq t (plist-get res :stashed)))
+        (should (equal '("ign,1.txt") (plist-get res :stashed-files))))
+      (should-not (magit-dash-chain--merge-in-progress-p wt))
+      (magit-dash-chain-test--git wt "stash" "apply")
+      (should (equal "secret-wt\n"
+                     (with-temp-buffer
+                       (insert-file-contents (expand-file-name "ign,1.txt" wt))
+                       (buffer-string)))))))
+
 (ert-deftest magit-dash-update/batch-shares-one-fetch-and-isolates-errors ()
   (magit-dash-chain-test--with-env (root)
     (let* ((repo (magit-dash-chain-test--make-repo root))
@@ -405,6 +630,27 @@
         (should (equal '(1 1) (mapcar (lambda (r) (plist-get r :behind))
                                       (append (plist-get res :worktrees) nil)))))
       (should-error (magit-dash-mcp-call-tool "branch_update" (list :worktree "topic-a"))))))
+
+(ert-deftest magit-dash-update/mcp-abort-guards-resolved-work ()
+  (magit-dash-chain-test--with-env (root)
+    (pcase-let* ((`(,_repo . ,wt) (magit-dash-update-test--conflict root)))
+      (magit-dash-mcp-call-tool "branch_update" (list :worktree wt))
+      (magit-dash-mcp-call-tool
+       "branch_resolve"
+       (list :worktree wt :files (vector (list :file "shared.txt" :take "both"))))
+      (should-error (magit-dash-mcp-call-tool "branch_update" (list :worktree wt :abort t)))
+      (should (magit-dash-chain--merge-in-progress-p wt))
+      (let ((res (magit-dash-mcp-call-tool
+                  "branch_update" (list :worktree wt :abort t :stash t))))
+        (should (equal "aborted" (plist-get res :outcome)))
+        (should (eq t (plist-get res :stashed)))
+        (should (equal ["shared.txt"] (plist-get res :stashed_files))))
+      (should-not (magit-dash-chain--merge-in-progress-p wt))
+      (magit-dash-chain-test--git wt "stash" "pop")
+      (should (equal "one\nfrom topic\nfrom main\n"
+                     (with-temp-buffer
+                       (insert-file-contents (expand-file-name "shared.txt" wt))
+                       (buffer-string)))))))
 
 (provide 'test-magit-dash-update)
 ;;; test-magit-dash-update.el ends here

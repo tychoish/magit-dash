@@ -783,7 +783,9 @@ name such as \"pr-42\" needs `repo' and maps to `<root>/.wt/<name>'."
       (cl-loop for (k v) on res by #'cddr
                do (setq out
                         (append out
-                                (list k
+                                (list (if (eq k :stashed-files)
+                                          :stashed_files
+                                        k)
                                       (cond
                                        ((eq k :conflicts)
                                         (vconcat
@@ -795,14 +797,15 @@ name such as \"pr-42\" needs `repo' and maps to `<root>/.wt/<name>'."
                                                             :hunks (plist-get c :hunks))
                                                       (and cs (list :conflicts (vconcat cs))))))
                                           v)))
+                                       ((eq k :stashed-files) (vconcat v))
                                        ((memq k '(:outcome)) (magit-dash-mcp--json-value v))
-                                       ((memq k '(:rerere :merging :dirty))
+                                       ((memq k '(:rerere :merging :dirty :stashed))
                                         (if v t :false))
                                        (t (or v :null)))))))
       out)))
 
 (mcpkit-register-tool "branch_update" 'magit-dash
-  :description "Merge origin/<base> into a topic worktree in one call (never rebases, never pushes): fetches only the base branch, merges with --no-ff, and returns outcome merged | up-to-date | resumed | conflict. On conflict the worktree is left in its merge state and the conflicted files come back with kind, hunk count and (include_hunks) the ours/theirs text, ready for branch_resolve. Calling again after resolving finishes the merge. merge=false only reports ahead/behind. abort=true aborts the merge in progress. Pass `worktrees' to update several worktrees with one fetch per repository. Refuses detached HEAD, main/master and tracked changes. Push by hand only when the user asks."
+  :description "Merge origin/<base> into a topic worktree in one call (never rebases, never pushes): fetches only the base branch, merges with --no-ff, and returns outcome merged | up-to-date | resumed | conflict. On conflict the worktree is left in its merge state and the conflicted files come back with kind, hunk count and (include_hunks) the ours/theirs text, ready for branch_resolve. Calling again after resolving finishes the merge. merge=false only reports ahead/behind. abort=true aborts the merge in progress (refusing when resolved or staged changes exist unless stash=true or force=true). Pass `worktrees' to update several worktrees with one fetch per repository. Refuses detached HEAD, main/master and tracked changes. Push by hand only when the user asks."
   :input-schema
   '(:type "object"
     :properties (:worktree (:type "string"
@@ -819,12 +822,17 @@ name such as \"pr-42\" needs `repo' and maps to `<root>/.wt/<name>'."
                          :description "Perform the merge (default true); false only reports ahead/behind.")
                  :abort (:type "boolean"
                          :description "Abort the merge in progress instead of updating.")
+                 :stash (:type "boolean"
+                         :description "With abort=true, stash resolved or staged changes before aborting.")
+                 :force (:type "boolean"
+                         :description "With abort=true, discard resolved or staged changes without stashing.")
                  :include_hunks (:type "boolean"
                                  :description "On conflict, include each hunk's ours/theirs text (default true).")
                  :max_chars (:type "integer"
                              :description "Total hunk text returned (default 6000); later hunks are marked truncated."))
     :required [])
-  (let* ((many (plist-get args :worktrees))
+  (let* ((magit-dash-worktree-unattended t)
+         (many (plist-get args :worktrees))
          (dirs (if many
                    (mapcar (lambda (w) (magit-dash-mcp--worktree-dir (list :worktree w :repo (plist-get args :repo))))
                            (seq-into many 'list))
@@ -838,6 +846,8 @@ name such as \"pr-42\" needs `repo' and maps to `<root>/.wt/<name>'."
                      :fetch (funcall flag :fetch t)
                      :merge (funcall flag :merge t)
                      :abort (funcall flag :abort nil)
+                     :stash (funcall flag :stash nil)
+                     :force (funcall flag :force nil)
                      :include-hunks (funcall flag :include_hunks t)
                      :max-chars (plist-get args :max_chars))))
     (if many

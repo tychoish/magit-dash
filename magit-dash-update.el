@@ -32,6 +32,7 @@
 (require 'seq)
 (require 'subr-x)
 (require 'magit-dash-chain)
+(require 'magit-dash-worktree)
 
 (defgroup magit-dash-update nil
   "Update a topic worktree from its base branch."
@@ -176,14 +177,257 @@ INCLUDE-HUNKS, each hunk's text is included until MAX-CHARS (default
            (error "%s is the base branch; nothing to update" branch)))
     branch))
 
+(defun magit-dash-update--abort-staged-files (dir state &optional details)
+  "Return sorted paths in DIR with resolved, staged, or worktree merge changes.
+STATE is `magit-dash-chain--state' for DIR.  Excludes untouched
+unmerged paths and files that `git merge' auto-merged without further
+edits.  With DETAILS non-nil, return a plist (:files :staged :wt-reset)."
+  (let* ((unmerged (plist-get state :unmerged))
+         (mhs (let ((r (magit-dash-chain--git dir "rev-parse" "MERGE_HEAD")))
+                (and (zerop (car r))
+                     (magit-dash-update--lines (cdr r)))))
+         (mt (and (= (length mhs) 1)
+                  (magit-dash-chain--git
+                   dir "-c" "core.quotePath=false"
+                   "merge-tree" "--write-tree" "HEAD" (car mhs))))
+         (mt-lines (and mt (memq (car mt) '(0 1))
+                        (magit-dash-update--lines (cdr mt))))
+         (staged
+          (if (and mt-lines (string-match-p "\\`[0-9a-f]\\{40,\\}\\'" (car mt-lines)))
+              (let* ((tree (car mt-lines))
+                     (orig-unmerged
+                      (thread-last
+                        (cdr mt-lines)
+                        (seq-take-while (lambda (line)
+                                          (string-match-p "\\`[0-7]+ [0-9a-f]+ [123]\t" line)))
+                        (seq-map (lambda (line)
+                                   (when (string-match "\t\\(.*\\)\\'" line)
+                                     (match-string 1 line))))
+                        (delq nil)
+                        delete-dups))
+                     (resolved (seq-remove (lambda (f) (member f unmerged)) orig-unmerged))
+                     (diff-lines
+                      (magit-dash-update--lines
+                       (magit-dash-chain--git-ok
+                        dir "-c" "core.quotePath=false"
+                        "diff-index" "--cached" "--name-status" tree))))
+                (thread-last
+                  diff-lines
+                  (seq-map (lambda (line)
+                             (when (string-match "\\`\\([^\t]+\\)\t\\(.*\\)\\'" line)
+                               (let ((status (match-string 1 line))
+                                     (path (match-string 2 line)))
+                                 (when (and (not (equal status "U"))
+                                            (not (member path unmerged)))
+                                   path)))))
+                  (delq nil)
+                  (append resolved)
+                  delete-dups))
+            (thread-last
+              (magit-dash-chain--git-ok
+               dir "-c" "core.quotePath=false"
+               "diff" "--cached" "--name-only")
+              (magit-dash-update--lines)
+              (seq-remove (lambda (f) (member f unmerged)))
+              delete-dups)))
+         (wt-non-unmerged
+          (thread-last
+            (magit-dash-chain--git-ok
+             dir "-c" "core.quotePath=false"
+             "diff-files" "--name-only")
+            (magit-dash-update--lines)
+            (seq-remove (lambda (f) (member f unmerged)))))
+         (wt-unmerged
+          (when unmerged
+            (let ((stages-by-file nil)
+                  (tmp-dir nil))
+              (seq-do
+               (lambda (line)
+                 (when (string-match
+                        "\\`[0-7]+ \\([0-9a-f]+\\) \\([123]\\)\t\\(.*\\)\\'" line)
+                   (let ((oid (match-string 1 line))
+                         (stage (string-to-number (match-string 2 line)))
+                         (file (match-string 3 line)))
+                     (push (cons stage oid)
+                           (alist-get file stages-by-file nil nil #'equal)))))
+               (magit-dash-update--lines
+                (magit-dash-chain--git-ok
+                 dir "-c" "core.quotePath=false" "ls-files" "-u")))
+              (unwind-protect
+                  (seq-filter
+                   (lambda (file)
+                     (let* ((stages (cdr (assoc file stages-by-file)))
+                            (oid1 (cdr (assq 1 stages)))
+                            (oid2 (cdr (assq 2 stages)))
+                            (oid3 (cdr (assq 3 stages)))
+                            (path (expand-file-name file dir)))
+                       (cond
+                        ((and oid2 oid3)
+                         (if (not (file-regular-p path))
+                             t
+                           (unless tmp-dir
+                             (setq tmp-dir (make-temp-file "magit-dash-mf-" t)))
+                           (let ((f1 (expand-file-name "s1" tmp-dir))
+                                 (f2 (expand-file-name "s2" tmp-dir))
+                                 (f3 (expand-file-name "s3" tmp-dir)))
+                             (if oid1
+                                 (process-file "git" nil (list :file f1) nil
+                                               "-C" dir "cat-file" "blob" oid1)
+                               (write-region "" nil f1 nil 'silent))
+                             (process-file "git" nil (list :file f2) nil
+                                           "-C" dir "cat-file" "blob" oid2)
+                             (process-file "git" nil (list :file f3) nil
+                                           "-C" dir "cat-file" "blob" oid3)
+                             (let ((expected
+                                    (with-temp-buffer
+                                      (set-buffer-multibyte nil)
+                                      (process-file "git" nil t nil "-C" dir
+                                                    "merge-file" "-p" f2 f1 f3)
+                                      (goto-char (point-min))
+                                      (while (re-search-forward
+                                              "^\\(<<<<<<<\\||||||||\\|>>>>>>>\\) [^\r\n]*"
+                                              nil t)
+                                        (replace-match "\\1" t nil))
+                                      (buffer-string)))
+                                   (actual
+                                    (with-temp-buffer
+                                      (set-buffer-multibyte nil)
+                                      (let ((coding-system-for-read 'binary))
+                                        (insert-file-contents path))
+                                      (goto-char (point-min))
+                                      (while (re-search-forward
+                                              "^\\(<<<<<<<\\||||||||\\|>>>>>>>\\) [^\r\n]*"
+                                              nil t)
+                                        (replace-match "\\1" t nil))
+                                      (buffer-string))))
+                               (not (equal expected actual))))))
+                        (oid2
+                         (or (not (or (file-exists-p path) (file-symlink-p path)))
+                             (not (equal oid2
+                                         (magit-dash-chain--git-ok
+                                          dir "hash-object" "--" file)))))
+                        (oid3
+                         (or (not (or (file-exists-p path) (file-symlink-p path)))
+                             (not (equal oid3
+                                         (magit-dash-chain--git-ok
+                                          dir "hash-object" "--" file)))))
+                        (t
+                         (or (file-exists-p path) (file-symlink-p path))))))
+                   unmerged)
+                (when (and tmp-dir (file-directory-p tmp-dir))
+                  (delete-directory tmp-dir t))))))
+         (all (seq-sort #'string<
+                        (delete-dups (append staged wt-non-unmerged wt-unmerged)))))
+    (if details
+        (list :files all :staged staged :wt-reset wt-non-unmerged)
+      all)))
+
+(defun magit-dash-update--stash-merge-work (dir branch files &optional staged-files)
+  "Store a git stash entry in DIR for FILES from BRANCH's merge.
+STAGED-FILES is the subset of FILES with staged/resolved index changes
+\(defaults to all stage-0 entries among FILES).  Uses a temporary index
+seeded from HEAD so unmerged paths elsewhere do not block stashing."
+  (let* ((head (magit-dash-chain--head dir))
+         (stage-map
+          (thread-last
+            (apply #'magit-dash-chain--git-ok
+                   dir "-c" "core.quotePath=false"
+                   "ls-files" "--stage" "--" files)
+            (magit-dash-update--lines)
+            (seq-map (lambda (line)
+                       (when (string-match
+                              "\\`\\([0-7]+\\) \\([0-9a-f]+\\) 0\t\\(.*\\)\\'"
+                              line)
+                         (cons (match-string 3 line)
+                               (cons (match-string 1 line)
+                                     (match-string 2 line))))))
+            (delq nil)))
+         (idx-targets (or staged-files
+                          (seq-filter (lambda (f) (assoc f stage-map)) files)))
+         (base-env (if (zerop (car (magit-dash-chain--git dir "var" "GIT_COMMITTER_IDENT")))
+                       process-environment
+                     (append '("GIT_AUTHOR_NAME=magit-dash"
+                               "GIT_AUTHOR_EMAIL=magit-dash@local"
+                               "GIT_COMMITTER_NAME=magit-dash"
+                               "GIT_COMMITTER_EMAIL=magit-dash@local")
+                             process-environment)))
+         (tmp-dir nil))
+    (unwind-protect
+        (progn
+          (setq tmp-dir (make-temp-file "magit-dash-stash-" t))
+          (let* ((tmp-idx (expand-file-name "index" tmp-dir))
+                 (stash-env (cons (concat "GIT_INDEX_FILE=" tmp-idx) base-env))
+                 (idx-tree nil)
+                 (wt-tree nil))
+            (let ((process-environment stash-env)
+                  (present (seq-filter (lambda (f) (assoc f stage-map)) idx-targets))
+                  (removed (seq-remove (lambda (f) (assoc f stage-map)) idx-targets)))
+              (magit-dash-chain--git-ok dir "read-tree" "HEAD")
+              (when removed
+                (apply #'magit-dash-chain--git-ok
+                       dir "rm" "--cached" "-q" "--ignore-unmatch" "--" removed))
+              (seq-do
+               (lambda (file)
+                 (let ((entry (cdr (assoc file stage-map))))
+                   (magit-dash-chain--git-ok
+                    dir "update-index" "--add" "--cacheinfo"
+                    (car entry) (cdr entry) file)))
+               present)
+              (setq idx-tree (magit-dash-chain--git-ok dir "write-tree"))
+              (seq-do
+               (lambda (file)
+                 (let ((path (expand-file-name file dir)))
+                   (cond
+                    ((file-symlink-p path)
+                     (let ((sym-file (expand-file-name "sym" tmp-dir)))
+                       (let ((coding-system-for-write 'no-conversion))
+                         (write-region (encode-coding-string (file-symlink-p path) 'utf-8)
+                                       nil sym-file nil 'silent))
+                       (magit-dash-chain--git-ok
+                        dir "update-index" "--add" "--cacheinfo"
+                        "120000"
+                        (magit-dash-chain--git-ok dir "hash-object" "-w" "--" sym-file)
+                        file)))
+                    ((file-exists-p path)
+                     (magit-dash-chain--git-ok
+                      dir "update-index" "--add" "--cacheinfo"
+                      (if (file-executable-p path)
+                          "100755"
+                        "100644")
+                      (magit-dash-chain--git-ok dir "hash-object" "-w" "--" file)
+                      file))
+                    (t
+                     (magit-dash-chain--git-ok
+                      dir "rm" "--cached" "-q" "--ignore-unmatch" "--" file)))))
+               files)
+              (setq wt-tree (magit-dash-chain--git-ok dir "write-tree")))
+            (let* ((process-environment base-env)
+                   (label (or branch "HEAD"))
+                   (idx-commit (magit-dash-chain--git-ok
+                                dir "commit-tree" idx-tree "-p" head
+                                "-m" (format "index on %s: merge-abort resolved work" label)))
+                   (wt-commit (magit-dash-chain--git-ok
+                               dir "commit-tree" wt-tree "-p" head "-p" idx-commit
+                               "-m" (format "WIP on %s: merge-abort resolved work" label))))
+              (magit-dash-chain--git-ok
+               dir "stash" "store"
+               "-m" (format "magit-dash-update: resolved merge work on %s (%s)"
+                            label (string-join files ", "))
+               wt-commit))))
+      (when (and tmp-dir (file-directory-p tmp-dir))
+        (delete-directory tmp-dir t)))))
+
 (cl-defun magit-dash-update-branch (dir &key base (fetch t) (merge t) abort
-                                        include-hunks max-chars)
+                                        stash force include-hunks max-chars)
   "Merge origin/BASE into the topic branch checked out in worktree DIR.
 BASE defaults to the repository's default branch.  FETCH (default t)
 fetches just that branch from origin first.  Without MERGE, only report
 how far the branch is ahead of and behind the base.  With ABORT, abort
-the merge in progress instead.  An in-progress merge of the same base is
-resumed, so calling again after resolving conflicts finishes it.
+the merge in progress instead; refuses if resolved, staged, or
+working-tree merge changes exist unless STASH saves them first, FORCE
+discards them, or an interactive caller confirms stashing.  An
+in-progress merge of the same base is resumed, so calling again after
+resolving conflicts finishes it.
 
 Return a plist: :branch, :base, :head, and for a merge :outcome (`merged',
 `up-to-date', `resumed' or `conflict'), :sha or :conflicts (see
@@ -193,10 +437,41 @@ a failed fetch."
   (let* ((dir (file-name-as-directory (expand-file-name dir)))
          (state (magit-dash-chain--state dir)))
     (if abort
-        (progn
-          (unless (plist-get state :merging) (error "No merge in progress in %s" dir))
+        (let* ((branch (plist-get state :branch))
+               (info (progn
+                       (unless (plist-get state :merging)
+                         (error "No merge in progress in %s" dir))
+                       (magit-dash-update--abort-staged-files dir state t)))
+               (work (plist-get info :files))
+               (wt-reset (plist-get info :wt-reset))
+               (stashed nil))
+          (when work
+            (cond
+             (stash
+              (magit-dash-update--stash-merge-work
+               dir branch work (plist-get info :staged))
+              (setq stashed t))
+             (force nil)
+             ((magit-dash-worktree--unattended-p)
+              (user-error
+               "Refusing to abort merge in %s: resolved or staged changes in %s (stash first or pass :stash t / :force t)"
+               dir (string-join work ", ")))
+             ((yes-or-no-p
+               (format "Merge in %s has resolved or staged changes (%s).  Stash them before aborting? "
+                       (abbreviate-file-name dir) (string-join work ", ")))
+              (magit-dash-update--stash-merge-work
+               dir branch work (plist-get info :staged))
+              (setq stashed t))
+             (t
+              (user-error
+               "Merge abort cancelled: resolved or staged changes remain in %s (%s)"
+               dir (string-join work ", ")))))
+          (when wt-reset
+            (apply #'magit-dash-chain--git-ok dir "checkout" "-q" "--" wt-reset))
           (magit-dash-chain--git-ok dir "merge" "--abort")
-          (list :branch (plist-get state :branch) :outcome 'aborted))
+          (append (list :branch branch :outcome 'aborted)
+                  (when stashed
+                    (list :stashed t :stashed-files work))))
       (let* ((base (or base (magit-dash-chain--default-base dir)))
              (_ (when (or (string-prefix-p "-" base) (string-match-p "[[:space:]]" base))
                   (error "Invalid base branch name %S" base)))
