@@ -420,7 +420,7 @@ TABLE defaults to the on-disk cache for the current repo.
 Uses a single gh call fetching up to `magit-dash-prune-pr-limit' PRs."
   (let* ((default-directory (magit-dash-gh--repo-dir))
 	 (table (or table (magit-dash-gh--prune-load-cache)))
-	 (cmd (format "gh pr list --state all --limit %d --json number,state,headRefName,headRefOid,title"
+	 (cmd (format "gh pr list --state all --limit %d --json number,state,headRefName,headRefOid,title,isCrossRepository,headRepositoryOwner"
 		      magit-dash-prune-pr-limit))
 	 (output (magit-dash-gh-with-account (magit-dash-gh--repo-account default-directory)
                    (string-trim (shell-command-to-string cmd)))))

@@ -612,5 +612,26 @@
         (should-not reviewed)
         (kill-buffer "*magit-dash-chain*")))))
 
+(ert-deftest magit-dash-chain/validate-ignores-plain-directory-and-uses-real-worktree ()
+  "Chain validation ignores plain dirs/unrelated worktrees and uses real branch worktree."
+  (magit-dash-chain-test--with-env (root)
+    (let* ((repo (magit-dash-chain-test--setup-chain root))
+           (plain (expand-file-name ".wt/feat-a" repo))
+           (unrelated (expand-file-name ".wt/pr-1" repo)))
+      (make-directory plain t)
+      (magit-dash-chain-test--git repo "worktree" "add" "-q" "-b" "unrelated" unrelated)
+      (let* ((chain (magit-dash-chain-validate
+                     (magit-dash-chain-discover repo 1 nil magit-dash-chain-test--prs)))
+             (node-a (car (plist-get chain :nodes))))
+        (should-not (plist-get node-a :worktree-exists)))
+      (let ((real-wt (expand-file-name ".wt/real-feat-a" repo)))
+        (magit-dash-chain-test--git repo "worktree" "add" "-q" real-wt "feat/a")
+        (let* ((chain (magit-dash-chain-validate
+                       (magit-dash-chain-discover repo 1 nil magit-dash-chain-test--prs)))
+               (node-a (car (plist-get chain :nodes))))
+          (should (plist-get node-a :worktree-exists))
+          (should (equal (directory-file-name (file-truename real-wt))
+                         (directory-file-name (file-truename (plist-get node-a :worktree))))))))))
+
 (provide 'test-magit-dash-chain)
 ;;; test-magit-dash-chain.el ends here

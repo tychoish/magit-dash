@@ -349,18 +349,23 @@
 
 (ert-deftest magit-dash-pr/open-worktree-opens-existing ()
   "open-worktree switches directly to existing worktree."
-  (let ((setup-path nil))
+  (let ((setup-path nil)
+        (wt-path (expand-file-name "/tmp/myrepo/.wt/pr-42")))
     (cl-letf (((symbol-function 'magit-dash-pr-own-p) (lambda (&rest _) t))
               ((symbol-function 'magit-dash-pr-dashboard--entry-at-point)
                (lambda () '(:number 42 :repo "owner/myrepo" :pr nil)))
               ((symbol-function 'magit-dash-pr-dashboard--find-local-path)
                (lambda (_) "/tmp/myrepo"))
+              ((symbol-function 'magit-dash-pr--fetch-pr)
+               (lambda (&rest _) '((number . 42) (headRefName . "pr-42"))))
+              ((symbol-function 'magit-dash-pr--git-worktrees)
+               (lambda (_) (list (list (cons 'path wt-path) (cons 'branch "pr-42")))))
               ((symbol-function 'file-directory-p)
                (lambda (dir) (string-suffix-p ".wt/pr-42" dir)))
               ((symbol-function 'magit-status-setup-buffer)
                (lambda (path) (setq setup-path path))))
       (magit-dash-pr-dashboard-open-worktree)
-      (should (equal (expand-file-name "/tmp/myrepo/.wt/pr-42") setup-path)))))
+      (should (equal wt-path setup-path)))))
 
 (ert-deftest magit-dash-pr/open-worktree-fetches-and-creates ()
   "open-worktree runs git fetch and git worktree add when worktree does not yet exist."
@@ -641,14 +646,16 @@
 
 (ert-deftest magit-dash-pr/worktree-detection-finds-dot-wt ()
   "worktree-exists-p detects existing worktrees in .wt directory."
-  (let ((entry '(:number 10 :repo "owner/test-repo" :pr nil)))
+  (let ((entry '(:number 10 :repo "owner/test-repo" :pr nil))
+        (wt-path (expand-file-name "/tmp/test-repo/.wt/pr-10")))
     (cl-letf (((symbol-function 'magit-dash-pr-dashboard--find-local-path)
                (lambda (_) "/tmp/test-repo"))
+              ((symbol-function 'magit-dash-pr--git-worktrees)
+               (lambda (_) (list (list (cons 'path wt-path) (cons 'branch "pr-10")))))
               ((symbol-function 'file-directory-p)
                (lambda (path)
                  (member (directory-file-name path)
-                         (list (expand-file-name "/tmp/test-repo")
-                               (expand-file-name "/tmp/test-repo/.wt/pr-10"))))))
+                         (list (expand-file-name "/tmp/test-repo") wt-path)))))
       (should (magit-dash-pr-dashboard--worktree-exists-p entry)))))
 
 (ert-deftest magit-dash-pr/build-entry-updated-column ()
@@ -1110,6 +1117,8 @@
     (let (created proposed (confirm nil)
           (magit-dash-pr--pending-worktrees (make-hash-table :test #'equal)))
       (cl-letf (((symbol-function 'magit-dash-pr-dashboard--find-local-path) (lambda (_) "/tmp"))
+                ((symbol-function 'magit-dash-pr--git-worktrees)
+                 (lambda (_) '(((path . "/tmp/existing") (branch . "existing")))))
                 ((symbol-function 'magit-dash-pr--find-existing-worktree)
                  (lambda (_dir number &rest _) (when (= number 10) "/tmp/existing")))
                 ((symbol-function 'magit-dash-pr--fetch-repo-prs)
@@ -1242,7 +1251,11 @@
     (cl-letf (((symbol-function 'magit-dash-pr-own-p) (lambda (&rest _) t))
               ((symbol-function 'magit-dash-pr-dashboard--find-local-path)
                (lambda (_) "/tmp/myrepo"))
+              ((symbol-function 'magit-dash-worktree-main-dir)
+               (lambda (&optional d) (or d "/tmp/myrepo")))
               ((symbol-function 'file-directory-p) (lambda (_) t))
+              ((symbol-function 'magit-dash-pr--git-worktrees)
+               (lambda (_) '(((path . "/tmp/myrepo/other-dir") (branch . "feature")))))
               ((symbol-function 'magit-dash-pr--find-existing-worktree)
                (lambda (&rest _) "/tmp/myrepo/other-dir"))
               ((symbol-function 'y-or-n-p)
@@ -1463,6 +1476,8 @@
         (created nil))
     (cl-letf (((symbol-function 'magit-dash-pr-dashboard--find-local-path)
                (lambda (_) "/tmp/repo"))
+              ((symbol-function 'magit-dash-pr--git-worktrees)
+               (lambda (_) '(((path . "/tmp/repo/.wt/pr-10") (branch . "feat-10")))))
               ((symbol-function 'magit-dash-pr--find-existing-worktree)
                (lambda (_repo num &rest _)
                  (when (= num 10) "/tmp/repo/.wt/pr-10")))
@@ -1524,7 +1539,7 @@
       ;; Check args with :conflicts
       (let ((args (magit-dash-pr-dashboard--build-args
                    '(:repo "org/repo" :conflicts t))))
-        (should (member "number,title,state,mergedAt,author,createdAt,updatedAt,comments,reviewDecision,reviewRequests,statusCheckRollup,isDraft,url,headRefName,headRefOid,baseRefName,baseRefOid,mergeable,mergeStateStatus" args))
+        (should (member "number,title,state,mergedAt,author,createdAt,updatedAt,comments,reviewDecision,reviewRequests,statusCheckRollup,isDraft,url,headRefName,headRefOid,baseRefName,baseRefOid,mergeable,mergeStateStatus,isCrossRepository,headRepositoryOwner" args))
         (should (seq-some (lambda (a) (string-match-p "CONFLICTING.*DIRTY" a)) args)))
       ;; Check views menu binding
       (let ((flat (format "%S" (get 'magit-dash-pr-views-menu 'transient--layout))))
@@ -1963,18 +1978,23 @@
 (defmacro magit-dash-pr-test--with-fake-git (repo adds &rest body)
   "Run BODY with git/branch plumbing stubbed for REPO, counting adds in ADDS."
   (declare (indent 2))
-  `(cl-letf (((symbol-function 'magit-dash-pr-dashboard--find-local-path) (lambda (_) ,repo))
-             ((symbol-function 'magit-dash-pr--resolve-remote-branch) (lambda (&rest _) "feat"))
-             ((symbol-function 'magit-dash-pr--git-worktrees) (lambda (_) nil))
-             ((symbol-function 'magit-dash-worktree-symlink-worktree) #'ignore)
-             ((symbol-function 'y-or-n-p) (lambda (&rest _) (ert-fail "unexpected y-or-n-p")))
-             ((symbol-function 'magit-call-git)
-              (lambda (&rest args)
-                (when (equal (car args) "worktree")
-                  (cl-incf ,adds)
-                  (make-directory (nth 2 args) t))
-                0)))
-     ,@body))
+  (let ((wts-var (gensym "fake-wts-")))
+    `(let ((,wts-var nil))
+       (cl-letf (((symbol-function 'magit-dash-pr-dashboard--find-local-path) (lambda (_) ,repo))
+                 ((symbol-function 'magit-dash-pr--resolve-remote-branch) (lambda (&rest _) "feat"))
+                 ((symbol-function 'magit-dash-pr--git-worktrees) (lambda (_) ,wts-var))
+                 ((symbol-function 'magit-dash-worktree-symlink-worktree) #'ignore)
+                 ((symbol-function 'y-or-n-p) (lambda (&rest _) (ert-fail "unexpected y-or-n-p")))
+                 ((symbol-function 'magit-call-git)
+                  (lambda (&rest args)
+                    (when (equal (car args) "worktree")
+                      (cl-incf ,adds)
+                      (make-directory (nth 2 args) t)
+                      (push (list (cons 'path (nth 2 args))
+                                  (cons 'branch (nth 3 args)))
+                            ,wts-var))
+                    0)))
+         ,@body))))
 
 (ert-deftest magit-dash-pr/create-worktree-names-by-owner-and-is-idempotent ()
   (seq-do
@@ -2020,21 +2040,26 @@
     (unwind-protect
         (magit-dash-pr-test--with-owner "me"
           (magit-dash-pr-test--with-fake-git repo adds
-            (should (equal legacy (magit-dash-pr--create-worktree-for-entry entry)))
-            (should (= 0 adds))))
+            (cl-letf (((symbol-function 'magit-dash-pr--git-worktrees)
+                       (lambda (_) (list (list (cons 'path legacy) (cons 'branch "feat"))))))
+              (should (equal legacy (magit-dash-pr--create-worktree-for-entry entry)))
+              (should (= 0 adds)))))
       (delete-directory repo t))))
 
 (ert-deftest magit-dash-pr/find-existing-prefers-computed-name-deterministically ()
-  (let* ((repo (make-temp-file "repo" t))
+  (let* ((repo (magit-dash-test--make-repo))
          (pr (expand-file-name ".wt/pr-3" repo))
          (cr (expand-file-name ".wt/cr-3" repo)))
-    (make-directory pr t)
-    (make-directory cr t)
     (unwind-protect
-        (cl-letf (((symbol-function 'magit-dash-pr--git-worktrees) (lambda (_) nil)))
-          (should (equal cr (magit-dash-pr--find-existing-worktree repo 3 nil "cr-3")))
-          (should (equal pr (magit-dash-pr--find-existing-worktree repo 3 nil "pr-3")))
-          (should (equal pr (magit-dash-pr--find-existing-worktree repo 3))))
+        (progn
+          (magit-dash-test--git repo "worktree" "add" "-q" "-b" "b-pr" pr)
+          (magit-dash-test--git repo "worktree" "add" "-q" "-b" "b-cr" cr)
+          (should (magit-dash-pr--path-equal-p
+                   cr (magit-dash-pr--find-existing-worktree repo 3 nil "cr-3")))
+          (should (magit-dash-pr--path-equal-p
+                   pr (magit-dash-pr--find-existing-worktree repo 3 nil "pr-3")))
+          (should (magit-dash-pr--path-equal-p
+                   pr (magit-dash-pr--find-existing-worktree repo 3))))
       (delete-directory repo t))))
 
 (ert-deftest magit-dash-pr/unstubbed-own-p-nil-login-names-cr ()
@@ -2856,6 +2881,122 @@ spawns (which also error, so no network)."
                         (keymap-lookup magit-dash-pr-dashboard-mode-map "v c")))))
       (seq-do (lambda (b) (when (buffer-live-p b) (kill-buffer b)))
               created-bufs))))
+
+(ert-deftest magit-dash-pr/find-existing-ignores-plain-non-worktree-directories ()
+  "Plain directories named pr-N, cr-N, or <repo>-pr-N are never returned."
+  (let* ((parent (make-temp-file "md-pr-plain-" t))
+         (repo (expand-file-name "myrepo" parent)))
+    (unwind-protect
+        (progn
+          (make-directory repo t)
+          (magit-dash-test--git repo "init" "-q" "-b" "main")
+          (with-temp-file (expand-file-name "f.txt" repo) (insert "x\n"))
+          (magit-dash-test--git repo "add" "f.txt")
+          (magit-dash-test--git repo "commit" "-q" "-m" "init")
+          (seq-do (lambda (dir) (make-directory dir t))
+                  (list (expand-file-name ".wt/pr-5" repo)
+                        (expand-file-name ".wt/cr-5" repo)
+                        (expand-file-name "myrepo-pr-5" parent)
+                        (expand-file-name "myrepo-cr-5" parent)
+                        (expand-file-name ".wt/feat-5" repo)
+                        (expand-file-name "myrepo-feat-5" parent)))
+          ;; Even an unrelated standalone git repo in .wt/pr-6 is not a worktree of repo.
+          (let ((standalone (expand-file-name ".wt/pr-6" repo)))
+            (make-directory standalone t)
+            (magit-dash-test--git standalone "init" "-q" "-b" "pr-6"))
+          (should-not (magit-dash-pr--find-existing-worktree repo 5 "feat-5"))
+          (should-not (magit-dash-pr--find-existing-worktree repo 6))
+          ;; A real registered linked worktree IS returned.
+          (let ((wt7 (expand-file-name ".wt/pr-7" repo)))
+            (magit-dash-test--git repo "worktree" "add" "-q" "-b" "pr-7" wt7)
+            (should (magit-dash-pr--path-equal-p
+                     wt7 (magit-dash-pr--find-existing-worktree repo 7)))))
+      (delete-directory parent t))))
+
+(ert-deftest magit-dash-pr/fork-pr-colliding-branch-does-not-match-user-worktree ()
+  "A fork PR never matches the user's own branch worktree or main checkout."
+  (let ((repo (magit-dash-test--make-repo)))
+    (unwind-protect
+        (let ((user-wt (expand-file-name ".wt/fix-typo" repo))
+              (fork-pr '((number . 42)
+                         (headRefName . "fix-typo")
+                         (isCrossRepository . t)
+                         (state . "MERGED"))))
+          (magit-dash-test--git repo "worktree" "add" "-q" "-b" "fix-typo" user-wt)
+          (should-not (magit-dash-pr--find-corroborated-worktree repo 42 fork-pr))
+          (let ((wt-alist (seq-find
+                           (lambda (w)
+                             (magit-dash-pr--path-equal-p (alist-get 'path w) user-wt))
+                           (magit-dash-pr--git-worktrees repo))))
+            (should wt-alist)
+            (should-not (magit-dash-pr--match-worktree-corroborated
+                         wt-alist (list fork-pr) "o/r" repo t))))
+      (delete-directory repo t))))
+
+(ert-deftest magit-dash-pr/fork-pr-p-detects-cross-repo-and-owner ()
+  "magit-dash-pr--fork-pr-p checks isCrossRepository and headRepositoryOwner."
+  (should (magit-dash-pr--fork-pr-p '((isCrossRepository . t))))
+  (should-not (magit-dash-pr--fork-pr-p '((isCrossRepository . :false)) "owner/repo"))
+  (should (magit-dash-pr--fork-pr-p
+           '((headRepositoryOwner . ((login . "forkuser"))))
+           "owner/repo"))
+  (should-not (magit-dash-pr--fork-pr-p
+               '((headRepositoryOwner . ((login . "Owner"))))
+               "owner/repo")))
+
+(ert-deftest magit-dash-pr/find-existing-excludes-main-when-given-linked-worktree ()
+  "Passing a linked worktree as repo-dir never returns the main checkout."
+  (let ((repo (magit-dash-test--make-repo)))
+    (unwind-protect
+        (let ((wt (expand-file-name ".wt/wt1" repo)))
+          (magit-dash-test--git repo "checkout" "-q" "-b" "pr-5")
+          (magit-dash-test--git repo "worktree" "add" "-q" "-b" "other" wt)
+          (should-not (magit-dash-pr--find-existing-worktree wt 5 "pr-5")))
+      (delete-directory repo t))))
+
+(ert-deftest magit-dash-pr/create-worktree-for-entry-rejects-wrong-branch-and-unfetched-fork ()
+  "create-worktree-for-entry never reuses a wrong-branch pr-N or fork user branch."
+  (let ((repo (magit-dash-test--make-repo)))
+    (unwind-protect
+        (let ((bad-wt (expand-file-name ".wt/pr-42" repo))
+              (user-wt (expand-file-name ".wt/fix-typo" repo)))
+          (magit-dash-test--git repo "worktree" "add" "-q" "-b" "unrelated" bad-wt)
+          (magit-dash-test--git repo "worktree" "add" "-q" "-b" "fix-typo" user-wt)
+          (cl-letf (((symbol-function 'magit-dash-pr-own-p) (lambda (&rest _) t))
+                    ((symbol-function 'magit-dash-pr--fetch-pr)
+                     (lambda (_repo num _dir)
+                       (when (= num 99)
+                         '((number . 99) (headRefName . "fix-typo")
+                           (isCrossRepository . t)))))
+                    ((symbol-function 'magit-call-git) (lambda (&rest _) 1)))
+            ;; Wrong-branch .wt/pr-42 is refused instead of silently reused.
+            (should-error
+             (magit-dash-pr--create-worktree-for-entry
+              (list :number 42 :repo "owner/repo" :repo-dir repo
+                    :pr '((number . 42) (headRefName . "feat-42")))))
+            ;; Fork PR #99 with :pr nil fetches fork status and ignores .wt/fix-typo.
+            (should-error
+             (magit-dash-pr--create-worktree-for-entry
+              (list :number 99 :repo "owner/repo" :repo-dir repo :pr nil)))))
+      (delete-directory repo t))))
+
+(ert-deftest magit-dash-pr/dashboard-worktree-path-suppresses-fork-branch ()
+  "dashboard--worktree-path suppresses branch matching for fork PRs."
+  (let ((repo (magit-dash-test--make-repo)))
+    (unwind-protect
+        (let* ((user-wt (expand-file-name ".wt/fix-typo" repo))
+               (entry (list :number 99
+                            :repo "owner/repo"
+                            :pr '((number . 99)
+                                  (headRefName . "fix-typo")
+                                  (headRepositoryOwner . ((login . "forkuser")))))))
+          (magit-dash-test--git repo "worktree" "add" "-q" "-b" "fix-typo" user-wt)
+          (cl-letf (((symbol-function 'magit-dash-pr-dashboard--find-local-path)
+                     (lambda (_) (expand-file-name ".wt/fix-typo" repo)))
+                    ((symbol-function 'magit-dash-pr-own-p) (lambda (&rest _) nil)))
+            (should (equal (expand-file-name ".wt/cr-99" repo)
+                           (magit-dash-pr-dashboard--worktree-path entry)))))
+      (delete-directory repo t))))
 
 (provide 'test-magit-dash-pr)
 ;;; test-magit-dash-pr.el ends here

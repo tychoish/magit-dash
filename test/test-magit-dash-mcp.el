@@ -115,6 +115,8 @@
                    (lambda (_slug _state &optional _dir)
                      (list '((number . 10) (headRefName . "b10"))
                            '((number . 20) (headRefName . "b20")))))
+                  ((symbol-function 'magit-dash-pr--fetch-pr)
+                   (lambda (&rest _) nil))
                   ((symbol-function 'magit-dash-gh--git-worktrees)
                    (lambda (_dir) nil)))
           ;; Single PR
@@ -133,8 +135,11 @@
           ;; PR with existing worktree is filtered
           (setq created-nums nil)
           (let ((orig-dir-p (symbol-function 'file-directory-p)))
-            (cl-letf (((symbol-function 'magit-dash-pr--find-existing-worktree)
-                       (lambda (_dir num &optional _head)
+            (cl-letf (((symbol-function 'magit-dash-gh--git-worktrees)
+                       (lambda (_dir)
+                         '(((path . "/tmp/existing-wt-10") (branch . "b10")))))
+                      ((symbol-function 'magit-dash-pr--find-existing-worktree)
+                       (lambda (_dir num &rest _)
                          (when (= num 10) "/tmp/existing-wt-10")))
                       ((symbol-function 'file-directory-p)
                        (lambda (p)
@@ -521,3 +526,110 @@ When ALL is non-nil omit `repo' so the author-wide collection is used."
     (let ((res (magit-dash-mcp-test--call repo :action "delete" :worktree_path "gone")))
       (should (eq (plist-get res :deleted) t))
       (should-not (file-exists-p (expand-file-name ".wt/gone" repo))))))
+
+(ert-deftest magit-dash-mcp/fork-pr-does-not-match-own-checkout ()
+  "MCP list/create/clean/delete never resolve a fork PR to user checkouts."
+  (magit-dash-mcp-test--with-repo repo
+    (let* ((user-wt (expand-file-name ".wt/fix-typo" repo))
+           (other-wt (expand-file-name ".wt/pr-99" repo))
+           (plain-dir (expand-file-name ".wt/cr-55" repo))
+           (prs '(((number . 88)
+                   (headRefName . "main")
+                   (state . "OPEN")
+                   (mergedAt . :null))
+                  ((number . 99)
+                   (headRefName . "fix-typo")
+                   (isCrossRepository . t)
+                   (state . "MERGED")
+                   (mergedAt . "2026-01-01T00:00:00Z"))))
+           (created nil)
+           (deleted nil))
+      (magit-dash-mcp-test--git repo "worktree" "add" "-q" "-b" "fix-typo" user-wt)
+      (magit-dash-mcp-test--git repo "worktree" "add" "-q" "-b" "unrelated" other-wt)
+      (make-directory plain-dir t)
+      (cl-letf (((symbol-function 'magit-dash-pr--fetch-repo-prs)
+                 (lambda (_slug state &optional _dir)
+                   (if (equal state "open")
+                       (list (car prs))
+                     prs)))
+                ((symbol-function 'magit-dash-pr--fetch-prs-for-branch)
+                 (lambda (&rest _) nil))
+                ((symbol-function 'magit-dash-pr--fetch-pr)
+                 (lambda (_repo num _dir)
+                   (seq-find (lambda (p) (equal (map-elt p 'number) num)) prs)))
+                ((symbol-function 'magit-dash-mcp--resolve-repo-slug)
+                 (lambda (&rest _) "owner/repo"))
+                ((symbol-function 'magit-dash-pr-dashboard--current-repo-slug)
+                 (lambda () "owner/repo"))
+                ((symbol-function 'magit-dash-pr--create-worktree-for-entry)
+                 (lambda (entry &optional _sw)
+                   (let ((num (plist-get entry :number)))
+                     (push num created)
+                     (format "%s/.wt/cr-%d" repo num))))
+                ((symbol-function 'magit-dash-pr-delete-worktree)
+                 (lambda (wt &rest _) (push wt deleted))))
+        ;; 1. list must not match main checkout or user-wt or unrelated pr-99
+        (let* ((res (magit-dash-mcp-test--call repo :action "list"))
+               (wts (append (plist-get res :worktrees) nil)))
+          (seq-do (lambda (w)
+                    (should (eq :null (plist-get w :pr_number))))
+                  wts))
+        ;; 2. create_worktree_for_pr :all_open must not reuse main or user-wt
+        (let ((res (magit-dash-mcp-call-tool
+                    "create_worktree_for_pr"
+                    (list :repo repo :all_open t))))
+          (should (= 1 (plist-get res :created)))
+          (should (= 0 (plist-get res :existing)))
+          (should (equal '(88) created)))
+        ;; 3. create_worktree_for_pr :pr_number 55 must ignore plain dir .wt/cr-55
+        (setq created nil)
+        (let ((res (magit-dash-mcp-call-tool
+                    "create_worktree_for_pr"
+                    (list :repo repo :pr_number 55))))
+          (should (= 1 (plist-get res :created)))
+          (should (= 0 (plist-get res :existing)))
+          (should (equal '(55) created)))
+        ;; 4. clean_merged_worktrees must not delete main, user-wt, or unrelated pr-99
+        (let ((res (magit-dash-mcp-call-tool
+                    "clean_merged_worktrees"
+                    (list :repo repo))))
+          (should (= 0 (plist-get res :deleted)))
+          (should-not deleted))
+        ;; 5. manage_worktrees delete refuses main checkout (including via symlink)
+        (let ((res (magit-dash-mcp-test--call repo :action "delete" :worktree_path repo)))
+          (should (eq :false (plist-get res :deleted)))
+          (should (eq t (plist-get res :refused))))
+        (let* ((sym-parent (make-temp-file "md-mcp-sym-" t))
+               (sym-main (expand-file-name "main-link" sym-parent)))
+          (unwind-protect
+              (progn
+                (make-symbolic-link (directory-file-name repo) sym-main)
+                (let ((res (magit-dash-mcp-test--call
+                            repo :action "delete" :worktree_path sym-main)))
+                  (should (eq :false (plist-get res :deleted)))
+                  (should (eq t (plist-get res :refused)))))
+            (delete-directory sym-parent t)))
+        ;; 6. create_worktree_for_pr :pr_number 99 (fork PR) never returns .wt/fix-typo or .wt/pr-99
+        (setq created nil)
+        (let ((seen-pr nil))
+          (cl-letf (((symbol-function 'magit-dash-pr--create-worktree-for-entry)
+                     (lambda (entry &optional _sw)
+                       (setq seen-pr (plist-get entry :pr))
+                       (push (plist-get entry :number) created)
+                       (format "%s/.wt/cr-99" repo))))
+            (let ((res (magit-dash-mcp-call-tool
+                        "create_worktree_for_pr"
+                        (list :repo repo :pr_number 99))))
+              (should (= 1 (plist-get res :created)))
+              (should (= 0 (plist-get res :existing)))
+              (should (equal '(99) created))
+              (should (equal 99 (map-elt seen-pr 'number))))))
+        ;; 7. create_worktree_for_pr :pr_number 99 when fetch-pr returns nil never uses uncorroborated .wt/pr-99
+        (setq created nil)
+        (cl-letf (((symbol-function 'magit-dash-pr--fetch-pr) (lambda (&rest _) nil)))
+          (let ((res (magit-dash-mcp-call-tool
+                      "create_worktree_for_pr"
+                      (list :repo repo :pr_number 99))))
+            (should (= 1 (plist-get res :created)))
+            (should (= 0 (plist-get res :existing)))
+            (should (equal '(99) created))))))))

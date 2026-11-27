@@ -130,9 +130,8 @@
 ;;;; Tool 1: manage_worktrees
 
 (defun magit-dash-mcp--same-dir-p (a b)
-  "Return non-nil when directories A and B are the same, ignoring slashes."
-  (string= (directory-file-name (expand-file-name a))
-           (directory-file-name (expand-file-name b))))
+  "Return non-nil when directories A and B are the same, resolving symlinks."
+  (magit-dash-pr--path-equal-p a b))
 
 (defun magit-dash-mcp--resolve-worktree-path (repo-dir path)
   "Resolve PATH to a worktree directory under REPO-DIR.
@@ -144,10 +143,9 @@ or \"pr-42\" map to the configured layout (`<root>/.wt/<name>')."
 
 (defun magit-dash-mcp--worktree-main-p (repo-dir path)
   "Return non-nil if PATH is the main checkout of REPO-DIR."
-  (let ((norm (lambda (p) (directory-file-name (expand-file-name p))))
-        (main (alist-get 'path (car (magit-dash-gh--git-worktrees repo-dir)))))
-    (or (equal (funcall norm path) (funcall norm repo-dir))
-        (and main (equal (funcall norm path) (funcall norm main))))))
+  (let ((main (alist-get 'path (car (magit-dash-gh--git-worktrees repo-dir)))))
+    (or (magit-dash-pr--path-equal-p path repo-dir)
+        (and main (magit-dash-pr--path-equal-p path main)))))
 
 (mcpkit-register-tool "manage_worktrees" 'magit-dash
   :description "List, create, delete, move, or review git worktrees for a repository.
@@ -207,7 +205,9 @@ or `pr_number' (.wt/pr-<n>)."
                          (wt-head (alist-get 'head wt))
                          (main-p (magit-dash-mcp--same-dir-p wt-path repo-dir))
                          (dirty (and (not main-p) (cdr (assoc wt-path dirty-alist))))
-                         (matched-pr (and prs (magit-dash-pr--match-worktree-to-pr wt prs)))
+                         (matched-pr (and prs (not main-p)
+                                          (magit-dash-pr--match-worktree-corroborated
+                                           wt prs repo-slug repo-dir t)))
                          (pr-num (and matched-pr (map-elt matched-pr 'number)))
                          (pr-state (and matched-pr (map-elt matched-pr 'state)))
                          (pr-merged (or (and matched-pr
@@ -246,6 +246,8 @@ or `pr_number' (.wt/pr-<n>)."
          (setq wt-path (magit-dash-mcp--resolve-worktree-path repo-dir wt-path))
          (condition-case err
              (let ((magit-dash-worktree-unattended t))
+               (when (magit-dash-mcp--worktree-main-p repo-dir wt-path)
+                 (user-error "Refusing to delete the main worktree: %s" wt-path))
                (magit-dash-pr-delete-worktree wt-path repo-dir)
                (list :repo_dir repo-dir
                      :action "delete"
@@ -327,9 +329,11 @@ or `pr_number' (.wt/pr-<n>)."
         (let ((created-paths nil)
               (failed 0))
           (dolist (num (seq-uniq pr-numbers))
-            (let* ((entry (list :number num :repo repo-slug :pr nil))
-                   (existing-wt (or (magit-dash-pr--find-existing-worktree repo-dir num)
-                                    (magit-dash-pr-dashboard--worktree-path entry))))
+            (let* ((pr (and repo-slug (magit-dash-pr--fetch-pr repo-slug num repo-dir)))
+                   (existing-wt (when pr
+                                  (alist-get 'path (magit-dash-pr--find-corroborated-worktree
+                                                    repo-dir num pr repo-slug))))
+                   (entry (list :number num :repo repo-slug :pr pr :repo-dir repo-dir)))
               (if (and existing-wt (file-directory-p existing-wt))
                   (push (list :pr_number num :worktree_path existing-wt :status "existing") created-paths)
                 (let ((wt-path (condition-case nil
@@ -358,18 +362,19 @@ or `pr_number' (.wt/pr-<n>)."
              (worktree-results nil))
         (dolist (pr open-prs)
           (let* ((num (map-elt pr 'number))
-                 (head (map-elt pr 'headRefName))
                  (expected-path (magit-dash-pr--compute-worktree-path repo-dir (format "pr-%d" num)))
-                 (matched-wt (or (magit-dash-pr--find-existing-worktree repo-dir num head)
+                 (matched-wt (or (magit-dash-pr--find-corroborated-worktree repo-dir num pr repo-slug)
                                  (seq-find
                                   (lambda (wt)
                                     (let ((wt-path (alist-get 'path wt)))
                                       (and wt-path
-                                           (not (string= (directory-file-name (expand-file-name wt-path))
-                                                         (directory-file-name (expand-file-name repo-dir))))
-                                           (or (string= (directory-file-name (expand-file-name wt-path))
-                                                        (directory-file-name (expand-file-name expected-path)))
-                                               (equal (magit-dash-pr--match-worktree-to-pr wt (list pr)) pr)))))
+                                           (not (magit-dash-pr--path-equal-p wt-path repo-dir))
+                                           (magit-dash-pr--worktree-branch-matches-pr-p
+                                            wt pr repo-dir num repo-slug)
+                                           (or (magit-dash-pr--path-equal-p wt-path expected-path)
+                                               (equal (magit-dash-pr--match-worktree-corroborated
+                                                       wt (list pr) repo-slug repo-dir t)
+                                                      pr)))))
                                   wts))))
             (if matched-wt
                 (let ((wt-path (if (consp matched-wt) (alist-get 'path matched-wt) matched-wt)))
