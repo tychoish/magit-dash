@@ -10,6 +10,7 @@
 (require 'magit-dash)
 (require 'magit-dash-review)
 (require 'magit-dash-worktree-clean)
+(require 'hitl-plan-ui)
 
 (defmacro magit-dash-worktree-clean-test--with-store (&rest body)
   "Run BODY with plans stored in a throwaway directory."
@@ -61,7 +62,11 @@
                    :targets (list (magit-dash-worktree-clean-test--target "late" nil))
                    :ops '(delete-worktree))))
         (hitl-plan-execute plan)
-        (should (eq 'failed (hitl-plan-step-status (car (hitl-plan-steps plan)))))))))
+        (let ((step (car (hitl-plan-steps plan))))
+          (if (fboundp 'hitl-plan-skip)
+              (should (eq 'skipped (hitl-plan-step-status step)))
+            (should (eq 'failed (hitl-plan-step-status step))))
+          (should (equal "uncommitted changes" (hitl-plan-step-message step))))))))
 
 (ert-deftest magit-dash-worktree-clean/empty-targets-make-no-plan ()
   (should-not (magit-dash-worktree-clean-plan-targets nil)))
@@ -146,10 +151,153 @@
 (ert-deftest magit-dash-worktree-clean/apply-skips-stale-target-and-keeps-worktree ()
   (magit-dash-worktree-clean-test--with-repo (repo wt)
     (magit-dash-worktree-clean-test--with-merged-pr
-      (let ((hitl-plan-current-target
-             (plist-put (magit-dash-worktree-clean-test--planned repo wt) :branch "gone")))
-        (should-error (magit-dash-worktree-clean--apply))
-        (should (file-directory-p wt))))))
+      (magit-dash-worktree-clean-test--with-store
+        (let* ((stale (plist-put (magit-dash-worktree-clean-test--planned repo wt)
+                                 :branch "gone"))
+               (hitl-plan-current-target stale))
+          (if (fboundp 'hitl-plan-skip)
+              (let ((res (magit-dash-worktree-clean--apply)))
+                (should (hitl-plan-skip-p res))
+                (should (string-match-p "branch changed" (cdr res))))
+            (should-error (magit-dash-worktree-clean--apply)))
+          (should (file-directory-p wt))
+          (let ((plan (hitl-plan-create
+                       :domain 'magit-dash-worktree-clean
+                       :targets (list stale)
+                       :ops '(delete-worktree))))
+            (hitl-plan-execute plan)
+            (let ((step (car (hitl-plan-steps plan))))
+              (if (fboundp 'hitl-plan-skip)
+                  (should (eq 'skipped (hitl-plan-step-status step)))
+                (should (eq 'failed (hitl-plan-step-status step))))
+              (should (string-match-p "branch changed" (hitl-plan-step-message step))))
+            (should (eq 'complete (hitl-plan-status plan)))
+            (should (file-directory-p wt))))))))
+
+(ert-deftest magit-dash-worktree-clean/execute-skips-declined-and-unattended-risks ()
+  (magit-dash-worktree-clean-test--with-repo (repo wt)
+    (magit-dash-worktree-clean-test--with-merged-pr
+      (magit-dash-worktree-clean-test--with-store
+        (with-temp-file (expand-file-name "keep.secret" wt) (insert "s"))
+        (let ((target (magit-dash-worktree-clean-test--planned repo wt))
+              (expected-refusal (if (fboundp 'hitl-plan-skip)
+                                    'skipped
+                                  'failed)))
+          (let ((magit-dash-worktree-unattended t)
+                (magit-dash-worktree-unattended-risk-policy 'refuse))
+            (cl-letf (((symbol-function 'yes-or-no-p)
+                       (lambda (&rest _) (error "must not prompt"))))
+              (let ((plan (hitl-plan-create
+                           :domain 'magit-dash-worktree-clean
+                           :targets (list target)
+                           :ops '(delete-worktree))))
+                (hitl-plan-execute plan)
+                (let ((step (car (hitl-plan-steps plan))))
+                  (should (eq expected-refusal (hitl-plan-step-status step)))
+                  (should (string-match-p "no one to confirm"
+                                          (hitl-plan-step-message step))))
+                (should (file-exists-p (expand-file-name "keep.secret" wt))))))
+          (let ((magit-dash-worktree-unattended-risk-policy 'ask))
+            (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) nil)))
+              (let ((plan (hitl-plan-create
+                           :domain 'magit-dash-worktree-clean
+                           :targets (list target)
+                           :ops '(delete-worktree))))
+                (hitl-plan-execute plan)
+                (let ((step (car (hitl-plan-steps plan))))
+                  (should (eq expected-refusal (hitl-plan-step-status step)))
+                  (should (string-match-p "confirmation declined"
+                                          (hitl-plan-step-message step)))
+                  (should (string-match-p "keep.secret"
+                                          (hitl-plan-step-message step))))
+                (should (file-exists-p (expand-file-name "keep.secret" wt)))))
+            (let ((prompts 0))
+              (cl-letf (((symbol-function 'yes-or-no-p)
+                         (lambda (&rest _)
+                           (setq prompts (1+ prompts))
+                           t)))
+                (let ((plan (hitl-plan-create
+                             :domain 'magit-dash-worktree-clean
+                             :targets (list target)
+                             :ops '(delete-worktree))))
+                  (hitl-plan-execute plan)
+                  (should (= 1 prompts))
+                  (should (eq 'done (hitl-plan-step-status (car (hitl-plan-steps plan)))))
+                  (should-not (file-directory-p wt)))))))))))
+
+(ert-deftest magit-dash-worktree-clean/execute-fails-on-git-error ()
+  (magit-dash-worktree-clean-test--with-repo (repo wt)
+    (magit-dash-worktree-clean-test--with-merged-pr
+      (magit-dash-worktree-clean-test--with-store
+        (magit-dash-test--git repo "worktree" "lock" wt)
+        (let ((plan (hitl-plan-create
+                     :domain 'magit-dash-worktree-clean
+                     :targets (list (magit-dash-worktree-clean-test--planned repo wt))
+                     :ops '(delete-worktree))))
+          (hitl-plan-execute plan)
+          (let ((step (car (hitl-plan-steps plan))))
+            (should (eq 'failed (hitl-plan-step-status step)))
+            (should (string-match-p "Failed to remove worktree"
+                                    (hitl-plan-step-message step))))
+          (should (file-directory-p wt)))))))
+
+(ert-deftest magit-dash-worktree-clean/format-distinguishes-needs-confirmation-and-skipped ()
+  (magit-dash-worktree-clean-test--with-store
+    (let* ((clean (list :worktree "/tmp/wt-clean" :repo-dir "/tmp/repo"
+                        :slug "o/r" :number 7 :state "merged"))
+           (risky (list :worktree "/tmp/wt-risky" :repo-dir "/tmp/repo"
+                        :slug "o/r" :number 8 :state "merged"
+                        :risks '("1 ignored file(s) (keep.secret)")))
+           (dirty (list :worktree "/tmp/wt-dirty" :repo-dir "/tmp/repo"
+                        :slug "o/r" :number 9 :state "merged" :dirty t))
+           (stale (list :worktree "/tmp/wt-stale" :repo-dir "/tmp/repo"
+                        :slug "o/r" :number 10 :state "merged"))
+           (plan (hitl-plan-create
+                  :domain 'magit-dash-worktree-clean
+                  :targets (list clean risky dirty stale)
+                  :ops '(delete-worktree)))
+           (can-skip (fboundp 'hitl-plan-skip)))
+      (cl-letf (((symbol-function 'magit-dash-worktree-clean--verify-target)
+                 (lambda (target)
+                   (when (equal (plist-get target :worktree) "/tmp/wt-stale")
+                     "HEAD moved since the plan"))))
+        (hitl-plan-run-step plan (nth 3 (hitl-plan-steps plan))
+                            (car (hitl-plan-ops plan))))
+      (let ((buf (hitl-plan-review plan nil)))
+        (unwind-protect
+            (with-current-buffer buf
+              (let ((text (buffer-string)))
+                (if can-skip
+                    (should (string-match-p "Progress: +0/4 done, 2 pending, 0 failed, 2 skipped" text))
+                  (should (string-match-p "Progress: +0/4 done, 2 pending, 1 failed, 1 skipped" text)))
+                (should (string-match-p
+                         "\\[x\\] +2 \\[pending\\] /tmp/wt-risky +PR #8 merged \\[NEEDS CONFIRMATION: 1 ignored file(s) (keep\\.secret)\\]"
+                         text))
+                (should (string-match-p
+                         "\\[ \\] +3 \\[skipped\\] /tmp/wt-dirty +PR #9 merged \\[dirty\\] — uncommitted changes"
+                         text))
+                (if can-skip
+                    (should (string-match-p
+                             "\\[ \\] +4 \\[skipped\\] /tmp/wt-stale +PR #10 merged — HEAD moved since the plan"
+                             text))
+                  (should (string-match-p
+                           "\\[!] +4 \\[failed *\\] /tmp/wt-stale +PR #10 merged — HEAD moved since the plan"
+                           text)))
+                (goto-char (point-min))
+                (re-search-forward "\\[skipped\\].*wt-dirty")
+                (should (eq 'hitl-plan-skipped-face
+                            (get-text-property (match-beginning 0) 'face)))
+                (goto-char (point-min))
+                (if can-skip
+                    (progn
+                      (re-search-forward "\\[skipped\\].*wt-stale")
+                      (should (eq 'hitl-plan-skipped-face
+                                  (get-text-property (match-beginning 0) 'face))))
+                  (re-search-forward "\\[failed *\\].*wt-stale")
+                  (should (eq 'hitl-plan-failed-face
+                              (get-text-property (match-beginning 0) 'face))))))
+          (when (buffer-live-p buf)
+            (kill-buffer buf)))))))
 
 (ert-deftest magit-dash-worktree-clean/delete-refuses-ignored-file-unless-confirmed ()
   (magit-dash-worktree-clean-test--with-repo (repo wt)

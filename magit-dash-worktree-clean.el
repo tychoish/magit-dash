@@ -27,6 +27,7 @@
 (require 'magit-dash-worktree)
 
 (declare-function hitl-plan-review "hitl-plan-ui")
+(declare-function hitl-plan-skip "hitl-plan" (&optional reason))
 (declare-function magit-dash-pr--fetch-repo-prs "magit-dash-pr")
 (declare-function magit-dash-pr--fetch-pr "magit-dash-pr")
 (declare-function magit-dash-pr--git-worktrees "magit-dash-pr")
@@ -145,17 +146,20 @@ Open PRs are not candidates, so nil is returned for them too."
 
 (defun magit-dash-worktree-clean--format-target (target)
   "Return (FILE . LABEL) columns for TARGET."
-  (cons (abbreviate-file-name (plist-get target :worktree))
-        (format "PR #%s %s%s%s"
-                (or (plist-get target :number) "?")
-                (plist-get target :state)
-                (if (plist-get target :dirty)
-                    ", uncommitted changes"
-                  "")
-                (if (plist-get target :risks)
-                    (format ", NEEDS CONFIRMATION: %s"
-                            (string-join (plist-get target :risks) "; "))
-                  ""))))
+  (cons (abbreviate-file-name (or (plist-get target :worktree) ""))
+        (string-join
+         (delq nil
+               (list (format "PR #%s%s"
+                             (or (plist-get target :number) "?")
+                             (if-let* ((state (plist-get target :state)))
+                                 (concat " " state)
+                               ""))
+                     (when (plist-get target :dirty)
+                       "[dirty]")
+                     (when-let* ((risks (plist-get target :risks)))
+                       (format "[NEEDS CONFIRMATION: %s]"
+                               (string-join risks "; ")))))
+         " ")))
 
 (defun magit-dash-worktree-clean--visit-target (target &optional other-window)
   "Visit TARGET's worktree in Dired, in another window when OTHER-WINDOW."
@@ -189,7 +193,9 @@ PR must still be merged or closed."
                        (magit-dash-pr--git-worktrees repo-dir)))
          (number (plist-get target :number)))
     (cond
-     ((or (null wt) (magit-dash-pr--path-equal-p path repo-dir))
+     ((or (null path) (null repo-dir) (null wt)
+          (not (file-directory-p path))
+          (magit-dash-pr--path-equal-p path repo-dir))
       (format "%s is no longer a linked worktree of %s" path repo-dir))
      ((not (equal (alist-get 'branch wt) (plist-get target :branch)))
       (format "branch changed from %s to %s since the plan"
@@ -205,17 +211,31 @@ PR must still be merged or closed."
 
 (defun magit-dash-worktree-clean--apply ()
   "Delete the current step's worktree after re-verifying the plan target.
-A target that no longer matches is refused with the reason, which the plan
-records on the step.  A worktree that became dirty is refused too, and one
-with unpublished commits or non-build ignored files needs a confirmation."
+Stale targets, worktrees that became dirty, and unconfirmed deletion
+risks return `hitl-plan-skip' with a reason so the step becomes `skipped'
+rather than `failed'.  Genuine deletion errors still signal an error."
   (let* ((target hitl-plan-current-target)
-         (path (plist-get target :worktree)))
-    (when-let* ((problem (magit-dash-worktree-clean--verify-target target)))
-      (error "Skipped %s: %s" path problem))
-    (when (magit-dash-worktree-uncommitted-changes-p path)
-      (error "Worktree %s has uncommitted changes" path))
-    (magit-dash-pr-delete-worktree path (plist-get target :repo-dir)
-                                   (plist-get target :pr-head-oid))))
+         (path (plist-get target :worktree))
+         (pushed-oid (plist-get target :pr-head-oid))
+         (skip-reason
+          (cond
+           ((magit-dash-worktree-clean--verify-target target))
+           ((magit-dash-worktree-uncommitted-changes-p path)
+            "uncommitted changes")
+           ((when-let* ((risks (magit-dash-worktree-risks path pushed-oid)))
+              (condition-case err
+                  (unless (magit-dash-worktree-confirm-risks path risks)
+                    (format "confirmation declined: %s"
+                            (string-join risks "; ")))
+                (user-error (error-message-string err))))))))
+    (cond
+     ((and skip-reason (fboundp 'hitl-plan-skip))
+      (hitl-plan-skip skip-reason))
+     (skip-reason
+      (error "%s" skip-reason))
+     (t
+      (magit-dash-pr-delete-worktree path (plist-get target :repo-dir)
+                                     pushed-oid t)))))
 
 (defun magit-dash-worktree-clean--after-apply (_file _steps plan)
   "Refresh a live PR dashboard once cleanup PLAN has run."
