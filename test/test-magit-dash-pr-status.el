@@ -1298,6 +1298,57 @@ n=$(cat %s 2>/dev/null || echo 0); n=$((n+1)); echo $n > %s
        (should (magit-dash-pr-status-test/wait-until (lambda () errors)))
        (should (= 1 (length errors)))))))
 
+(ert-deftest magit-dash-pr-status/fetch-page-async-callbacks-fire-once ()
+  "Neither callback runs more than once, even if a callback signals."
+  ;; Synchronous on-error from a missing directory when on-error signals.
+  (let ((error-count 0)
+        (success-count 0))
+    (cl-letf (((symbol-function 'magit-dash-gh--repo-account) #'ignore))
+      (should-error
+       (magit-dash-pr-status--fetch-page-async
+        "q" "/nonexistent-dir-xyz" 10 nil
+        (lambda (_) (setq success-count (1+ success-count)))
+        (lambda (_) (setq error-count (1+ error-count)) (error "callback boom")))))
+    (should (= 0 success-count))
+    (should (= 1 error-count)))
+  ;; Synchronous make-process failure when on-error signals.
+  (let ((error-count 0)
+        (success-count 0))
+    (cl-letf (((symbol-function 'magit-dash-gh--repo-account) #'ignore)
+              ((symbol-function 'make-process)
+               (lambda (&rest _) (error "no fork"))))
+      (should-error
+       (magit-dash-pr-status--fetch-page-async
+        "q" temporary-file-directory 10 nil
+        (lambda (_) (setq success-count (1+ success-count)))
+        (lambda (_) (setq error-count (1+ error-count)) (error "callback boom")))))
+    (should (= 0 success-count))
+    (should (= 1 error-count)))
+  ;; Validation failure when run-process delivers bad payload synchronously and on-error signals.
+  (let ((error-count 0)
+        (success-count 0))
+    (cl-letf (((symbol-function 'magit-dash-gh--run-process)
+               (lambda (_args _dir on-success &rest _) (funcall on-success "not json {"))))
+      (should-error
+       (magit-dash-pr-status--fetch-page-async
+        "q" "/tmp" 10 nil
+        (lambda (_) (setq success-count (1+ success-count)))
+        (lambda (_) (setq error-count (1+ error-count)) (error "callback boom")))))
+    (should (= 0 success-count))
+    (should (= 1 error-count)))
+  ;; Signalling on-success runs once and never triggers on-error.
+  (let ((error-count 0)
+        (success-count 0)
+        (body (json-encode (magit-dash-pr-status-test/response))))
+    (cl-letf (((symbol-function 'magit-dash-gh--run-process)
+               (lambda (_args _dir on-success &rest _) (funcall on-success body))))
+      (magit-dash-pr-status--fetch-page-async
+       "q" "/tmp" 10 nil
+       (lambda (_) (setq success-count (1+ success-count)) (error "callback boom"))
+       (lambda (_) (setq error-count (1+ error-count)))))
+    (should (= 1 success-count))
+    (should (= 0 error-count))))
+
 (ert-deftest magit-dash-pr-status/fetch-one-retry-start-failure-calls-on-error-without-timeout ()
   "A failure to start the retry reports through ON-ERROR even with no timeout."
   (let ((real-make-process (symbol-function 'make-process))

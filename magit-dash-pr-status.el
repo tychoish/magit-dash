@@ -307,14 +307,17 @@ JOB, when non-nil, collects the process and retry timer (see
                     "-f" (concat "q=" q)
                     "-F" (format "first=%d" first)
                     (if after "-f" "-F") (if after (concat "after=" after) "after=null")))
-        (handle (list nil)))
+        (handle (list nil))
+        (fired nil)
+        (setup-error nil))
     (unless (car job)
       (magit-dash-pr-status--job-register job handle)
       (condition-case err
           (let ((proc (magit-dash-gh--run-process
                        args dir
                        (lambda (out)
-                         (unless (car job)
+                         (unless (or fired (car job))
+                           (setq fired t)
                            (let ((response (condition-case err
                                                (magit-dash-pr-status--validate-response out)
                                              (error (funcall on-error (error-message-string err))
@@ -325,16 +328,23 @@ JOB, when non-nil, collects the process and retry timer (see
                                  (error (message "magit-dash: page callback failed: %s"
                                                  (error-message-string err))))))))
                        (lambda (out code)
-                         (unless (car job)
+                         (unless (or fired (car job))
+                           (setq fired t)
                            (funcall on-error
                                     (format "gh api graphql failed (%s): %s"
                                             code (string-trim out)))))
                        nil
-                       (lambda () (car job))
+                       (lambda () (or fired (car job)))
                        handle)))
             (when (and (processp proc) (process-live-p proc) (null (car handle)))
               (setcar handle proc)))
-        (error (funcall on-error (error-message-string err)))))))
+        (error
+         (if fired
+             (signal (car err) (cdr err))
+           (setq setup-error (error-message-string err)))))
+      (when (and setup-error (not fired))
+        (setq fired t)
+        (funcall on-error setup-error)))))
 
 (defun magit-dash-pr-status--fetch-search (q dir)
   "Run the PR query for search string Q from DIR; return the parsed response.
