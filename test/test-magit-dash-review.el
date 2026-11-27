@@ -488,20 +488,40 @@ review files these tests visit in its read-only mode."
                       ((member "view" args)
                        (cons 0 "{\"headRefOid\":\"H1\"}"))
                       ((string-match-p "addPullRequestReview(" joined)
-                       ;; Ensure draft thread was excluded from payload
+                       ;; Pending review created without draft thread or premature event
                        (should-not (string-match-p "Unpromoted AI draft" joined))
-                       (should (string-match-p "New inline comment" joined))
-                       (should (string-match-p "APPROVE" joined))
+                       (should-not (map-nested-elt req '(variables input event)))
                        (cons 0 (json-serialize
                                 '((data . ((addPullRequestReview .
                                             ((pullRequestReview .
                                               ((id . "PRR_1")
-                                               (state . "APPROVED")
+                                               (state . "PENDING")))))))))))
+                      ((string-match-p "addPullRequestReviewThread(" joined)
+                       (should-not (string-match-p "Unpromoted AI draft" joined))
+                       (should (string-match-p "New inline comment" joined))
+                       (should (equal "PRR_1"
+                                      (map-nested-elt req '(variables input pullRequestReviewId))))
+                       (cons 0 (json-serialize
+                                '((data . ((addPullRequestReviewThread .
+                                            ((thread .
+                                              ((id . "PRRT_NEW_1")
                                                (comments .
                                                 ((nodes . [((id . "PRRC_NEW_1")
                                                             (path . "bar.el")
                                                             (body . "New inline comment")
-                                                            (pullRequestReviewThread . ((id . "PRRT_NEW_1"))))])))))))))))))
+                                                            (line . 25))])))))))))))))
+                      ((string-match-p "submitPullRequestReview(" joined)
+                       (should (equal "PRR_1"
+                                      (map-nested-elt req '(variables input pullRequestReviewId))))
+                       (should (equal "APPROVE"
+                                      (map-nested-elt req '(variables input event))))
+                       (should (equal "LGTM overall"
+                                      (map-nested-elt req '(variables input body))))
+                       (cons 0 (json-serialize
+                                '((data . ((submitPullRequestReview .
+                                            ((pullRequestReview .
+                                              ((id . "PRR_1")
+                                               (state . "APPROVED")))))))))))
                       ((string-match-p "addPullRequestReviewThreadReply" joined)
                        (cons 0 (json-serialize
                                 '((data . ((addPullRequestReviewThreadReply .
@@ -513,12 +533,13 @@ review files these tests visit in its read-only mode."
                                                         (isResolved . t)))))))))))
                       (t (error "Unexpected gh call: %S" args)))))))
         (magit-dash-review-submit review-file "LGTM overall")
-        (should (= (length gh-calls) 4))
+        (should (= (length gh-calls) 6))
         (let* ((reloaded (magit-dash-review--read-json-file review-file))
                (comments (append (map-elt reloaded "comments") nil))
                (rem (seq-find (lambda (c) (equal (map-elt c "id") "c-rem")) comments))
                (loc (seq-find (lambda (c) (equal (map-elt c "id") "c-loc")) comments))
                (drf (seq-find (lambda (c) (equal (map-elt c "id") "c-drf")) comments)))
+          (should-not (map-elt reloaded "pending_review"))
           ;; Post-submit IDs stamped onto c-local
           (should (equal (map-elt loc "gh_thread_id") "PRRT_NEW_1"))
           (should (equal (map-elt loc "gh_comment_id") "PRRC_NEW_1"))
@@ -550,8 +571,8 @@ review files these tests visit in its read-only mode."
 
 (defmacro magit-dash-review-test/with-gh (handler &rest body)
   "Run BODY with gh replaced by HANDLER called as (KIND ARGS REQUEST).
-KIND is one of view, review, reply, resolve, unresolve, node-id.  HANDLER
-returns an alist response, or (CODE . OUTPUT) for a failure."
+KIND is one of view, review, thread, submit, reply, resolve, unresolve, node-id.
+HANDLER returns an alist response, or (CODE . OUTPUT) for a failure."
   (declare (indent 1))
   `(let ((magit-dash-review-test/gh-log nil))
      (cl-letf (((symbol-function 'magit-dash-gh--call-process)
@@ -561,6 +582,8 @@ returns an alist response, or (CODE . OUTPUT) for a failure."
                          (kind (cond
                                 ((member "view" args) 'view)
                                 ((string-match-p "addPullRequestReview(" q) 'review)
+                                ((string-match-p "addPullRequestReviewThread(" q) 'thread)
+                                ((string-match-p "submitPullRequestReview(" q) 'submit)
                                 ((string-match-p "addPullRequestReviewThreadReply" q) 'reply)
                                 ((string-match-p "unresolveReviewThread" q) 'unresolve)
                                 ((string-match-p "resolveReviewThread" q) 'resolve)
@@ -572,8 +595,8 @@ returns an alist response, or (CODE . OUTPUT) for a failure."
                       (cons 0 (json-serialize res)))))))
        ,@body)))
 
-(defun magit-dash-review-test/review-response (threads)
-  "Return the addPullRequestReview response echoing request THREADS."
+(defun magit-dash-review-test/review-response (threads &optional event)
+  "Return the addPullRequestReview response echoing request THREADS and EVENT."
   (let ((nodes (vconcat
                 (seq-map (lambda (th)
                            `((id . ,(concat "C-" (map-elt th 'body)))
@@ -581,12 +604,30 @@ returns an alist response, or (CODE . OUTPUT) for a failure."
                              (body . ,(map-elt th 'body))
                              (line . ,(map-elt th 'line))
                              (pullRequestReviewThread . ((id . ,(concat "T-" (map-elt th 'body)))))))
-                         threads))))
+                         threads)))
+        (state (if event
+                   (pcase event
+                     ("APPROVE" "APPROVED")
+                     ("REQUEST_CHANGES" "CHANGES_REQUESTED")
+                     (_ "COMMENTED"))
+                 "PENDING")))
     `((data . ((addPullRequestReview
                 . ((pullRequestReview
                     . ((id . "PRR")
-                       (state . "COMMENTED")
+                       (state . ,state)
                        (comments . ((nodes . ,nodes))))))))))))
+
+(defun magit-dash-review-test/thread-response (input)
+  "Return the addPullRequestReviewThread response echoing INPUT."
+  (let ((body (map-elt input 'body)))
+    `((data . ((addPullRequestReviewThread
+                . ((thread
+                    . ((id . ,(concat "T-" body))
+                       (comments
+                        . ((nodes . [((id . ,(concat "C-" body))
+                                       (path . ,(map-elt input 'path))
+                                       (body . ,body)
+                                       (line . ,(map-elt input 'line)))]))))))))))))
 
 (defun magit-dash-review-test/gh-default (head)
   "Return a handler that succeeds, echoing posted threads; PR head is HEAD."
@@ -594,7 +635,14 @@ returns an alist response, or (CODE . OUTPUT) for a failure."
     (pcase kind
       ('view `((headRefOid . ,head)))
       ('review (magit-dash-review-test/review-response
-                (map-nested-elt req '(variables input threads))))
+                (map-nested-elt req '(variables input threads))
+                (map-nested-elt req '(variables input event))))
+      ('thread (magit-dash-review-test/thread-response
+                (map-nested-elt req '(variables input))))
+      ('submit `((data . ((submitPullRequestReview
+                           . ((pullRequestReview
+                               . ((id . ,(or (map-nested-elt req '(variables input pullRequestReviewId)) "PRR"))
+                                  (state . "COMMENTED")))))))))
       ('reply `((data . ((addPullRequestReviewThreadReply
                           . ((comment . ((id . ,(concat "R-" (map-nested-elt req '(variables body)))))))))))) 
       (_ '((data . ((resolveReviewThread . ((thread . ((id . "x"))))))))))))
@@ -651,10 +699,11 @@ returns an alist response, or (CODE . OUTPUT) for a failure."
                                (seq-filter (lambda (call) (eq (car call) 'reply))
                                            magit-dash-review-test/gh-log))))
           (should (equal (sort (copy-sequence bodies) #'string<) '("123" "@/etc/hostname" "null"))))
-        (let ((review (seq-find (lambda (call) (eq (car call) 'review)) magit-dash-review-test/gh-log)))
+        (let ((thread (seq-find (lambda (call) (eq (car call) 'thread)) magit-dash-review-test/gh-log))
+              (sub (seq-find (lambda (call) (eq (car call) 'submit)) magit-dash-review-test/gh-log)))
           (should (equal "@/etc/hostname"
-                         (map-elt (car (map-nested-elt (nth 2 review) '(variables input threads))) 'body)))
-          (should (equal "true" (map-nested-elt (nth 2 review) '(variables input body)))))))))
+                         (map-nested-elt (nth 2 thread) '(variables input body))))
+          (should (equal "true" (map-nested-elt (nth 2 sub) '(variables input body)))))))))
 
 (ert-deftest magit-dash-review/submit-partial-failure-persists-and-resubmit-posts-remainder ()
   "HIGH-1: phase 1 and reply 1 are stamped when reply 2 fails; resubmit posts only reply 2."
@@ -693,20 +742,28 @@ returns an alist response, or (CODE . OUTPUT) for a failure."
       (magit-dash-review-test/with-gh
           (lambda (kind args req)
             (let ((res (funcall ok kind args req)))
-              (if (eq kind 'review)
-                  ;; Return the nodes in reverse order.
-                  (let ((nodes (map-nested-elt res '(data addPullRequestReview pullRequestReview comments nodes))))
-                    `((data . ((addPullRequestReview
-                                . ((pullRequestReview
-                                    . ((comments . ((nodes . ,(vconcat (reverse (append nodes nil))))))))))))))
-                  res)))
+              (if (eq kind 'thread)
+                  ;; Prepend an unrelated comment node so index 0 is wrong.
+                  (let* ((thread (map-nested-elt res '(data addPullRequestReviewThread thread)))
+                         (nodes (append (map-nested-elt thread '(comments nodes)) nil))
+                         (decoy `((id . "C-decoy")
+                                  (path . "other.el")
+                                  (body . "decoy")
+                                  (line . 1))))
+                    `((data . ((addPullRequestReviewThread
+                                . ((thread
+                                    . ((id . ,(map-elt thread 'id))
+                                       (comments . ((nodes . ,(vconcat (cons decoy nodes)))))))))))))
+                res)))
         (magit-dash-review-submit file))
       (let ((comments (magit-dash-review-test/read-comments file)))
+        (should (equal "C-first" (map-elt (car comments) "gh_comment_id")))
         (should (equal "T-first" (map-elt (car comments) "gh_thread_id")))
+        (should (equal "C-second" (map-elt (cadr comments) "gh_comment_id")))
         (should (equal "T-second" (map-elt (cadr comments) "gh_thread_id")))))))
 
 (ert-deftest magit-dash-review/submit-chunks-many-threads-and-resumes ()
-  "HIGH-1: more than 50 threads go in chunks, stamped after each; resubmit sends the rest."
+  "HIGH-1: 95 threads join one pending review, stamped per thread; resubmit sends the rest."
   (magit-dash-review-test/with-temp-dir
     (let* ((threads (seq-map (lambda (i)
                                (magit-dash-review-test/c "id" (format "n%d" i) "path" "p.el"
@@ -714,22 +771,26 @@ returns an alist response, or (CODE . OUTPUT) for a failure."
                              (number-sequence 1 95)))
            (file (magit-dash-review-test/submit-file threads))
            (ok (magit-dash-review-test/gh-default "H1"))
-           (reviews 0))
+           (posted 0))
       (magit-dash-review-test/with-gh
           (lambda (kind args req)
-            (when (eq kind 'review)
-              (setq reviews (1+ reviews))
-              (when (= reviews 3)
-                (error "third chunk fails")))
+            (when (eq kind 'thread)
+              (setq posted (1+ posted))
+              (when (= posted 81)
+                (error "thread 81 fails")))
             (funcall ok kind args req))
         (should-error (magit-dash-review-submit file)))
       (should (= 80 (seq-count (lambda (c) (map-elt c "gh_thread_id"))
                                (magit-dash-review-test/read-comments file))))
+      (should (equal "PRR" (map-nested-elt (magit-dash-review--read-json-file file)
+                                           '("pending_review" "id"))))
       (magit-dash-review-test/with-gh ok
         (magit-dash-review-submit file)
-        (should (equal '(view review) (magit-dash-review-test/kinds)))
-        (should (= 15 (length (map-nested-elt (nth 2 (car magit-dash-review-test/gh-log))
-                                              '(variables input threads))))))
+        (let ((kinds (magit-dash-review-test/kinds)))
+          (should-not (memq 'review kinds))
+          (should (= 15 (seq-count (lambda (k) (eq k 'thread)) kinds)))
+          (should (= 1 (seq-count (lambda (k) (eq k 'submit)) kinds)))))
+      (should-not (map-elt (magit-dash-review--read-json-file file) "pending_review"))
       (should (= 95 (seq-count (lambda (c) (map-elt c "gh_thread_id"))
                                (magit-dash-review-test/read-comments file)))))))
 
@@ -871,8 +932,9 @@ returns an alist response, or (CODE . OUTPUT) for a failure."
                                                   "diff_side" "RIGHT")))))
       (magit-dash-review-test/with-gh (magit-dash-review-test/gh-default "H1")
         (magit-dash-review-submit file)
-        (let* ((review (seq-find (lambda (call) (eq (car call) 'review)) magit-dash-review-test/gh-log))
-               (threads (map-nested-elt (nth 2 review) '(variables input threads)))
+        (let* ((calls (nreverse (copy-sequence magit-dash-review-test/gh-log)))
+               (threads (seq-map (lambda (c) (map-nested-elt (nth 2 c) '(variables input)))
+                                 (seq-filter (lambda (c) (eq (car c) 'thread)) calls)))
                (one (car threads))
                (rng (cadr threads)))
           (should (= 4 (map-elt one 'line)))
@@ -896,6 +958,374 @@ returns an alist response, or (CODE . OUTPUT) for a failure."
         (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
           (magit-dash-review-submit file)
           (should (equal '(reply) (magit-dash-review-test/kinds))))))))
+
+(ert-deftest magit-dash-review/submit-95-threads-in-one-pending-review ()
+  "95 new threads join ONE pending review via addPullRequestReviewThread and submit once."
+  (magit-dash-review-test/with-temp-dir
+    (let* ((threads (seq-map (lambda (i)
+                               (magit-dash-review-test/c "id" (format "n%d" i) "path" "p.el"
+                                                         "lines" (vector i i) "body" (format "b%d" i)))
+                             (number-sequence 1 95)))
+           (verdict (magit-dash-review-test/c "state" "approved" "by" "me"))
+           (file (magit-dash-review-test/submit-file threads verdict))
+           (ok (magit-dash-review-test/gh-default "H1")))
+      (magit-dash-review-test/with-gh ok
+        (magit-dash-review-submit file "Ship it")
+        (let* ((kinds (magit-dash-review-test/kinds))
+               (calls (nreverse (copy-sequence magit-dash-review-test/gh-log)))
+               (review-calls (seq-filter (lambda (c) (eq (car c) 'review)) calls))
+               (thread-calls (seq-filter (lambda (c) (eq (car c) 'thread)) calls))
+               (submit-calls (seq-filter (lambda (c) (eq (car c) 'submit)) calls)))
+          (should (= 1 (length review-calls)))
+          (should (= 95 (length thread-calls)))
+          (should (= 1 (length submit-calls)))
+          (should (eq 'view (car kinds)))
+          (should (eq 'review (cadr kinds)))
+          (should (eq 'submit (car (last kinds))))
+          (let ((rev-input (map-nested-elt (nth 2 (car review-calls)) '(variables input))))
+            (should-not (map-elt rev-input 'event))
+            (should-not (map-elt rev-input 'threads))
+            (should (equal "H1" (map-elt rev-input 'commitOID))))
+          (seq-do (lambda (tc)
+                    (should (equal "PRR"
+                                   (map-nested-elt (nth 2 tc) '(variables input pullRequestReviewId)))))
+                  thread-calls)
+          (let ((sub-input (map-nested-elt (nth 2 (car submit-calls)) '(variables input))))
+            (should (equal "PRR" (map-elt sub-input 'pullRequestReviewId)))
+            (should (equal "APPROVE" (map-elt sub-input 'event)))
+            (should (equal "Ship it" (map-elt sub-input 'body))))))
+      (let* ((reloaded (magit-dash-review--read-json-file file))
+             (comments (append (map-elt reloaded "comments") nil))
+             (v (map-elt reloaded "verdict")))
+        (should-not (map-elt reloaded "pending_review"))
+        (should (= 95 (seq-count (lambda (c) (map-elt c "gh_thread_id")) comments)))
+        (should (= 95 (seq-count (lambda (c) (equal (map-elt c "status") "sent")) comments)))
+        (should (equal "approved" (map-elt v "submitted_state")))
+        (should (equal "H1" (map-elt v "submitted_head")))
+        (should (map-elt v "submitted_at"))))))
+
+(ert-deftest magit-dash-review/submit-persists-pending-review-before-threads-and-resumes ()
+  "Pending review id is persisted before any thread; crash before thread 1 reuses it."
+  (magit-dash-review-test/with-temp-dir
+    (let* ((file (magit-dash-review-test/submit-file
+                  (list (magit-dash-review-test/c "id" "n1" "path" "a.el" "lines" [1 1] "body" "one")
+                        (magit-dash-review-test/c "id" "n2" "path" "b.el" "lines" [2 2] "body" "two"))))
+           (ok (magit-dash-review-test/gh-default "H1")))
+      (magit-dash-review-test/with-gh
+          (lambda (kind args req)
+            (when (eq kind 'thread)
+              (error "crashed before first thread"))
+            (funcall ok kind args req))
+        (should-error (magit-dash-review-submit file)))
+      (let* ((reloaded (magit-dash-review--read-json-file file))
+             (pending (map-elt reloaded "pending_review")))
+        (should (hash-table-p pending))
+        (should (equal "PRR" (map-elt pending "id")))
+        (should (equal "PR_1" (map-elt pending "pr_node_id")))
+        (should (equal "owner/repo" (map-elt pending "repo")))
+        (should (= 99 (map-elt pending "number")))
+        (should (= 0 (seq-count (lambda (c) (map-elt c "gh_thread_id"))
+                                (magit-dash-review-test/read-comments file)))))
+      (magit-dash-review-test/with-gh ok
+        (magit-dash-review-submit file)
+        (should (equal '(view thread thread submit) (magit-dash-review-test/kinds)))
+        (should-not (memq 'review (magit-dash-review-test/kinds))))
+      (let ((reloaded (magit-dash-review--read-json-file file)))
+        (should-not (map-elt reloaded "pending_review"))
+        (should (= 2 (seq-count (lambda (c) (map-elt c "gh_thread_id"))
+                                (append (map-elt reloaded "comments") nil))))))))
+
+(ert-deftest magit-dash-review/submit-mid-threads-crash-resumes-with-zero-duplicates ()
+  "Crash mid-threads persists sent threads; resume sends only remaining threads and submits once."
+  (magit-dash-review-test/with-temp-dir
+    (let* ((threads (seq-map (lambda (i)
+                               (magit-dash-review-test/c "id" (format "n%d" i) "path" "p.el"
+                                                         "lines" (vector i i) "body" (format "b%d" i)))
+                             (number-sequence 1 10)))
+           (file (magit-dash-review-test/submit-file threads))
+           (ok (magit-dash-review-test/gh-default "H1"))
+           (seen 0))
+      (magit-dash-review-test/with-gh
+          (lambda (kind args req)
+            (when (eq kind 'thread)
+              (setq seen (1+ seen))
+              (when (= seen 4)
+                (error "boom on thread 4")))
+            (funcall ok kind args req))
+        (should-error (magit-dash-review-submit file)))
+      (let* ((reloaded (magit-dash-review--read-json-file file))
+             (comments (append (map-elt reloaded "comments") nil)))
+        (should (equal "PRR" (map-nested-elt reloaded '("pending_review" "id"))))
+        (should (= 3 (seq-count (lambda (c) (map-elt c "gh_thread_id")) comments))))
+      (magit-dash-review-test/with-gh ok
+        (magit-dash-review-submit file)
+        (let* ((calls (nreverse (copy-sequence magit-dash-review-test/gh-log)))
+               (thread-calls (seq-filter (lambda (c) (eq (car c) 'thread)) calls))
+               (bodies (seq-map (lambda (c) (map-nested-elt (nth 2 c) '(variables input body)))
+                                thread-calls)))
+          (should-not (memq 'review (magit-dash-review-test/kinds)))
+          (should (= 7 (length thread-calls)))
+          (should (equal '("b4" "b5" "b6" "b7" "b8" "b9" "b10") bodies))
+          (should (= 1 (seq-count (lambda (k) (eq k 'submit)) (magit-dash-review-test/kinds))))))
+      (should-not (map-elt (magit-dash-review--read-json-file file) "pending_review"))
+      (should (= 10 (seq-count (lambda (c) (map-elt c "gh_thread_id"))
+                               (magit-dash-review-test/read-comments file))))
+      (magit-dash-review-test/with-gh ok
+        (magit-dash-review-submit file)
+        (should-not magit-dash-review-test/gh-log)))))
+
+(ert-deftest magit-dash-review/submit-crash-before-submit-mutation-resumes-once ()
+  "Crash on submitPullRequestReview leaves pending_review; retry submits once without resending threads."
+  (magit-dash-review-test/with-temp-dir
+    (let* ((threads (list (magit-dash-review-test/c "id" "n1" "path" "a.el" "lines" [1 1] "body" "one")
+                          (magit-dash-review-test/c "id" "n2" "path" "b.el" "lines" [2 2] "body" "two")))
+           (verdict (magit-dash-review-test/c "state" "changes" "by" "me"))
+           (file (magit-dash-review-test/submit-file threads verdict))
+           (ok (magit-dash-review-test/gh-default "H1")))
+      (magit-dash-review-test/with-gh
+          (lambda (kind args req)
+            (if (eq kind 'submit)
+                (cons 1 "transient submit error")
+              (funcall ok kind args req)))
+        (should-error (magit-dash-review-submit file "Needs fixes")))
+      (let ((reloaded (magit-dash-review--read-json-file file)))
+        (should (equal "PRR" (map-nested-elt reloaded '("pending_review" "id"))))
+        (should (= 2 (seq-count (lambda (c) (map-elt c "gh_thread_id"))
+                                (append (map-elt reloaded "comments") nil))))
+        (should-not (map-nested-elt reloaded '("verdict" "submitted_at"))))
+      (magit-dash-review-test/with-gh ok
+        (magit-dash-review-submit file "Needs fixes")
+        (should (equal '(view submit) (magit-dash-review-test/kinds)))
+        (let ((sub-input (map-nested-elt (nth 2 (car magit-dash-review-test/gh-log))
+                                         '(variables input))))
+          (should (equal "PRR" (map-elt sub-input 'pullRequestReviewId)))
+          (should (equal "REQUEST_CHANGES" (map-elt sub-input 'event)))
+          (should (equal "Needs fixes" (map-elt sub-input 'body)))))
+      (let ((reloaded (magit-dash-review--read-json-file file)))
+        (should-not (map-elt reloaded "pending_review"))
+        (should (equal "changes" (map-nested-elt reloaded '("verdict" "submitted_state")))))
+      (magit-dash-review-test/with-gh ok
+        (magit-dash-review-submit file)
+        (should-not magit-dash-review-test/gh-log)))))
+
+(ert-deftest magit-dash-review/submit-recovers-when-persisted-pending-review-is-stale ()
+  "Foreign or deleted pending_review is discarded and recovered without failing forever."
+  (magit-dash-review-test/with-temp-dir
+    ;; Case 1: pending_review belongs to a different PR -> ignored, new review created.
+    (let* ((file (magit-dash-review-test/submit-file
+                  (list (magit-dash-review-test/c "id" "n1" "path" "a.el" "lines" [1 1] "body" "one"))))
+           (data (magit-dash-review--read-json-file file))
+           (ok (magit-dash-review-test/gh-default "H1")))
+      (setf (map-elt data "pending_review")
+            (magit-dash-review-test/c "id" "PRR_OTHER" "repo" "other/repo" "number" 7 "pr_node_id" "PR_7"))
+      (magit-dash-review--write-json-file file data)
+      (magit-dash-review-test/with-gh ok
+        (magit-dash-review-submit file)
+        (should (equal '(view review thread submit) (magit-dash-review-test/kinds)))
+        (should-not (map-elt (magit-dash-review--read-json-file file) "pending_review")))))
+  (magit-dash-review-test/with-temp-dir
+    ;; Case 2: persisted pending_review is missing on GitHub -> fresh pending review created on retry.
+    (let* ((file (magit-dash-review-test/submit-file
+                  (list (magit-dash-review-test/c "id" "n1" "path" "a.el" "lines" [1 1] "body" "one"))))
+           (data (magit-dash-review--read-json-file file))
+           (ok (magit-dash-review-test/gh-default "H1")))
+      (setf (map-elt data "pending_review")
+            (magit-dash-review-test/c "id" "PRR_GONE" "repo" "owner/repo" "number" 99 "pr_node_id" "PR_1"))
+      (magit-dash-review--write-json-file file data)
+      (magit-dash-review-test/with-gh
+          (lambda (kind args req)
+            (if (and (eq kind 'thread)
+                     (equal "PRR_GONE"
+                            (map-nested-elt req '(variables input pullRequestReviewId))))
+                `((errors . [((message . "Could not resolve to a node with the global id of 'PRR_GONE'."))]))
+              (funcall ok kind args req)))
+        (magit-dash-review-submit file)
+        (should (equal '(view thread review thread submit) (magit-dash-review-test/kinds)))
+        (should-not (map-elt (magit-dash-review--read-json-file file) "pending_review"))
+        (should (equal "T-one" (map-elt (car (magit-dash-review-test/read-comments file)) "gh_thread_id"))))))
+  (magit-dash-review-test/with-temp-dir
+    ;; Case 3: submitPullRequestReview reports already submitted -> clears pending_review without duplicate review.
+    (let* ((file (magit-dash-review-test/submit-file nil))
+           (data (magit-dash-review--read-json-file file))
+           (ok (magit-dash-review-test/gh-default "H1")))
+      (setf (map-elt data "pending_review")
+            (magit-dash-review-test/c "id" "PRR_DONE" "repo" "owner/repo" "number" 99 "pr_node_id" "PR_1"))
+      (magit-dash-review--write-json-file file data)
+      (magit-dash-review-test/with-gh
+          (lambda (kind args req)
+            (if (eq kind 'submit)
+                `((errors . [((message . "Pull request review has already been submitted"))]))
+              (funcall ok kind args req)))
+        (magit-dash-review-submit file)
+        (should (equal '(view submit) (magit-dash-review-test/kinds)))
+        (should-not (map-elt (magit-dash-review--read-json-file file) "pending_review"))))))
+
+(ert-deftest magit-dash-review/submit-skips-sent-status-without-thread-id ()
+  "Threads already marked status \"sent\" are skipped even if gh_thread_id is nil."
+  (magit-dash-review-test/with-temp-dir
+    (let* ((sent-no-id (magit-dash-review-test/c "id" "s1" "path" "a.el" "lines" [1 1]
+                                                 "body" "already sent" "status" "sent"))
+           (unsent (magit-dash-review-test/c "id" "u1" "path" "b.el" "lines" [2 2]
+                                             "body" "send me"))
+           (file (magit-dash-review-test/submit-file (list sent-no-id unsent))))
+      (magit-dash-review-test/with-gh (magit-dash-review-test/gh-default "H1")
+        (magit-dash-review-submit file)
+        (let* ((calls (nreverse (copy-sequence magit-dash-review-test/gh-log)))
+               (thread-calls (seq-filter (lambda (c) (eq (car c) 'thread)) calls)))
+          (should (= 1 (length thread-calls)))
+          (should (equal "send me"
+                         (map-nested-elt (nth 2 (car thread-calls)) '(variables input body)))))))))
+
+(ert-deftest magit-dash-review/pending-review-helpers-direct ()
+  "Direct coverage of pending-review GraphQL helpers and error classifier."
+  (magit-dash-review-test/with-temp-dir
+    (magit-dash-review-test/with-gh (magit-dash-review-test/gh-default "H1")
+      (should (equal "PRR" (magit-dash-review--create-pending-review "PR_1" "H1" default-directory)))
+      (let ((c (magit-dash-review-test/c "id" "c1" "path" "a.el" "lines" [3 3] "body" "hi")))
+        (magit-dash-review--add-review-thread "PRR" c default-directory)
+        (should (equal "T-hi" (map-elt c "gh_thread_id")))
+        (should (equal "C-hi" (map-elt c "gh_comment_id")))
+        (should (equal "sent" (map-elt c "status"))))
+      (should (equal "COMMENTED"
+                     (magit-dash-review--submit-pending-review "PRR" "COMMENT" "note" default-directory)))
+      (should (equal "COMMENTED"
+                     (magit-dash-review--submit-threads nil "COMMENT" "only body" "PR_1" "H1" default-directory))))
+    (magit-dash-review-test/with-gh
+        (lambda (kind _args req)
+          (if (eq kind 'node-id)
+              `((data . ((node . ((id . ,(map-nested-elt req '(variables id)))
+                                  (state . "APPROVED")
+                                  (commit . ((oid . "H1"))))))))
+            (error "Unexpected kind: %S" kind)))
+      (let ((node (magit-dash-review--fetch-review-node "PRR_9" default-directory)))
+        (should (equal "APPROVED" (map-elt node 'state)))
+        (should (equal "H1" (map-nested-elt node '(commit oid))))))
+    (should (magit-dash-review--stale-pending-review-error-p '(error "Pull request review has already been submitted")))
+    (should (magit-dash-review--stale-pending-review-error-p '(error "Could not resolve to a node")))
+    (should-not (magit-dash-review--stale-pending-review-error-p '(error "reviewThread PRRT_1 not found")))
+    (should-not (magit-dash-review--stale-pending-review-error-p '(error "gh api graphql failed: HTTP 502")))))
+
+(ert-deftest magit-dash-review/submit-refuses-approve-when-pending-review-head-moved-and-stamps-pending-head ()
+  "Pending review head_oid is checked for APPROVE/REQUEST_CHANGES and stamped as submitted_head."
+  (magit-dash-review-test/with-temp-dir
+    (let* ((verdict (magit-dash-review-test/c "state" "approved" "head" "H2"))
+           (file (magit-dash-review-test/submit-file nil verdict "H2"))
+           (data (magit-dash-review--read-json-file file)))
+      (setf (map-elt data "pending_review")
+            (magit-dash-review-test/c "id" "PRR_OLD" "repo" "owner/repo" "number" 99
+                                      "pr_node_id" "PR_1" "head_oid" "H1"))
+      (magit-dash-review--write-json-file file data)
+      (magit-dash-review-test/with-gh (magit-dash-review-test/gh-default "H2")
+        (should-error (magit-dash-review-submit file) :type 'user-error)
+        (should-not (memq 'submit (magit-dash-review-test/kinds))))))
+  (magit-dash-review-test/with-temp-dir
+    (let* ((verdict (magit-dash-review-test/c "state" "comment"))
+           (file (magit-dash-review-test/submit-file nil verdict "H2"))
+           (data (magit-dash-review--read-json-file file)))
+      (setf (map-elt data "pending_review")
+            (magit-dash-review-test/c "id" "PRR_H1" "repo" "owner/repo" "number" 99
+                                      "pr_node_id" "PR_1" "head_oid" "H1"))
+      (magit-dash-review--write-json-file file data)
+      (magit-dash-review-test/with-gh (magit-dash-review-test/gh-default "H2")
+        (magit-dash-review-submit file)
+        (should (equal '(view submit) (magit-dash-review-test/kinds))))
+      (let ((reloaded (magit-dash-review--read-json-file file)))
+        (should-not (map-elt reloaded "pending_review"))
+        (should (equal "H1" (map-nested-elt reloaded '("verdict" "submitted_head"))))))))
+
+(ert-deftest magit-dash-review/submit-already-submitted-reconciles-or-refuses-verdict ()
+  "Already-submitted pending review reconciles matching verdict state and refuses mismatch."
+  ;; Matching state: stamps verdict, clears pending_review, and subsequent submit is a no-op.
+  (magit-dash-review-test/with-temp-dir
+    (let* ((verdict (magit-dash-review-test/c "state" "approved" "head" "H1"))
+           (file (magit-dash-review-test/submit-file nil verdict "H1"))
+           (data (magit-dash-review--read-json-file file))
+           (ok (magit-dash-review-test/gh-default "H1")))
+      (setf (map-elt data "pending_review")
+            (magit-dash-review-test/c "id" "PRR_DONE" "repo" "owner/repo" "number" 99
+                                      "pr_node_id" "PR_1" "head_oid" "H1"))
+      (magit-dash-review--write-json-file file data)
+      (magit-dash-review-test/with-gh
+          (lambda (kind args req)
+            (pcase kind
+              ('submit `((errors . [((message . "Pull request review has already been submitted"))])))
+              ('node-id `((data . ((node . ((id . "PRR_DONE")
+                                             (state . "APPROVED")
+                                             (commit . ((oid . "H1")))))))))
+              (_ (funcall ok kind args req))))
+        (magit-dash-review-submit file)
+        (should (equal '(view submit node-id) (magit-dash-review-test/kinds))))
+      (let ((reloaded (magit-dash-review--read-json-file file)))
+        (should-not (map-elt reloaded "pending_review"))
+        (should (equal "approved" (map-nested-elt reloaded '("verdict" "submitted_state"))))
+        (should (equal "H1" (map-nested-elt reloaded '("verdict" "submitted_head")))))
+      (magit-dash-review-test/with-gh ok
+        (magit-dash-review-submit file)
+        (should-not magit-dash-review-test/gh-log))))
+  ;; Mismatched state: signals user-error, keeps pending_review and leaves verdict unstamped.
+  (magit-dash-review-test/with-temp-dir
+    (let* ((verdict (magit-dash-review-test/c "state" "approved" "head" "H1"))
+           (file (magit-dash-review-test/submit-file nil verdict "H1"))
+           (data (magit-dash-review--read-json-file file))
+           (ok (magit-dash-review-test/gh-default "H1")))
+      (setf (map-elt data "pending_review")
+            (magit-dash-review-test/c "id" "PRR_MISMATCH" "repo" "owner/repo" "number" 99
+                                      "pr_node_id" "PR_1" "head_oid" "H1"))
+      (magit-dash-review--write-json-file file data)
+      (magit-dash-review-test/with-gh
+          (lambda (kind args req)
+            (pcase kind
+              ('submit `((errors . [((message . "Pull request review has already been submitted"))])))
+              ('node-id `((data . ((node . ((id . "PRR_MISMATCH")
+                                             (state . "COMMENTED")
+                                             (commit . ((oid . "H1")))))))))
+              (_ (funcall ok kind args req))))
+        (should-error (magit-dash-review-submit file) :type 'user-error))
+      (let ((reloaded (magit-dash-review--read-json-file file)))
+        (should (equal "PRR_MISMATCH" (map-nested-elt reloaded '("pending_review" "id"))))
+        (should-not (map-nested-elt reloaded '("verdict" "submitted_at")))))))
+
+(ert-deftest magit-dash-review/submit-unrelated-not-found-preserves-pending-review ()
+  "An unrelated \"not found\" error on thread k+1 must not discard PRR_1."
+  (should-not (magit-dash-review--stale-pending-review-error-p
+               '(error "Path missing.el not found in diff")))
+  (should (magit-dash-review--stale-pending-review-error-p
+           '(error "PullRequestReview not found")))
+  (magit-dash-review-test/with-temp-dir
+    (let* ((t1 (magit-dash-review-test/c "id" "c1" "path" "a.el" "lines" [1 1] "body" "one"
+                                         "gh_thread_id" "T-1" "status" "sent"))
+           (t2 (magit-dash-review-test/c "id" "c2" "path" "missing.el" "lines" [2 2] "body" "two"))
+           (file (magit-dash-review-test/submit-file (list t1 t2)))
+           (data (magit-dash-review--read-json-file file))
+           (ok (magit-dash-review-test/gh-default "H1")))
+      (setf (map-elt data "pending_review")
+            (magit-dash-review-test/c "id" "PRR_1" "repo" "owner/repo" "number" 99
+                                      "pr_node_id" "PR_1" "head_oid" "H1"))
+      (magit-dash-review--write-json-file file data)
+      (magit-dash-review-test/with-gh
+          (lambda (kind args req)
+            (if (eq kind 'thread)
+                `((errors . [((message . "Path missing.el not found in pull request diff"))]))
+              (funcall ok kind args req)))
+        (should-error (magit-dash-review-submit file) :type 'error)
+        (should (equal '(view thread) (magit-dash-review-test/kinds))))
+      (should (equal "PRR_1" (map-nested-elt (magit-dash-review--read-json-file file)
+                                             '("pending_review" "id")))))))
+
+(ert-deftest magit-dash-review/submit-pending-review-signals-on-nil-state ()
+  "submitPullRequestReview signals on nil state and preserves pending_review."
+  (magit-dash-review-test/with-temp-dir
+    (let* ((file (magit-dash-review-test/submit-file
+                  (list (magit-dash-review-test/c "id" "c1" "path" "a.el" "lines" [1 1] "body" "one"))))
+           (ok (magit-dash-review-test/gh-default "H1")))
+      (magit-dash-review-test/with-gh
+          (lambda (kind args req)
+            (if (eq kind 'submit)
+                `((data . ((submitPullRequestReview . ((pullRequestReview . nil))))))
+              (funcall ok kind args req)))
+        (should-error (magit-dash-review-submit file) :type 'error))
+      (should (equal "PRR" (map-nested-elt (magit-dash-review--read-json-file file)
+                                           '("pending_review" "id")))))))
 
 ;;; Shared buffer refresh helper
 
