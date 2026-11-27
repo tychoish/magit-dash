@@ -584,25 +584,23 @@ even when other real candidates exist."
 
 (ert-deftest magit-dash-gh/account-token-success ()
   "account-token returns trimmed token on gh auth token exit 0."
-  (cl-letf (((symbol-function 'call-process)
-             (lambda (_cmd _infile destination _display &rest _args)
-               (with-current-buffer (if (listp destination) (car destination) (current-buffer))
-                 (insert "ghp_mock_token_12345
-"))
-               0)))
-    (should (equal "ghp_mock_token_12345"
-                   (magit-dash-gh--account-token "alice" "github.com")))))
+  (let ((magit-dash-gh--token-cache (make-hash-table :test #'equal))
+        (magit-dash-gh--token-pending (make-hash-table :test #'equal)))
+    (magit-dash-gh-test--with-fake-gh
+     "echo ghp_mock_token_12345"
+     (lambda (_dir)
+       (should (equal "ghp_mock_token_12345"
+                      (magit-dash-gh--account-token "alice" "github.com")))))))
 
 (ert-deftest magit-dash-gh/account-token-failure ()
   "account-token signals user-error on gh auth token exit non-zero."
-  (cl-letf (((symbol-function 'call-process)
-             (lambda (_cmd _infile destination _display &rest _args)
-               (with-current-buffer (if (listp destination) (car destination) (current-buffer))
-                 (insert "no token found for user
-"))
-               1)))
-    (should-error (magit-dash-gh--account-token "bob" "github.com")
-                  :type 'user-error)))
+  (let ((magit-dash-gh--token-cache (make-hash-table :test #'equal))
+        (magit-dash-gh--token-pending (make-hash-table :test #'equal)))
+    (magit-dash-gh-test--with-fake-gh
+     "echo 'no token found for user'; exit 1"
+     (lambda (_dir)
+       (should-error (magit-dash-gh--account-token "bob" "github.com")
+                     :type 'user-error)))))
 
 (ert-deftest magit-dash-gh/with-account-nil ()
   "magit-dash-gh-with-account nil executes body without altering environment."
@@ -1040,57 +1038,62 @@ exec sleep 5" counter counter)
               (process-list)))
 
 (ert-deftest magit-dash-gh/account-token-is-cached-per-user-and-host ()
-  (let ((calls 0)
+  (let ((counter (make-temp-file "tok-cache-count"))
         (magit-dash-gh--token-cache (make-hash-table :test #'equal))
+        (magit-dash-gh--token-pending (make-hash-table :test #'equal))
         (magit-dash-gh-token-ttl 60))
-    (cl-letf (((symbol-function 'call-process)
-               (lambda (_cmd _in dest _display &rest args)
-                 (setq calls (1+ calls))
-                 (with-current-buffer (car dest)
-                   (insert (format "tok-%s-%d\n" (nth 3 args) calls)))
-                 0)))
-      (should (equal "tok-alice-1" (magit-dash-gh--account-token "alice" "github.com")))
-      (should (equal "tok-alice-1" (magit-dash-gh--account-token "alice" "github.com")))
-      (should (= 1 calls))
-      (magit-dash-gh--account-token "bob" "github.com")
-      (magit-dash-gh--account-token "alice" "ghe.example")
-      (should (= 3 calls))
-      (magit-dash-gh-reset-token-cache)
-      (magit-dash-gh--account-token "alice" "github.com")
-      (should (= 4 calls)))))
+    (unwind-protect
+        (magit-dash-gh-test--with-fake-gh
+         (format "n=$(cat %s 2>/dev/null); n=$((${n:-0}+1)); echo $n > %s
+echo \"tok-$4-$n\"" counter counter)
+         (lambda (_dir)
+           (should (equal "tok-alice-1" (magit-dash-gh--account-token "alice" "github.com")))
+           (should (equal "tok-alice-1" (magit-dash-gh--account-token "alice" "github.com")))
+           (should (equal "1\n" (with-temp-buffer (insert-file-contents counter) (buffer-string))))
+           (magit-dash-gh--account-token "bob" "github.com")
+           (magit-dash-gh--account-token "alice" "ghe.example")
+           (should (equal "3\n" (with-temp-buffer (insert-file-contents counter) (buffer-string))))
+           (magit-dash-gh-reset-token-cache)
+           (magit-dash-gh--account-token "alice" "github.com")
+           (should (equal "4\n" (with-temp-buffer (insert-file-contents counter) (buffer-string))))))
+      (delete-file counter))))
 
 (ert-deftest magit-dash-gh/account-token-cache-expires ()
-  (let ((calls 0)
+  (let ((counter (make-temp-file "tok-exp-count"))
         (magit-dash-gh--token-cache (make-hash-table :test #'equal))
+        (magit-dash-gh--token-pending (make-hash-table :test #'equal))
         (magit-dash-gh-token-ttl 60))
-    (cl-letf (((symbol-function 'call-process)
-               (lambda (_cmd _in dest &rest _)
-                 (setq calls (1+ calls))
-                 (with-current-buffer (car dest) (insert "tok\n"))
-                 0)))
-      (magit-dash-gh--account-token "alice" "github.com")
-      (setf (cdr (map-elt magit-dash-gh--token-cache '("alice" . "github.com")))
-            (time-subtract (current-time) 120))
-      (magit-dash-gh--account-token "alice" "github.com")
-      (should (= 2 calls))
-      (setq magit-dash-gh-token-ttl nil)
-      (magit-dash-gh--account-token "alice" "github.com")
-      (should (= 3 calls)))))
+    (unwind-protect
+        (magit-dash-gh-test--with-fake-gh
+         (format "n=$(cat %s 2>/dev/null); n=$((${n:-0}+1)); echo $n > %s
+echo tok" counter counter)
+         (lambda (_dir)
+           (magit-dash-gh--account-token "alice" "github.com")
+           (setf (cdr (map-elt magit-dash-gh--token-cache '("alice" . "github.com")))
+                 (time-subtract (current-time) 120))
+           (magit-dash-gh--account-token "alice" "github.com")
+           (should (equal "2\n" (with-temp-buffer (insert-file-contents counter) (buffer-string))))
+           (setq magit-dash-gh-token-ttl nil)
+           (magit-dash-gh--account-token "alice" "github.com")
+           (should (equal "3\n" (with-temp-buffer (insert-file-contents counter) (buffer-string))))))
+      (delete-file counter))))
 
 (ert-deftest magit-dash-gh/account-token-failure-not-cached-and-redacted ()
-  (let ((calls 0)
-        (magit-dash-gh--token-cache (make-hash-table :test #'equal)))
-    (cl-letf (((symbol-function 'call-process)
-               (lambda (_cmd _in dest &rest _)
-                 (setq calls (1+ calls))
-                 (with-current-buffer (car dest)
-                   (insert "bad ghp_SECRET123abc token"))
-                 1)))
-      (let ((err (should-error (magit-dash-gh--account-token "bob" "github.com")
-                               :type 'user-error)))
-        (should-not (string-match-p "SECRET123" (error-message-string err))))
-      (should-error (magit-dash-gh--account-token "bob" "github.com") :type 'user-error)
-      (should (= 2 calls)))))
+  (let ((counter (make-temp-file "tok-fail-count"))
+        (magit-dash-gh--token-cache (make-hash-table :test #'equal))
+        (magit-dash-gh--token-pending (make-hash-table :test #'equal)))
+    (unwind-protect
+        (magit-dash-gh-test--with-fake-gh
+         (format "n=$(cat %s 2>/dev/null); n=$((${n:-0}+1)); echo $n > %s
+echo 'bad ghp_SECRET123abc token'
+exit 1" counter counter)
+         (lambda (_dir)
+           (let ((err (should-error (magit-dash-gh--account-token "bob" "github.com")
+                                    :type 'user-error)))
+             (should-not (string-match-p "SECRET123" (error-message-string err))))
+           (should-error (magit-dash-gh--account-token "bob" "github.com") :type 'user-error)
+           (should (equal "2\n" (with-temp-buffer (insert-file-contents counter) (buffer-string))))))
+      (delete-file counter))))
 
 (ert-deftest magit-dash-gh/sanitize-redacts-and-truncates ()
   (let ((magit-dash-gh-message-max-length 40))
@@ -1244,5 +1247,200 @@ echo 'HTTP 503' >&2; exit 1" counter counter)
                   (should-not (magit-dash-gh--branch-tip "feat" repo)))))))
       (delete-directory repo t)
       (delete-directory cache-dir t))))
+
+(ert-deftest magit-dash-gh/account-token-cache-hit-spawns-zero-processes ()
+  "Cache hit returns immediately without spawning any process."
+  (let ((magit-dash-gh--token-cache (make-hash-table :test #'equal))
+        (magit-dash-gh-token-ttl 60)
+        (procs 0))
+    (setf (map-elt magit-dash-gh--token-cache '("alice" . "github.com"))
+          (cons "tok-cached" (current-time)))
+    (cl-letf (((symbol-function 'call-process)
+               (lambda (&rest _) (setq procs (1+ procs)) 1))
+              ((symbol-function 'make-process)
+               (lambda (&rest _) (setq procs (1+ procs)) (error "unexpected make-process"))))
+      (should (equal "tok-cached" (magit-dash-gh--account-token "alice" "github.com")))
+      (let ((got nil))
+        (magit-dash-gh--account-token "alice" "github.com"
+                                      (lambda (tok err) (setq got (list tok err))))
+        (should (equal '("tok-cached" nil) got)))
+      (should (= 0 procs)))))
+
+(ert-deftest magit-dash-gh/prime-account-token-async-dedupes-and-caches-ttl ()
+  "Async token priming deduplicates in-flight lookups and caches per TTL."
+  (let ((counter (make-temp-file "tok-count"))
+        (magit-dash-gh--token-cache (make-hash-table :test #'equal))
+        (magit-dash-gh--token-pending (make-hash-table :test #'equal))
+        (magit-dash-gh-token-ttl 60)
+        (magit-dash-gh-token-lookup-timeout 5))
+    (unwind-protect
+        (magit-dash-gh-test--with-fake-gh
+         (format "n=$(cat %s 2>/dev/null); n=$((${n:-0}+1)); echo $n > %s
+sleep 0.05
+echo tok-async-$n" counter counter)
+         (lambda (_dir)
+           (let ((res1 nil)
+                 (res2 nil))
+             (magit-dash-gh--prime-account-token-async
+              "alice" "github.com" (lambda (tok err) (setq res1 (list tok err))))
+             (magit-dash-gh--prime-account-token-async
+              "alice" "github.com" (lambda (tok err) (setq res2 (list tok err))))
+             (should (magit-dash-gh-test--wait-until (lambda () (and res1 res2))))
+             (should (equal '("tok-async-1" nil) res1))
+             (should (equal '("tok-async-1" nil) res2))
+             (should (equal "1\n" (with-temp-buffer
+                                    (insert-file-contents counter)
+                                    (buffer-string))))
+             ;; Warm cache hit spawns 0 processes.
+             (should (equal "tok-async-1"
+                            (magit-dash-gh--account-token "alice" "github.com")))
+             (should (equal "1\n" (with-temp-buffer
+                                    (insert-file-contents counter)
+                                    (buffer-string))))
+             ;; After TTL expires, next prime re-fetches.
+             (setf (cdr (map-elt magit-dash-gh--token-cache '("alice" . "github.com")))
+                   (time-subtract (current-time) 120))
+             (let ((res3 nil))
+               (magit-dash-gh--prime-account-token-async
+                "alice" "github.com" (lambda (tok err) (setq res3 (list tok err))))
+               (should (magit-dash-gh-test--wait-until (lambda () res3)))
+               (should (equal '("tok-async-2" nil) res3))))))
+      (delete-file counter))))
+
+(ert-deftest magit-dash-gh/account-token-bounded-timeout-on-hung-gh ()
+  "Hung gh auth token fails within bounded timeout on both sync and async paths."
+  (let ((magit-dash-gh--token-cache (make-hash-table :test #'equal))
+        (magit-dash-gh--token-pending (make-hash-table :test #'equal))
+        (magit-dash-gh-token-lookup-timeout 0.15))
+    (magit-dash-gh-test--with-fake-gh
+     "exec sleep 5"
+     (lambda (_dir)
+       (let ((start (float-time)))
+         (should-error (magit-dash-gh--account-token "alice" "github.com")
+                       :type 'user-error)
+         (should (< (- (float-time) start) 1.5)))
+       (let ((async-res nil)
+             (start (float-time)))
+         (magit-dash-gh--prime-account-token-async
+          "bob" "github.com" (lambda (tok err) (setq async-res (list tok err))))
+         (should (magit-dash-gh-test--wait-until (lambda () async-res) 2))
+         (should (< (- (float-time) start) 1.5))
+         (should-not (car async-res))
+         (should (string-match-p "timed out" (cadr async-res))))))))
+
+(ert-deftest magit-dash-gh/run-process-primes-cold-token-async ()
+  "run-process primes a cold account token asynchronously without blocking."
+  (let ((magit-dash-gh--token-cache (make-hash-table :test #'equal))
+        (magit-dash-gh--token-pending (make-hash-table :test #'equal))
+        (magit-dash-gh-token-ttl 60)
+        (result nil))
+    (magit-dash-gh-test--with-fake-gh
+     "if [ \"$1\" = auth ] && [ \"$2\" = token ]; then
+  echo tok-async-env
+else
+  echo \"tok=$GH_TOKEN\"
+fi"
+     (lambda (dir)
+       (cl-letf (((symbol-function 'magit-dash-gh--repo-account)
+                  (lambda (_) '(:user "alice" :host "github.com")))
+                 ((symbol-function 'magit-dash-gh--account-token)
+                  (lambda (&rest _) (error "must not resolve token synchronously"))))
+         (magit-dash-gh--run-process
+          '("pr" "list") dir
+          (lambda (out) (setq result (list :ok (string-trim out))))
+          (lambda (out code) (setq result (list :err out code))))
+         (should (magit-dash-gh-test--wait-until (lambda () result) 2))
+         (should (equal '(:ok "tok=tok-async-env") result))
+         (should (equal "tok-async-env"
+                        (car (map-elt magit-dash-gh--token-cache
+                                      '("alice" . "github.com"))))))))))
+
+(ert-deftest magit-dash-gh/reset-token-cache-settles-pending-run-process ()
+  "reset-token-cache settles in-flight async token lookups and notifies callers."
+  (let ((magit-dash-gh--token-cache (make-hash-table :test #'equal))
+        (magit-dash-gh--token-pending (make-hash-table :test #'equal))
+        (magit-dash-gh-token-lookup-timeout 5)
+        (result nil))
+    (magit-dash-gh-test--with-fake-gh
+     "exec sleep 5"
+     (lambda (dir)
+       (cl-letf (((symbol-function 'magit-dash-gh--repo-account)
+                  (lambda (_) '(:user "alice" :host "github.com"))))
+         (magit-dash-gh--run-process
+          '("pr" "list") dir
+          (lambda (out) (setq result (list :ok out)))
+          (lambda (out code) (setq result (list :err out code))))
+         (should (map-elt magit-dash-gh--token-pending '("alice" . "github.com")))
+         (magit-dash-gh-reset-token-cache)
+         (should (zerop (hash-table-count magit-dash-gh--token-pending)))
+         (should (eq :err (car result)))
+         (should (string-match-p "cancelled" (cadr result))))))))
+
+(ert-deftest magit-dash-gh/prime-account-token-async-isolates-callback-errors ()
+  "One failing callback does not drop subsequent waiters on the same key."
+  (let ((magit-dash-gh--token-cache (make-hash-table :test #'equal))
+        (magit-dash-gh--token-pending (make-hash-table :test #'equal))
+        (magit-dash-gh-token-ttl 60)
+        (second-res nil))
+    (magit-dash-gh-test--with-fake-gh
+     "sleep 0.05; echo tok-shared"
+     (lambda (_dir)
+       (magit-dash-gh--prime-account-token-async
+        "alice" "github.com"
+        (lambda (_tok _err) (error "boom in first callback")))
+       (magit-dash-gh--prime-account-token-async
+        "alice" "github.com"
+        (lambda (tok err) (setq second-res (list tok err))))
+       (should (magit-dash-gh-test--wait-until (lambda () second-res) 2))
+       (should (equal '("tok-shared" nil) second-res))))))
+
+(ert-deftest magit-dash-gh/account-token-ignores-stderr-warnings ()
+  "Warnings on stderr do not contaminate the cached stdout token or leak buffers."
+  (let ((magit-dash-gh--token-cache (make-hash-table :test #'equal))
+        (magit-dash-gh--token-pending (make-hash-table :test #'equal))
+        (before (buffer-list)))
+    (magit-dash-gh-test--with-fake-gh
+     "echo 'warning: gh upgrade available' >&2; echo ghp_clean_token"
+     (lambda (_dir)
+       (should (equal "ghp_clean_token"
+                      (magit-dash-gh--account-token "alice" "github.com")))
+       (should (null (seq-filter
+                      (lambda (b)
+                        (and (not (memq b before))
+                             (string-prefix-p " *magit-dash-gh-token" (buffer-name b))))
+                      (buffer-list))))))))
+
+(ert-deftest magit-dash-gh/run-process-cancelled-during-async-token-prime ()
+  "Cancelling while awaiting a cold async token skips spawning gh and callbacks."
+  (let ((magit-dash-gh--token-cache (make-hash-table :test #'equal))
+        (magit-dash-gh--token-pending (make-hash-table :test #'equal))
+        (called nil)
+        (cancelled nil)
+        (spawned-main nil))
+    (magit-dash-gh-test--with-fake-gh
+     (format "if [ \"$1\" = auth ]; then
+  sleep 0.05
+  echo tok-late
+else
+  echo main-ran
+fi")
+     (lambda (dir)
+       (cl-letf (((symbol-function 'magit-dash-gh--repo-account)
+                  (lambda (_) '(:user "alice" :host "github.com")))
+                 ((symbol-function 'magit-dash-gh--spawn-process)
+                  (lambda (&rest _) (setq spawned-main t) nil)))
+         (magit-dash-gh--run-process
+          '("pr" "list") dir
+          (lambda (out) (setq called (list :ok out)))
+          (lambda (out code) (setq called (list :err out code)))
+          nil
+          (lambda () cancelled))
+         (setq cancelled t)
+         (should (magit-dash-gh-test--wait-until
+                  (lambda ()
+                    (map-elt magit-dash-gh--token-cache '("alice" . "github.com")))
+                  2))
+         (should-not spawned-main)
+         (should-not called))))))
 
 ;;; test-magit-dash-gh.el ends here

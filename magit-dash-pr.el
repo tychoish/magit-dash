@@ -55,6 +55,7 @@
 (declare-function magit-dash-repo-repo "magit-dash")
 (declare-function magit-dash-repo-upstream-repo "magit-dash")
 (declare-function magit-dash-repo-gh-account "magit-dash")
+(declare-function magit-dash-repo-gh-host "magit-dash")
 (declare-function magit-dash-repo-pr "magit-dash")
 (declare-function magit-dash-repo-path "magit-dash")
 (defvar magit-dash-repo-list)
@@ -2172,6 +2173,8 @@ discovery query runs and no other row changes."
          (dir (or (ignore-errors (magit-dash-gh--repo-dir))
                   (expand-file-name "~"))))
     (message "magit-gh: refreshing %d PR(s)..." (length entries))
+    (magit-dash-pr--prime-account-logins
+     (magit-dash-pr--entries-prime-dirs entries dir))
     (require 'magit-dash-pr-status)
     (magit-dash-pr--run-limited
      (seq-mapcat
@@ -3012,21 +3015,34 @@ repository's configured account, since the default login is cached per host."
   "Return the host of REPO's origin remote, or \"github.com\".
 The \"github.com\" fallback is not cached when the git lookup fails, so a
 later call can still find the real host."
-  (if (not (and (stringp repo) (file-directory-p repo)))
-      "github.com"
-    (or (map-elt magit-dash-pr--repo-hosts repo)
-        (when-let* ((url (ignore-errors
-                          (with-temp-buffer
-                            (let ((default-directory repo))
-                              (when (zerop (call-process
-                                            "git" nil (list (current-buffer) nil) nil
-                                            "config" "--get" "remote.origin.url"))
-                                (string-trim (buffer-string)))))))
-                    ((string-match
-                      "\\`\\(?:[[:alpha:]+]+://\\)?\\(?:[^@/]+@\\)?\\([^:/]+\\)[:/]"
-                      url)))
-          (setf (map-elt magit-dash-pr--repo-hosts repo) (match-string 1 url)))
-        "github.com")))
+  (let ((dir (cond
+              ((and (fboundp 'magit-dash-repo-p) (magit-dash-repo-p repo))
+               (magit-dash-repo-path repo))
+              ((stringp repo) repo))))
+    (if (not (and (stringp dir) (file-directory-p dir)))
+        (or (and (fboundp 'magit-dash-repo-p)
+                 (magit-dash-repo-p repo)
+                 (fboundp 'magit-dash-repo-gh-host)
+                 (magit-dash-repo-gh-host repo))
+            "github.com")
+      (let ((key (directory-file-name (expand-file-name dir))))
+        (or (map-elt magit-dash-pr--repo-hosts key)
+            (when-let* ((url (ignore-errors
+                               (with-temp-buffer
+                                 (let ((default-directory key))
+                                   (when (zerop (call-process
+                                                 "git" nil (list (current-buffer) nil) nil
+                                                 "config" "--get" "remote.origin.url"))
+                                     (string-trim (buffer-string)))))))
+                        ((string-match
+                          "\\`\\(?:[[:alpha:]+]+://\\)?\\(?:[^@/]+@\\)?\\([^:/]+\\)[:/]"
+                          url)))
+              (setf (map-elt magit-dash-pr--repo-hosts key) (match-string 1 url)))
+            (and (fboundp 'magit-dash-repo-p)
+                 (magit-dash-repo-p repo)
+                 (fboundp 'magit-dash-repo-gh-host)
+                 (magit-dash-repo-gh-host repo))
+            "github.com")))))
 
 (defun magit-dash-pr--account-login (repo)
   "Return the gh login in use for REPO, or nil when not known yet.
@@ -3035,7 +3051,11 @@ cached login for the default account on REPO's host is used.  When that is
 not cached and REPO is an existing directory, one asynchronous lookup primes
 the cache; a pending or failed lookup is not retried for
 `magit-dash-pr--login-retry-seconds'."
-  (let* ((account (magit-dash-gh--repo-account repo))
+  (let* ((dir (cond
+               ((and (fboundp 'magit-dash-repo-p) (magit-dash-repo-p repo))
+                (magit-dash-repo-path repo))
+               ((stringp repo) repo)))
+         (account (magit-dash-gh--repo-account repo))
          (host (or (plist-get account :host) (magit-dash-pr--repo-host repo)))
          (key (if account
                   (cons (plist-get account :user) host)
@@ -3047,7 +3067,7 @@ the cache; a pending or failed lookup is not retried for
      (account
       (setf (map-elt magit-dash-pr--account-logins key)
             (plist-get account :user)))
-     ((and (stringp repo) (file-directory-p repo)
+     ((and (stringp dir) (file-directory-p dir)
            (or (null cached)
                (> (float-time (time-since (cdr cached)))
                   magit-dash-pr--login-retry-seconds)))
@@ -3070,7 +3090,7 @@ the cache; a pending or failed lookup is not retried for
                          (magit-dash-gh--handle-cancel handle)))))
         (condition-case nil
             (magit-dash-gh--run-process
-             (list "api" "user" "--hostname" host "--jq" ".login") repo
+             (list "api" "user" "--hostname" host "--jq" ".login") dir
              (lambda (output)
                (let ((login (string-trim output)))
                  (funcall settle (if (string-empty-p login)
@@ -3083,15 +3103,43 @@ the cache; a pending or failed lookup is not retried for
            (funcall settle (cons :failed (current-time))))))
       nil))))
 
+(defun magit-dash-pr--entries-prime-dirs (entries &optional fallback-dir)
+  "Return unique local repository directories to prime for ENTRIES.
+Includes FALLBACK-DIR when it is an existing directory."
+  (let ((dirs (seq-keep (lambda (entry)
+                          (let ((item (if (and (consp entry) (listp (car entry)))
+                                          (car entry)
+                                        entry)))
+                            (or (plist-get item :repo-dir)
+                                (when-let* ((repo (plist-get item :repo)))
+                                  (magit-dash-pr-dashboard--find-local-path repo)))))
+                        entries)))
+    (when (and (stringp fallback-dir) (file-directory-p fallback-dir))
+      (push fallback-dir dirs))
+    (seq-uniq (delq nil dirs))))
+
 (defun magit-dash-pr--prime-account-logins (&optional dirs)
-  "Start the gh login lookup for each of DIRS, once per repository.
-DIRS defaults to the paths of `magit-dash-repo-list'.  Lookups already
-cached or in flight are not repeated, so this is cheap to call on every
-refresh; it lets own PRs be named pr-N from their first use."
-  (seq-do #'magit-dash-pr--account-login
-          (seq-uniq (or dirs
-                        (and (boundp 'magit-dash-repo-list)
-                             (seq-map #'magit-dash-repo-path magit-dash-repo-list))))))
+  "Start gh login and token priming for DIRS, once per account/host.
+DIRS defaults to `magit-dash-repo-list' paths, the current repository
+directory (including unregistered repos), and any dashboard entry dirs.
+Lookups already cached or in flight are not repeated, so this is cheap to
+call on every refresh and lets own PRs be named pr-N from first use."
+  (let ((targets
+         (or dirs
+             (append
+              (delq nil (list (ignore-errors (magit-dash-gh--repo-dir))))
+              (and (boundp 'magit-dash-repo-list)
+                   (seq-map #'magit-dash-repo-path magit-dash-repo-list))
+              (when (bound-and-true-p tabulated-list-entries)
+                (magit-dash-pr--entries-prime-dirs tabulated-list-entries))))))
+    (seq-do (lambda (target)
+              (magit-dash-pr--account-login target)
+              (when-let* ((account (magit-dash-gh--repo-account target))
+                          ((fboundp 'magit-dash-gh--prime-account-token-async)))
+                (magit-dash-gh--prime-account-token-async
+                 (plist-get account :user)
+                 (plist-get account :host))))
+            (seq-uniq (delq nil targets)))))
 
 (defun magit-dash-pr-own-p (author-login repo)
   "Return non-nil when AUTHOR-LOGIN is the gh account login in use for REPO.
@@ -3107,6 +3155,8 @@ An unknown AUTHOR-LOGIN or account login counts as not own."
 
 (defun magit-dash-pr--entry-worktree-name (entry repo-dir)
   "Return the worktree name for PR ENTRY in REPO-DIR, by author ownership."
+  (when (and (stringp repo-dir) (file-directory-p repo-dir))
+    (magit-dash-pr--prime-account-logins (list repo-dir)))
   (magit-dash-pr-worktree-name
    (plist-get entry :number)
    (magit-dash-pr-own-p
@@ -3116,11 +3166,14 @@ An unknown AUTHOR-LOGIN or account login counts as not own."
 
 (defun magit-dash-pr--compute-worktree-path (repo-dir name &optional entry)
   "Compute projected worktree path for NAME under REPO-DIR.
-Uses `magit-dash-pr-worktree-path-format'."
+Uses `magit-dash-pr-worktree-path-format'.  Primes REPO-DIR's account
+login asynchronously when REPO-DIR exists."
   (let* ((repo-dir (expand-file-name repo-dir))
          (repo-base (file-name-nondirectory (directory-file-name repo-dir)))
          (parent (file-name-directory (directory-file-name repo-dir)))
          (fmt magit-dash-pr-worktree-path-format))
+    (when (file-directory-p repo-dir)
+      (magit-dash-pr--prime-account-logins (list repo-dir)))
     (cond
      ((functionp fmt)
       (funcall fmt repo-dir name entry))
@@ -3316,7 +3369,8 @@ The current repository is the fallback, matched the same way."
          (branch-name (unless (magit-dash-pr--fork-pr-p pr-data repo)
                         (or (and pr-data (map-elt pr-data 'headRefName))
                             (plist-get entry :head-ref))))
-         (local-path (magit-dash-pr-dashboard--find-local-path repo)))
+         (local-path (or (plist-get entry :repo-dir)
+                         (magit-dash-pr-dashboard--find-local-path repo))))
     (when local-path
       (let* ((repo-dir (expand-file-name
                         (if (file-directory-p local-path)
@@ -3716,9 +3770,12 @@ When SWITCH is non-nil, switches to the worktree's magit status buffer."
                     (if (file-directory-p local-path)
                         (magit-dash-worktree-main-dir local-path)
                       local-path)))
-         (pr-data (or (and (map-elt raw-pr 'headRefName) raw-pr)
-                      (and repo pr-num (magit-dash-pr--fetch-pr repo pr-num repo-dir))
-                      raw-pr))
+         (pr-data (progn
+                    (when (file-directory-p repo-dir)
+                      (magit-dash-pr--prime-account-logins (list repo-dir)))
+                    (or (and (map-elt raw-pr 'headRefName) raw-pr)
+                        (and repo pr-num (magit-dash-pr--fetch-pr repo pr-num repo-dir))
+                        raw-pr)))
          (repo-base (file-name-nondirectory (directory-file-name repo-dir)))
          (branch-name (magit-dash-pr--resolve-remote-branch repo pr-num pr-data repo-dir))
          (target-name (magit-dash-pr--entry-worktree-name entry repo-dir))
