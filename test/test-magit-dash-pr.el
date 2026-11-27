@@ -22,15 +22,15 @@
   (with-temp-buffer
     (setq-local default-directory "/tmp/old-worktree/")
     (setq-local magit-dash-pr-dashboard--parent-directory "/tmp/")
-    (cl-letf (((symbol-function 'tabulated-list-get-id) #'ignore))
-      (magit-dash-pr-dashboard--update-directory)
-      (should (equal default-directory "/tmp/")))))
+    (magit-dash-pr-dashboard--update-directory)
+    (should (equal default-directory "/tmp/"))))
 
 (ert-deftest magit-dash-pr/dashboard-directory-follows-row ()
   (with-temp-buffer
     (let ((entry '(:repo "owner/repo" :number 1)))
-      (cl-letf (((symbol-function 'tabulated-list-get-id) (lambda () entry))
-                ((symbol-function 'magit-dash-pr-dashboard--find-local-path)
+      (insert (propertize "PR row\n" 'tabulated-list-id entry))
+      (goto-char (point-min))
+      (cl-letf (((symbol-function 'magit-dash-pr-dashboard--find-local-path)
                  (lambda (_) "/tmp/"))
                 ((symbol-function 'magit-dash-pr-dashboard--worktree-path)
                  (lambda (_) "/tmp/")))
