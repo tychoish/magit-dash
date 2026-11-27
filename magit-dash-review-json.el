@@ -7,9 +7,11 @@
 ;; - `magit-dash-review-json-export' builds the diff-review/1 table for a
 ;;   PR from the review file plus code-review's comments.
 ;; - `magit-dash-review-json-import' mirrors the JSON comments and verdict
-;;   into code-review and reports (:added N :updated N :skipped N
+;;   into code-review and reports (:added N :updated N :skipped N :deleted N
 ;;   :verdict-failed N :assigned ALIST); `-apply-assigned' writes the
-;;   cr_ids code-review assigned back into a table.
+;;   cr_ids code-review assigned back into a table.  Conflict rule: the
+;;   review file wins on overlapping draft edits, and stale code-review
+;;   drafts matching an already-published JSON comment are pruned.
 ;; - `magit-dash-review-json-merge' and `-transcode-thread' hold the
 ;;   GitHub thread merge that used to live in magit-dash-review.el.
 ;;
@@ -28,8 +30,10 @@
 (declare-function magit-dash-review-file "magit-dash-review" (root pr-number &optional repo))
 (declare-function magit-dash-worktree-main-dir "magit-dash-worktree" (&optional directory))
 (declare-function diff-review-refresh "diff-review" ())
+(declare-function code-review-api-pullreq "code-review-api" (repo number))
 (declare-function code-review-api-comments "code-review-api" (repo number))
 (declare-function code-review-api-upsert-comment "code-review-api" (repo number plist &key dry-run))
+(declare-function code-review-api-delete-comment "code-review-api" (repo number id &key dry-run))
 (declare-function code-review-api-verdict "code-review-api" (repo number))
 (declare-function code-review-api-set-verdict "code-review-api" (repo number state &optional head-oid &key dry-run))
 (declare-function code-review-api-viewed "code-review-api-viewed" (repo number))
@@ -49,10 +53,12 @@ and OP is one of:
   `comments'  return code-review's comments as a list of tables shaped
               like diff-review/1 comments (path, lines, author, at,
               body, resolved, replies, cr_id, remote_id, status).
-  `pullreq'   return a table with pullreq_id, account and analysis, or nil.
+  `pullreq'   return a table with pullreq_id and account, or nil.
   `write'     store the comment table ARG; return the stored table (with
               cr_id set), or nil when nothing could be stored (skipped),
               or signal an error.
+  `delete'    delete the local draft with cr_id ARG; return non-nil when
+              removed or nil when absent.
   `verdict'   with ARG, store the verdict table ARG and return non-nil or
               signal; without ARG, return the stored verdict table or nil.
   `viewed'    return a table of path to (blob, viewed) for every file of
@@ -66,8 +72,8 @@ and OP is one of:
               rank, tags, criteria), or nil when the engines cannot run.
               SYNCHRONOUS and potentially SLOW: never call it on the UI
               thread or in a live daemon.
-While `magit-dash-review-json-dry-run' is non-nil, `write' and `verdict'
-must validate and roll back instead of persisting.
+While `magit-dash-review-json-dry-run' is non-nil, `write', `delete' and
+`verdict' must validate and roll back instead of persisting.
 Tables passed and returned are diff-review/1 JSON values: hash tables
 \(equal test), vectors, strings, numbers, t, nil and :false.  Lists are
 tolerated in what the seam returns: export turns them into vectors.
@@ -121,6 +127,14 @@ stamps one) because nothing else identifies it across edits."
       (equal (map-elt comment "origin") "github")
       (seq-some (lambda (key) (not (magit-dash-review-json--empty-p (map-elt comment key))))
                 '("remote_id" "gh_thread_id" "gh_comment_id"))))
+
+(defun magit-dash-review-json-published-p (comment)
+  "Return non-nil when COMMENT table is already published on GitHub."
+  (or (equal (map-elt comment "status") "sent")
+      (equal (map-elt comment "origin") "github")
+      (integerp (map-elt comment "gh_database_id"))
+      (seq-some (lambda (key) (not (magit-dash-review-json--empty-p (map-elt comment key))))
+                '("remote_id" "gh_comment_id"))))
 
 (defun magit-dash-review-json--plist-table (plist)
   "Return the diff-review/1 comment table for code-review comment PLIST."
@@ -288,10 +302,29 @@ ranges text, e.g. -1,3 +1,4."
               (code-review-api-analysis (car pr-key) (cdr pr-key)))
       table))))
 
+(defun magit-dash-review-json--op-pullreq (pr-key _arg)
+  "Seam `pullreq': return pullreq_id and account table for PR-KEY, or nil."
+  (when-let* ((meta (code-review-api-pullreq (car pr-key) (cdr pr-key)))
+              (table (make-hash-table :test #'equal)))
+    (when-let* ((id (plist-get meta :id))
+                ((not (magit-dash-review-json--empty-p id))))
+      (setf (map-elt table "pullreq_id") id))
+    (when-let* ((account (plist-get meta :account))
+                ((not (magit-dash-review-json--empty-p account))))
+      (setf (map-elt table "account") account))
+    (when (> (map-length table) 0)
+      table)))
+
+(defun magit-dash-review-json--op-delete (pr-key id)
+  "Seam `delete': delete local draft ID from PR-KEY in code-review."
+  (code-review-api-delete-comment (car pr-key) (cdr pr-key) id
+                                  :dry-run magit-dash-review-json-dry-run))
+
 (defconst magit-dash-review-json--ops
   '((comments (code-review-api-comments) magit-dash-review-json--op-comments)
-    (pullreq nil ignore)
+    (pullreq (code-review-api-pullreq) magit-dash-review-json--op-pullreq)
     (write (code-review-api-upsert-comment) magit-dash-review-json--op-write t)
+    (delete (code-review-api-delete-comment) magit-dash-review-json--op-delete t)
     (verdict (code-review-api-verdict) magit-dash-review-json--op-verdict)
     (viewed (code-review-api-viewed) magit-dash-review-json--op-viewed)
     (set-viewed (code-review-api-set-viewed) magit-dash-review-json--op-set-viewed t)
@@ -301,8 +334,7 @@ ranges text, e.g. -1,3 +1,4."
 FUNCTIONS are every code-review function HANDLER calls; the op is skipped
 unless each is `fboundp' (an autoload counts, so it loads on first call).
 WRITE-P ops signal when skipped, the others return nil.  A `verdict' with an
-argument needs `code-review-api-set-verdict' instead.  There is no code-review
-API for pullreq_id or account, so `pullreq' is nil.")
+argument needs `code-review-api-set-verdict' instead.")
 
 (defun magit-dash-review-json-code-review-default (op pr-key &optional arg)
   "Default `magit-dash-review-json-code-review-function' for OP, PR-KEY and ARG.
@@ -363,14 +395,28 @@ repo is not (car PR-KEY)."
                        :null-object nil
                        :false-object :false)))
 
+(define-error 'magit-dash-review-json-conflict
+              "Review file changed on disk since it was read")
+
+(defun magit-dash-review-json-file-stamp (file)
+  "Return the (MTIME . SIZE) stamp of FILE, or `:missing' when absent."
+  (let ((attrs (file-attributes (file-truename (expand-file-name file)))))
+    (if attrs
+        (cons (file-attribute-modification-time attrs)
+              (file-attribute-size attrs))
+      :missing)))
+
 (defcustom magit-dash-review-json-modified-buffer-action 'skip
   "What writers do when the buffer visiting the review file has unsaved edits.
 `skip' (the default) leaves the buffer alone: the file on disk is still
 updated, but the buffer is neither reverted nor refreshed (a message says
 so), so unsaved edits are never discarded.  `save' saves the buffer before
-the file is read, so its edits are part of what is rewritten."
+the file is read, so its edits are part of what is rewritten.  `refuse'
+signals a `user-error' before reading or writing when the visiting buffer
+has unsaved edits."
   :type '(choice (const :tag "Skip refreshing a modified buffer" skip)
-                 (const :tag "Save a modified buffer first" save))
+                 (const :tag "Save a modified buffer first" save)
+                 (const :tag "Refuse to overwrite a modified buffer" refuse))
   :group 'magit-dash-review-json)
 
 (defvar magit-dash-review-json-last-read-fallback nil
@@ -407,27 +453,43 @@ refuse to build on older data (see `magit-dash-review-json-read-for-write')."
          (signal (car err) (cdr err)))))))
 
 (defun magit-dash-review-json-save-visiting-buffer (file)
-  "Save the buffer visiting FILE when it is modified and the action is `save'."
+  "Handle a modified buffer visiting FILE.
+Follows `magit-dash-review-json-modified-buffer-action': `save' saves the
+buffer; `refuse' signals `user-error'."
   (when-let* ((buf (find-buffer-visiting file))
-              ((buffer-modified-p buf))
-              ((eq magit-dash-review-json-modified-buffer-action 'save)))
-    (with-current-buffer buf
-      (save-buffer))))
+              ((buffer-modified-p buf)))
+    (pcase magit-dash-review-json-modified-buffer-action
+      ('save
+       (with-current-buffer buf
+         (save-buffer)))
+      ('refuse
+       (user-error "Buffer %s visiting %s has unsaved edits; refusing to overwrite"
+                   (buffer-name buf) file)))))
 
-(defun magit-dash-review-json-read-for-write (review-file)
-  "Read REVIEW-FILE to be modified and written back; return its table.
+(defun magit-dash-review-json-read-with-stamp (review-file)
+  "Read REVIEW-FILE for modification and return (DATA . STAMP).
 A modified visiting buffer is saved first when
-`magit-dash-review-json-modified-buffer-action' is `save'.  When the file was
-corrupt and the backup was read instead, ask for confirmation and signal a
-`user-error' unless it is given: writing would replace newer data."
+`magit-dash-review-json-modified-buffer-action' is `save', or refused with a
+`user-error' when it is `refuse'.  STAMP is the post-save mtime+size stamp
+from `magit-dash-review-json-file-stamp', for passing as EXPECTED-STAMP to
+`magit-dash-review-json-write-file'.  When the file was corrupt and the
+backup was read instead, ask for confirmation and signal `user-error' unless
+it is given."
   (magit-dash-review-json-save-visiting-buffer review-file)
-  (let ((data (magit-dash-review-json-read-file review-file)))
+  (let ((stamp (magit-dash-review-json-file-stamp review-file))
+        (data (magit-dash-review-json-read-file review-file)))
     (when (and magit-dash-review-json-last-read-fallback
                (not (yes-or-no-p
                      (format "%s is corrupt; build on the older backup %s? "
                              review-file magit-dash-review-json-last-read-fallback))))
       (user-error "Refusing to write %s from its backup" review-file))
-    data))
+    (cons data stamp)))
+
+(defun magit-dash-review-json-read-for-write (review-file)
+  "Read REVIEW-FILE to be modified and written back; return its table.
+See `magit-dash-review-json-read-with-stamp', which also returns the file
+stamp for compare-and-swap writes."
+  (car (magit-dash-review-json-read-with-stamp review-file)))
 
 (defun magit-dash-review-json-refresh-visiting-buffer (file)
   "Refresh the buffer visiting FILE after FILE changed on disk.
@@ -458,7 +520,7 @@ edits survive (saving it later asks about the newer file on disk)."
           (directory-files (file-name-directory file) t
                            (concat "\\`" (regexp-quote (file-name-nondirectory file)) "\\.tmp-"))))
 
-(defun magit-dash-review-json-write-file (review-file data)
+(defun magit-dash-review-json-write-file (review-file data &optional expected-stamp)
   "Serialize DATA hash table to REVIEW-FILE as pretty-printed UTF-8 JSON.
 The write is atomic: the JSON goes to a temporary file in the same
 directory which is renamed over REVIEW-FILE, so a failure leaves the old
@@ -466,7 +528,17 @@ file intact.  A symlinked REVIEW-FILE is resolved first, so the link stays a
 link and its target is replaced; the file modes of the old file are kept (a
 new file is 0600).  The previous file is copied to REVIEW-FILE.bak only when
 it parses as JSON, so the backup is always the last good file.  Stale
-REVIEW-FILE.tmp-* leftovers older than a day are removed."
+REVIEW-FILE.tmp-* leftovers older than a day are removed.  When
+`magit-dash-review-json-modified-buffer-action' is `refuse' and a visiting
+buffer is modified, signal `user-error'.  When EXPECTED-STAMP is non-nil
+\(e.g. from `magit-dash-review-json-read-with-stamp'), check mtime and size
+right before replacing the target and signal
+`magit-dash-review-json-conflict' if the file changed on disk."
+  (when (eq magit-dash-review-json-modified-buffer-action 'refuse)
+    (when-let* ((buf (find-buffer-visiting review-file))
+                ((buffer-modified-p buf)))
+      (user-error "Buffer %s visiting %s has unsaved edits; refusing to overwrite"
+                  (buffer-name buf) review-file)))
   (let* ((file (file-truename (expand-file-name review-file)))
          (temp nil)
          (json (decode-coding-string
@@ -484,6 +556,14 @@ REVIEW-FILE.tmp-* leftovers older than a day are removed."
             (let ((coding-system-for-write 'utf-8-unix))
               (write-region (point-min) (point-max) temp nil 'silent)))
           (set-file-modes temp (or (and (file-exists-p file) (file-modes file)) #o600))
+          (when expected-stamp
+            (let ((current (magit-dash-review-json-file-stamp file)))
+              (unless (or (eq current expected-stamp)
+                          (and (consp current) (consp expected-stamp)
+                               (equal (cdr current) (cdr expected-stamp))
+                               (time-equal-p (car current) (car expected-stamp))))
+                (signal 'magit-dash-review-json-conflict
+                        (list review-file expected-stamp current)))))
           (when (magit-dash-review-json--parseable-p file)
             (copy-file file (concat file ".bak") t))
           (rename-file temp file t)
@@ -516,7 +596,9 @@ files are left alone.  Return the number of files rewritten."
        (seq-filter
         (lambda (file)
           (condition-case err
-              (let* ((table (magit-dash-review-json-read-for-write file))
+              (let* ((pair (magit-dash-review-json-read-with-stamp file))
+                     (table (car pair))
+                     (stamp (cdr pair))
                      (md (map-elt table "magit_dash"))
                      (hit nil))
                 (when (funcall same (map-elt table "root"))
@@ -526,7 +608,7 @@ files are left alone.  Return the number of files rewritten."
                   (setf (map-elt md "worktree") new)
                   (setq hit t))
                 (when hit
-                  (magit-dash-review-json-write-file file table)
+                  (magit-dash-review-json-write-file file table stamp)
                   (magit-dash-review-json-refresh-visiting-buffer file))
                 hit)
             (error (message "magit-dash-review-json: cannot relocate %s: %s"
@@ -945,7 +1027,7 @@ on the UI thread or in a live daemon."
          (stored (magit-dash-review-json--vectorize
                   (funcall magit-dash-review-json-code-review-function 'comments pr-key)))
          (pullreq (magit-dash-review-json--vectorize
-                   (funcall magit-dash-review-json-code-review-function 'pullreq pr-key)))
+                   (magit-dash-review-json--read-op 'pullreq pr-key)))
          (verdict (magit-dash-review-json--read-op 'verdict pr-key))
          (analysis (and with-analysis
                         (magit-dash-review-json--vectorize
@@ -996,7 +1078,8 @@ on the UI thread or in a live daemon."
                (magit-dash-review-json--empty-p (map-elt code-review "analysis")))
       (setf (map-elt code-review "analysis") analysis))
     (map-do (lambda (key value)
-              (when (magit-dash-review-json--empty-p (map-elt code-review key))
+              (when (and (not (magit-dash-review-json--empty-p value))
+                         (magit-dash-review-json--empty-p (map-elt code-review key)))
                 (setf (map-elt code-review key) value)))
             pullreq)
     (when (> (map-length code-review) 0)
@@ -1044,12 +1127,18 @@ import match those comments by cr_id instead of adding them again."
 (defun magit-dash-review-json-import (table)
   "Mirror the comments and verdict of TABLE into code-review.
 TABLE is a diff-review/1 table with magit_dash repo and number.  Returns
-\(:added N :updated N :skipped N :verdict-failed N :assigned ALIST).
+\(:added N :updated N :skipped N :deleted N :verdict-failed N :assigned ALIST).
 ALIST holds (INDEX . CR-ID) for each comment of TABLE that has no cr_id but
 is stored in code-review under one; see `magit-dash-review-json-apply-assigned'.
-Comments are matched with `magit-dash-review-json-find-match'.  A comment is
-unchanged, and skipped, when body and unpublished reply bodies equal the
-stored ones (resolved is read-only in code-review, so never compared); status is ignored because code-review
+Comments are matched with `magit-dash-review-json-find-match'.  Conflict
+rule: the file wins on overlapping draft edits (the file body and replies
+overwrite code-review's draft).  When a comment in TABLE is already
+published (`magit-dash-review-json-published-p') and code-review still holds
+a matching draft, that stale draft is pruned via `delete' (counted in
+:deleted) unless `magit-dash-review-json-dry-run' is non-nil (reported in
+:deleted without deleting).  A comment is unchanged, and skipped, when body
+and unpublished reply bodies equal the stored ones (resolved is read-only in
+code-review, so never compared); status is ignored because code-review
 assigns it.  A write that signals leaves the comment counted as skipped and
 TABLE untouched, so drafts stay drafts.  The verdict is written only when it
 differs from the stored one in state or head; a failed write counts in
@@ -1059,7 +1148,7 @@ back, and the result carries :dry-run t."
   (let* ((pr-key (or (magit-dash-review-json-pr-key table)
                      (user-error "Review JSON has no magit_dash repo and number")))
          (fn magit-dash-review-json-code-review-function)
-         (counts (list :added 0 :updated 0 :skipped 0 :verdict-failed 0))
+         (counts (list :added 0 :updated 0 :skipped 0 :deleted 0 :verdict-failed 0))
          (fetch-failed nil)
          (remaining (condition-case err
                         (funcall fn 'comments pr-key)
@@ -1070,29 +1159,68 @@ back, and the result carries :dry-run t."
          (assigned nil))
     (seq-do-indexed
      (lambda (comment index)
-       (let* ((match (magit-dash-review-json-find-match comment remaining))
-              (kind (cond
-                     ((null match) :added)
-                     ((and (equal (map-elt comment "body") (map-elt match "body"))
-                           (equal (magit-dash-review-json--reply-content comment)
-                                  (magit-dash-review-json--reply-content match)))
-                      nil)
-                     (t :updated)))
-              (written (when (and kind (not fetch-failed))
-                         (let ((payload (magit-dash-review-json-deep-copy comment)))
-                           (when (and match (map-elt match "cr_id"))
-                             (setf (map-elt payload "cr_id") (map-elt match "cr_id")))
-                           (condition-case err
-                               (funcall fn 'write pr-key payload)
-                             (error (message "magit-dash-review-json: %s" (error-message-string err))
-                                    nil)))))
-              (key (if (and kind written) kind :skipped))
-              (cr-id (or (and (hash-table-p written) (map-elt written "cr_id"))
-                         (map-elt match "cr_id"))))
-         (setq counts (plist-put counts key (1+ (plist-get counts key))))
-         (when (and cr-id (magit-dash-review-json--empty-p (map-elt comment "cr_id")))
-           (push (cons index cr-id) assigned))
-         (setq remaining (seq-remove (lambda (c) (eq c match)) remaining))))
+       (let* ((published (magit-dash-review-json-published-p comment))
+              (pool (if published
+                        (seq-remove (lambda (c) (equal (map-elt c "status") "draft"))
+                                    remaining)
+                      remaining))
+              (match (magit-dash-review-json-find-match comment pool))
+              (deleted-draft-ids nil))
+         (when (and published (not fetch-failed))
+           (let* ((cr-id (map-elt comment "cr_id"))
+                  (draft-id (magit-dash-review-json-draft-id comment))
+                  (hash (and (not (magit-dash-review-json--empty-p (map-elt comment "body")))
+                             (magit-dash-review-json-content-hash comment)))
+                  (dups (seq-filter
+                         (lambda (cand)
+                           (and (equal (map-elt cand "status") "draft")
+                                (or (and cr-id (equal cr-id (map-elt cand "cr_id")))
+                                    (and draft-id (equal draft-id (map-elt cand "cr_id")))
+                                    (and hash (equal hash (magit-dash-review-json-content-hash cand))))))
+                         remaining)))
+             (seq-do
+              (lambda (dup)
+                (when-let* ((dup-id (map-elt dup "cr_id")))
+                  (cond
+                   (magit-dash-review-json-dry-run
+                    (push dup-id deleted-draft-ids)
+                    (setq counts (plist-put counts :deleted (1+ (plist-get counts :deleted))))
+                    (setq remaining (seq-remove (lambda (c) (eq c dup)) remaining)))
+                   (t
+                    (condition-case err
+                        (when (funcall fn 'delete pr-key dup-id)
+                          (push dup-id deleted-draft-ids)
+                          (setq counts (plist-put counts :deleted (1+ (plist-get counts :deleted))))
+                          (setq remaining (seq-remove (lambda (c) (eq c dup)) remaining)))
+                      (error (message "magit-dash-review-json: %s" (error-message-string err))))))))
+              dups)))
+         (let* ((kind (cond
+                       ((null match) :added)
+                       ((and (equal (map-elt comment "body") (map-elt match "body"))
+                             (equal (magit-dash-review-json--reply-content comment)
+                                    (magit-dash-review-json--reply-content match)))
+                        nil)
+                       (t :updated)))
+                (written (when (and kind (not fetch-failed))
+                           (let ((payload (magit-dash-review-json-deep-copy comment)))
+                             (when (and (null match)
+                                        (member (map-elt payload "cr_id") deleted-draft-ids))
+                               (map-delete payload "cr_id"))
+                             (when (and match (map-elt match "cr_id"))
+                               (setf (map-elt payload "cr_id") (map-elt match "cr_id")))
+                             (condition-case err
+                                 (funcall fn 'write pr-key payload)
+                               (error (message "magit-dash-review-json: %s" (error-message-string err))
+                                      nil)))))
+                (key (if (and kind written)
+                         kind
+                       :skipped))
+                (cr-id (or (and (hash-table-p written) (map-elt written "cr_id"))
+                           (map-elt match "cr_id"))))
+           (setq counts (plist-put counts key (1+ (plist-get counts key))))
+           (when (and cr-id (magit-dash-review-json--empty-p (map-elt comment "cr_id")))
+             (push (cons index cr-id) assigned))
+           (setq remaining (seq-remove (lambda (c) (eq c match)) remaining)))))
      (magit-dash-review-json--comments table))
     (when-let* ((verdict (map-elt table "verdict"))
                 ((not (magit-dash-review-json--empty-p (map-elt verdict "state")))))
@@ -1142,9 +1270,10 @@ with its own message), and return the import result plist."
                   (car key) (cdr key) default-directory))
     (setq result (let ((magit-dash-review-json-dry-run t))
                    (magit-dash-review-json-import source)))
-    (message "Import dry run for %s#%s: would add %d, update %d, skip %d, verdict failed %d; nothing written"
+    (message "Import dry run for %s#%s: would add %d, update %d, skip %d, delete %d, verdict failed %d; nothing written"
              (car key) (cdr key) (plist-get result :added) (plist-get result :updated)
-             (plist-get result :skipped) (plist-get result :verdict-failed))
+             (plist-get result :skipped) (or (plist-get result :deleted) 0)
+             (plist-get result :verdict-failed))
     result))
 
 (defun magit-dash-review-json-viewed-blob-match-p (a b)
