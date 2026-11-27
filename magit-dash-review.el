@@ -700,9 +700,7 @@ so `diff-review' compares the live working tree against BASE-REF (default
 ;; choose what gets sent.
 
 (defconst magit-dash-review--submit-chunk-size 40
-  "Most new threads sent in one addPullRequestReview call.
-Kept below the 50 comments the response lists so every posted thread can be
-matched to its returned node.")
+  "Obsolete: unused now that new threads join one pending review.")
 
 (defun magit-dash-review--gh-graphql (query variables dir)
   "Run GraphQL QUERY with VARIABLES, a hash table, with `gh' in DIR.
@@ -833,6 +831,134 @@ path and body for the comments left over; never by position."
             '(t nil))
     pairs))
 
+(defun magit-dash-review--create-pending-review (pr-id head dir)
+  "Create a PENDING GitHub review on PR-ID at commit HEAD in DIR.
+Return the new pull request review GraphQL node ID."
+  (let* ((input-ht (make-hash-table :test #'equal))
+         (vars-ht (make-hash-table :test #'equal))
+         (mutation "mutation($input:AddPullRequestReviewInput!){
+  addPullRequestReview(input:$input){
+    pullRequestReview{
+      id
+      state
+    }
+  }
+}"))
+    (setf (map-elt input-ht "pullRequestId") pr-id)
+    (when head
+      (setf (map-elt input-ht "commitOID") head))
+    (setf (map-elt vars-ht "input") input-ht)
+    (or (map-nested-elt (magit-dash-review--gh-graphql mutation vars-ht dir)
+                        '(data addPullRequestReview pullRequestReview id))
+        (error "Missing pullRequestReview.id in GraphQL response"))))
+
+(defun magit-dash-review--start-pending-review (data pr-id slug pr-num head save dir)
+  "Create a pending review on GitHub and persist it in DATA via SAVE.
+Records `pending_review' with PR-ID, SLUG, PR-NUM and HEAD in DIR, then
+returns the new pending review GraphQL ID."
+  (let ((review-id (magit-dash-review--create-pending-review pr-id head dir))
+        (rec (make-hash-table :test #'equal)))
+    (setf (map-elt rec "id") review-id)
+    (setf (map-elt rec "pr_node_id") pr-id)
+    (setf (map-elt rec "repo") slug)
+    (setf (map-elt rec "number") pr-num)
+    (when head
+      (setf (map-elt rec "head_oid") head))
+    (setf (map-elt rec "created_at") (format-time-string "%FT%T%:z"))
+    (setf (map-elt data "pending_review") rec)
+    (funcall save)
+    review-id))
+
+(defun magit-dash-review--add-review-thread (review-id c dir)
+  "Add local comment C as a thread on pending review REVIEW-ID in DIR.
+Stamp returned GitHub IDs onto C and mark it sent."
+  (let* ((input-ht (magit-dash-review--thread-payload c))
+         (vars-ht (make-hash-table :test #'equal))
+         (mutation "mutation($input:AddPullRequestReviewThreadInput!){
+  addPullRequestReviewThread(input:$input){
+    thread{
+      id
+      comments(first:10){
+        nodes{ id path body line originalLine }
+      }
+    }
+  }
+}"))
+    (setf (map-elt input-ht "pullRequestReviewId") review-id)
+    (setf (map-elt vars-ht "input") input-ht)
+    (let* ((resp (magit-dash-review--gh-graphql mutation vars-ht dir))
+           (thread (map-nested-elt resp '(data addPullRequestReviewThread thread)))
+           (comment-nodes (map-nested-elt thread '(comments nodes)))
+           (pairs (magit-dash-review--pair-review-nodes (list c) comment-nodes))
+           (node (alist-get c pairs nil nil #'eq))
+           (cid (map-elt node 'id))
+           (tid (if node
+                    (or (map-nested-elt node '(pullRequestReviewThread id))
+                        (map-elt thread 'id))
+                  (unless comment-nodes
+                    (map-elt thread 'id)))))
+      (unless node
+        (message "magit-dash-review-submit: posted %s:%s but GitHub returned no matching comment; the next sync will link it"
+                 (map-elt c "path") (map-elt c "lines")))
+      (when tid
+        (setf (map-elt c "gh_thread_id") tid))
+      (when cid
+        (setf (map-elt c "gh_comment_id") cid))
+      (setf (map-elt c "origin") "github")
+      (setf (map-elt c "status") "sent")
+      (setf (map-elt c "gh_resolved") :false))))
+
+(defun magit-dash-review--submit-pending-review (review-id event feedback dir)
+  "Submit pending review REVIEW-ID with EVENT and optional FEEDBACK in DIR.
+Return the resulting review state string."
+  (let* ((input-ht (make-hash-table :test #'equal))
+         (vars-ht (make-hash-table :test #'equal))
+         (mutation "mutation($input:SubmitPullRequestReviewInput!){
+  submitPullRequestReview(input:$input){
+    pullRequestReview{
+      id
+      state
+    }
+  }
+}"))
+    (setf (map-elt input-ht "pullRequestReviewId") review-id)
+    (setf (map-elt input-ht "event") event)
+    (when (and feedback (not (string-empty-p feedback)))
+      (setf (map-elt input-ht "body") feedback))
+    (setf (map-elt vars-ht "input") input-ht)
+    (or (map-nested-elt (magit-dash-review--gh-graphql mutation vars-ht dir)
+                        '(data submitPullRequestReview pullRequestReview state))
+        (error "Missing pullRequestReview.state in GraphQL response"))))
+
+(defun magit-dash-review--fetch-review-node (review-id dir)
+  "Fetch `PullRequestReview' state and commit oid for REVIEW-ID in DIR."
+  (let ((vars (make-hash-table :test #'equal))
+        (query "query($id:ID!){
+  node(id:$id){
+    ... on PullRequestReview{
+      id
+      state
+      commit{ oid }
+    }
+  }
+}"))
+    (setf (map-elt vars "id") review-id)
+    (map-nested-elt (magit-dash-review--gh-graphql query vars dir)
+                    '(data node))))
+
+(defun magit-dash-review--stale-pending-review-error-p (err)
+  "Return non-nil when ERR indicates a pending review is missing or submitted."
+  (let ((case-fold-search t))
+    (string-match-p
+     "already been submitted\\|already submitted\\|Could not resolve to a node\\|not pending\\|no longer pending\\|pullRequestReview.*not found\\|\\breview\\b.*not found"
+     (error-message-string err))))
+
+(defun magit-dash-review--stamp-verdict (verdict-ht head)
+  "Stamp VERDICT-HT as submitted at HEAD."
+  (setf (map-elt verdict-ht "submitted_state") (map-elt verdict-ht "state"))
+  (setf (map-elt verdict-ht "submitted_head") (or head ""))
+  (setf (map-elt verdict-ht "submitted_at") (format-time-string "%FT%T%:z")))
+
 (defun magit-dash-review--submit-threads (chunk event feedback pr-id head dir)
   "Post the new threads in CHUNK as one review with EVENT and FEEDBACK.
 PR-ID is the pull request node id and HEAD the commit to attach it to.
@@ -921,10 +1047,11 @@ thread reopened on GitHub after the local resolve is left open."
       'resolve)
      ((and (not local-res) remote-res) 'unresolve))))
 
-(defun magit-dash-review--check-verdict-head (md verdict-ht event current-head)
+(defun magit-dash-review--check-verdict-head (md verdict-ht event current-head &optional extra-head)
   "Refuse an APPROVE or REQUEST_CHANGES EVENT for a stale review.
-The head the review was made at (MD head_oid, VERDICT-HT head) must be
-CURRENT-HEAD, the pull request's head now."
+The head the review was made at (MD head_oid, VERDICT-HT head, and optional
+EXTRA-HEAD such as a pending review's head_oid) must be CURRENT-HEAD, the
+pull request's head now."
   (when (member event '("APPROVE" "REQUEST_CHANGES"))
     (seq-do (lambda (reviewed)
               (when (and (not (magit-dash-review--blank-p reviewed))
@@ -933,21 +1060,23 @@ CURRENT-HEAD, the pull request's head now."
                 (user-error "Refusing to send %s: reviewed %s but the PR head is now %s; sync and re-review the new commits first"
                             event (substring reviewed 0 (min 12 (length reviewed)))
                             (substring current-head 0 (min 12 (length current-head))))))
-            (list (map-elt md "head_oid") (map-elt verdict-ht "head")))))
+            (list (map-elt md "head_oid") (map-elt verdict-ht "head") extra-head))))
 
 ;;;###autoload
 (defun magit-dash-review-submit (&optional review-file feedback)
-  "Publish unsynced non-draft threads, replies, resolutions, and verdict in REVIEW-FILE.
-Excludes comments with `status: \"draft\"'.  Stamps returned GitHub GraphQL
-node IDs back into REVIEW-FILE, writing the file after every successful
-mutation, so a failure part way leaves what was sent recorded and a repeated
-submit sends only the remainder.  New threads go in chunks; a thread is
-stamped by matching the returned comment on path, line and body.  The
-verdict is sent once (stamped `submitted_state', `submitted_head',
-`submitted_at') and again only when it changes; APPROVE and REQUEST_CHANGES
-are refused when the PR head moved past the reviewed head.  Replies and
-resolutions skip threads flagged `gh_missing'; an error on one thread is
-collected and the others still run, then reported together.
+  "Publish non-draft threads, replies, resolutions, and verdict in REVIEW-FILE.
+Optionally attach FEEDBACK as the review summary.  Excludes comments with
+`status: \"draft\"'.  Stamps returned GitHub GraphQL node IDs back into
+REVIEW-FILE, writing the file after every successful mutation, so a failure
+part way leaves what was sent recorded and a repeated submit sends only the
+remainder.  New threads join a single pending review (persisted as
+`pending_review' before any thread is posted), are added one by one and
+matched by path, line and body, then submitted once at the end.  The verdict
+is sent once (stamped `submitted_state', `submitted_head', `submitted_at')
+and again only when it changes; APPROVE and REQUEST_CHANGES are refused when
+the PR head moved past the reviewed head.  Replies and resolutions skip
+threads flagged `gh_missing'; an error on one thread is collected and the
+others still run, then reported together.
 
 With `magit-dash-review-submit-via-code-review' non-nil the review is sent by
 `code-review-api-submit' instead (see \"Submit through code-review\"): every
@@ -991,39 +1120,141 @@ The legacy body of `magit-dash-review-submit'; see there."
                (errors nil)
                (save (lambda ()
                        (setf (map-elt data "comments") (vconcat comments))
-                       (magit-dash-review--write-json-file file data))))
+                       (magit-dash-review--write-json-file file data)))
+               (pending-rev (map-elt data "pending_review"))
+               (pending-valid
+                (and (hash-table-p pending-rev)
+                     (not (magit-dash-review--blank-p (map-elt pending-rev "id")))
+                     (or (null (map-elt pending-rev "repo"))
+                         (equal (map-elt pending-rev "repo") slug))
+                     (or (null (map-elt pending-rev "number"))
+                         (equal (map-elt pending-rev "number") pr-num))))
+               (pending-id (and pending-valid (map-elt pending-rev "id"))))
           (unless (and slug pr-num)
             (user-error "Review file %s lacks `magit_dash' PR metadata" file))
+          (when (and pending-rev (not pending-valid))
+            (map-delete data "pending_review")
+            (funcall save))
           (when (and verdict-ht (not event))
             (message "magit-dash-review-submit: unknown verdict state %S; no verdict sent"
                      (map-elt verdict-ht "state")))
 
-          ;; 1. New threads and/or verdict via addPullRequestReview, in chunks.
-          (when (or new-threads verdict-pending feedback-p)
+          ;; 1. New threads via one pending review, or verdict/feedback only.
+          (when (or new-threads verdict-pending feedback-p pending-id)
             (let* ((current-head (map-elt (magit-dash-review--fetch-pr-metadata slug pr-num dir)
                                           'headRefOid))
                    (pr-id (or (map-elt md "pr_node_id")
                               (magit-dash-review--fetch-pr-node-id slug pr-num dir)))
-                   (review-head (or (map-elt md "head_oid") current-head))
-                   (chunks (or (seq-partition new-threads magit-dash-review--submit-chunk-size)
-                               (list nil))))
+                   (review-head (or (map-elt md "head_oid") current-head)))
+              (when (and pending-id
+                         (map-elt pending-rev "pr_node_id")
+                         (not (equal (map-elt pending-rev "pr_node_id") pr-id)))
+                (setq pending-id nil)
+                (map-delete data "pending_review")
+                (funcall save))
               (when verdict-pending
-                (magit-dash-review--check-verdict-head md verdict-ht event current-head))
-              (seq-do-indexed
-               (lambda (chunk index)
-                 (let ((last-p (= index (1- (length chunks)))))
-                   (magit-dash-review--submit-threads
-                    chunk
-                    (if (and last-p verdict-pending) event "COMMENT")
-                    (and last-p feedback)
-                    pr-id review-head dir)
-                   (when (and last-p verdict-pending)
-                     (setf (map-elt verdict-ht "submitted_state") (map-elt verdict-ht "state"))
-                     (setf (map-elt verdict-ht "submitted_head")
-                           (or review-head ""))
-                     (setf (map-elt verdict-ht "submitted_at") (format-time-string "%FT%T%:z")))
-                   (funcall save)))
-               chunks)))
+                (magit-dash-review--check-verdict-head
+                 md verdict-ht event current-head
+                 (and pending-id (map-elt pending-rev "head_oid"))))
+              (cond
+               ((and (not new-threads) (not pending-id))
+                (magit-dash-review--submit-threads
+                 nil
+                 (if verdict-pending
+                     event
+                   "COMMENT")
+                 feedback pr-id review-head dir)
+                (when verdict-pending
+                  (magit-dash-review--stamp-verdict verdict-ht review-head))
+                (funcall save))
+               (t
+                (let ((reused-p (not (null pending-id)))
+                      (added-any-p nil))
+                  ;; Phase A: create and persist one pending review before adding threads.
+                  (unless pending-id
+                    (setq pending-id
+                          (magit-dash-review--start-pending-review
+                           data pr-id slug pr-num review-head save dir)))
+                  ;; Phase B: add each unsynced thread and persist immediately.
+                  (seq-do
+                   (lambda (c)
+                     (condition-case err
+                         (magit-dash-review--add-review-thread pending-id c dir)
+                       (error
+                        (if (and reused-p
+                                 (not added-any-p)
+                                 (magit-dash-review--stale-pending-review-error-p err))
+                            (progn
+                              (message "magit-dash-review-submit: stale pending review %s (%s); creating a fresh pending review"
+                                       pending-id (error-message-string err))
+                              (setq reused-p nil)
+                              (map-delete data "pending_review")
+                              (funcall save)
+                              (setq pending-id
+                                    (magit-dash-review--start-pending-review
+                                     data pr-id slug pr-num review-head save dir))
+                              (magit-dash-review--add-review-thread pending-id c dir))
+                          (signal (car err) (cdr err)))))
+                     (setq added-any-p t)
+                     (funcall save))
+                   new-threads)
+                  ;; Phase C: submit the pending review once and clear pending_review.
+                  (condition-case err
+                      (progn
+                        (magit-dash-review--submit-pending-review
+                         pending-id
+                         (if verdict-pending
+                             event
+                           "COMMENT")
+                         feedback dir)
+                        (when verdict-pending
+                          (magit-dash-review--stamp-verdict
+                           verdict-ht
+                           (or (and reused-p (map-elt pending-rev "head_oid"))
+                               review-head)))
+                        (map-delete data "pending_review")
+                        (funcall save))
+                    (error
+                     (if (and reused-p
+                              (not added-any-p)
+                              (magit-dash-review--stale-pending-review-error-p err))
+                         (cond
+                          ((let ((case-fold-search t))
+                             (string-match-p "already been submitted\\|already submitted"
+                                             (error-message-string err)))
+                           (if (or verdict-pending feedback-p)
+                               (let* ((expected-state
+                                       (pcase (if verdict-pending
+                                                  event
+                                                "COMMENT")
+                                         ("APPROVE" "APPROVED")
+                                         ("REQUEST_CHANGES" "CHANGES_REQUESTED")
+                                         (_ "COMMENTED")))
+                                      (node (magit-dash-review--fetch-review-node
+                                             pending-id dir))
+                                      (gh-state (map-elt node 'state))
+                                      (gh-oid (or (map-nested-elt node '(commit oid))
+                                                  (map-elt pending-rev "head_oid")
+                                                  review-head)))
+                                 (unless (equal gh-state expected-state)
+                                   (user-error "Pending review %s was already submitted on GitHub as %s (expected %s); run M-x magit-dash-review-sync and verify before submitting again"
+                                               pending-id (or gh-state "unknown") expected-state))
+                                 (when verdict-pending
+                                   (magit-dash-review--stamp-verdict verdict-ht gh-oid))
+                                 (map-delete data "pending_review")
+                                 (funcall save)
+                                 (message "magit-dash-review-submit: pending review %s was already submitted as %s; reconciled pending_review"
+                                          pending-id gh-state))
+                             (map-delete data "pending_review")
+                             (funcall save)
+                             (message "magit-dash-review-submit: pending review %s was already submitted on GitHub; cleared pending_review"
+                                      pending-id)))
+                          (t
+                           (map-delete data "pending_review")
+                           (funcall save)
+                           (user-error "Pending review %s no longer exists on GitHub; cleared pending_review (sync and resubmit)"
+                                       pending-id)))
+                       (signal (car err) (cdr err))))))))))
 
           ;; 2. Pending replies on existing GitHub threads, one write per reply.
           (seq-do
