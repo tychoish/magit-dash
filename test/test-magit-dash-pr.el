@@ -2998,5 +2998,44 @@ spawns (which also error, so no network)."
                            (magit-dash-pr-dashboard--worktree-path entry)))))
       (delete-directory repo t))))
 
+(ert-deftest magit-dash-pr/pending-worktrees-case-insensitive ()
+  "Pending worktrees table normalizes repo case across build-entry and batch creation."
+  (let ((magit-dash-pr--pending-worktrees (make-hash-table :test #'equal))
+        (repo (magit-dash-test--make-repo)))
+    (unwind-protect
+        (with-temp-buffer
+          (magit-dash-pr-dashboard-mode)
+          (setq tabulated-list-entries
+                (list (magit-dash-pr-dashboard--build-entry
+                       '((number . 7) (title . "t") (headRefName . "feat"))
+                       "Owner/Repo")))
+          (cl-letf (((symbol-function 'magit-dash-pr-dashboard--find-local-path) (lambda (_) repo))
+                    ((symbol-function 'magit-dash-pr--find-corroborated-worktree) (lambda (&rest _) nil))
+                    ((symbol-function 'magit-dash-pr--find-existing-worktree) (lambda (&rest _) nil))
+                    ((symbol-function 'magit-dash-pr-own-p) (lambda (&rest _) t))
+                    ((symbol-function 'yes-or-no-p) (lambda (_) t))
+                    ((symbol-function 'magit-dash-pr--create-batch-async) #'ignore))
+            (magit-dash-pr-dashboard-create-all-worktrees))
+          ;; Querying build-entry with lowercase repo sees the pending '?' marker.
+          (let* ((idx (seq-position (magit-dash-pr--active-columns) 'worktree))
+                 (entry (magit-dash-pr-dashboard--build-entry
+                         '((number . 7) (title . "t") (headRefName . "feat"))
+                         "owner/repo")))
+            (should (equal "?" (substring-no-properties (aref (cadr entry) idx)))))
+          ;; Batch cleanup with mixed case clears the pending entry.
+          (cl-letf (((symbol-function 'magit-dash-pr-dashboard--find-local-path) (lambda (_) nil)))
+            (magit-dash-pr--create-batch-async
+             (list (cons (list :repo "owner/repo" :number 7) "feat"))
+             (current-buffer) 0 0))
+          (should (= 0 (hash-table-count magit-dash-pr--pending-worktrees))))
+      (delete-directory repo t))))
+
+(ert-deftest magit-dash-pr/prune-keybinding-bound ()
+  "PR dashboard binds `y' to `magit-dash-pr-cache-prune'."
+  (should (eq #'magit-dash-pr-cache-prune
+              (keymap-lookup magit-dash-pr-dashboard-mode-map "y")))
+  (should (string-match-p "magit-dash-pr-cache-prune"
+                          (format "%S" (get 'magit-dash-pr-dashboard-menu 'transient--layout)))))
+
 (provide 'test-magit-dash-pr)
 ;;; test-magit-dash-pr.el ends here
