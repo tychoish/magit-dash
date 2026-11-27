@@ -2575,7 +2575,8 @@ exercised; the binding is.)"
           (list :submit (lambda (_keys _on-item) (sleep-for 3) (list :sent nil)))
         (let ((err (should-error (magit-dash-review-submit file))))
           (should (string-match-p "timed out" (cadr err)))))
-      (should (member "c:n" (magit-dash-review-test/pending-ids file))))))
+      (should (member "c:n" (magit-dash-review-test/pending-ids file)))
+      (should-not (file-exists-p (concat file ".submit-lock"))))))
 
 
 
@@ -2592,14 +2593,24 @@ exercised; the binding is.)"
          (magit-dash-review-test/with-cr
              (list :submit #'magit-dash-review-test/cr-ok-submit
                    :reconcile (lambda () (car case)))
-           (condition-case nil
-               (magit-dash-review-submit file "")
-             (user-error nil))
-           (should (= 0 (magit-dash-review-test/cr-count 'submit)))))))
+           (let ((err (should-error (magit-dash-review-submit file "") :type 'user-error)))
+             (should (string-match-p (nth 1 case) (cadr err))))
+           (should (= 0 (magit-dash-review-test/cr-count 'submit))))
+         (let ((data (magit-dash-review--read-json-file file)))
+           (if (nth 2 case)
+               (progn
+                 (should (equal "approved" (map-nested-elt data '("verdict" "submitted_state"))))
+                 (should-not (map-elt data "submit_pending")))
+             (should-not (map-nested-elt data '("verdict" "submitted_state")))
+             (should (equal '("review") (magit-dash-review-test/pending-ids file))))))))
    ;; The approval landed (matched by the summary it was sent with); or it did not.
    (list (list '(:reviews ((:id 9 :user "me" :commit-id "H1" :body "sum" :state "APPROVED"))
-                 :comments nil))
-         (list '(:reviews nil :comments nil)))))
+                 :comments nil)
+               "different event or summary"
+               t)
+         (list '(:reviews nil :comments nil)
+               "unresolved"
+               nil))))
 
 (ert-deftest magit-dash-review/b2-the-lock-is-taken-before-anything-is-read ()
   (magit-dash-review-test/with-temp-dir
@@ -2646,7 +2657,9 @@ exercised; the binding is.)"
                 :reconcile (lambda () (sleep-for 3) '(:reviews nil :comments nil)))
         (let ((err (should-error (magit-dash-review-submit file "sum"))))
           (should (string-match-p "timed out" (cadr err))))
-        (should (= 0 (magit-dash-review-test/cr-count 'submit)))))))
+        (should (= 0 (magit-dash-review-test/cr-count 'submit))))
+      (should (equal '("review" "c:n") (magit-dash-review-test/pending-ids file)))
+      (should-not (file-exists-p (concat file ".submit-lock"))))))
 
 (ert-deftest magit-dash-review/cr-lock-and-unlock-directly ()
   (magit-dash-review-test/with-temp-dir
