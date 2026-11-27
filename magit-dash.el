@@ -3152,6 +3152,7 @@ Registers command abbreviations and adjusts idle delay."
   (add-hook 'post-command-hook #'magit-dash--update-default-directory nil t)
   (add-hook 'kill-buffer-hook #'magit-dash--cancel-refresh-jobs nil t)
   (add-hook 'kill-buffer-hook #'magit-dash--which-key-sync-timer nil t)
+  (add-hook 'window-selection-change-functions #'magit-dash--refresh-stale-faces)
   (magit-dash--which-key-setup))
 
 (defun magit-dash--row-stale-p (stats &optional now)
@@ -3163,11 +3164,50 @@ first load is pending, or missing submodules) are treated as fresh so a
 row just built is never dimmed.  A `:fetched-at' in the future is fresh.
 
 Dimming means \"old, press refresh\".  A stale row whose HEAD is unchanged
-is not auto-refreshed, and staleness is only evaluated when a row is
-rebuilt (`magit-dash--build-entry'), not on a timer."
+is not auto-refreshed; staleness is evaluated when a row is rebuilt
+\(`magit-dash--build-entry') and rechecked on window selection via
+`magit-dash--refresh-stale-faces', never on a background timer."
   (and (numberp (plist-get stats :fetched-at))
        (not (magit-dash-pr-cache-future-p stats now))
        (magit-dash-pr-cache-stale-p stats now)))
+
+(defun magit-dash--entry-dimmed-p (entry)
+  "Return non-nil when ENTRY already carries the `magit-dash-stale' face."
+  (when-let* ((cells (cadr entry))
+              ((vectorp cells))
+              (cell (seq-find (lambda (c) (and (stringp c) (not (string-empty-p c))))
+                              (append cells nil))))
+    (memq 'magit-dash-stale (flatten-tree (get-text-property 0 'face cell)))))
+
+(defun magit-dash--refresh-stale-faces (&optional target)
+  "Rebuild repo rows in TARGET whose staleness changed since rendering.
+TARGET may be a buffer, window, frame, or nil (defaults to current buffer)."
+  (let ((buf (cond
+              ((bufferp target) target)
+              ((window-live-p target) (window-buffer target))
+              ((framep target) (window-buffer (frame-selected-window target)))
+              (t (current-buffer)))))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (when (and (derived-mode-p 'magit-dash-mode)
+                   tabulated-list-entries)
+          (let ((changed nil))
+            (setq tabulated-list-entries
+                  (seq-map
+                   (lambda (entry)
+                     (let* ((repo (car entry))
+                            (stats (and (magit-dash-repo-p repo)
+                                        (magit-dash--get-stats-fast repo))))
+                       (if (and stats
+                                (not (eq (not (not (magit-dash--row-stale-p stats)))
+                                         (not (not (magit-dash--entry-dimmed-p entry))))))
+                           (progn
+                             (setq changed t)
+                             (magit-dash--build-entry repo))
+                         entry)))
+                   tabulated-list-entries))
+            (when changed
+              (magit-dash--print))))))))
 
 (defun magit-dash--dim-cells (cells)
   "Return a copy of the vector CELLS with `magit-dash-stale' added to each string."

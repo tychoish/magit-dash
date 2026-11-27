@@ -5606,3 +5606,26 @@ The bug was that add-text-properties returns t, not the modified string."
   (should (equal "5m ⇒ 2h"
                  (magit-dash--format-freshness '(:fetch-age 300 :updated-age 7200))))
   (should (equal "┄ ⇒ ┄" (magit-dash--format-freshness nil))))
+
+(ert-deftest magit-dash/refresh-stale-faces-dims-aged-rows ()
+  "Re-evaluating stale faces dims rows that aged past the threshold."
+  (let* ((repo (magit-dash-repo--make :name "r" :path "/tmp/stale-refresh-r"))
+         (stats (list :branch "main" :fetched-at (float-time))))
+    (cl-letf (((symbol-function 'magit-dash--get-stats-fast) (lambda (_r) stats))
+              ((symbol-function 'magit-dash--active-columns) (lambda () '(name branch))))
+      (with-temp-buffer
+        (magit-dash-mode)
+        (setq tabulated-list-entries (list (magit-dash--build-entry repo)))
+        (magit-dash--print)
+        (should (= 0 (magit-dash-test--face-count
+                      (aref (cadr (car tabulated-list-entries)) 0) 'magit-dash-stale)))
+        (setq stats (list :branch "main"
+                          :fetched-at (- (float-time) (magit-dash-pr-cache-stale-seconds) 60)))
+        (magit-dash--refresh-stale-faces (current-buffer))
+        (should (= 1 (magit-dash-test--face-count
+                      (aref (cadr (car tabulated-list-entries)) 0) 'magit-dash-stale)))))
+    ;; A row whose first string cell is "" still detects dimming on later cells.
+    (should (magit-dash--entry-dimmed-p
+             (list repo (vector "" (propertize "main" 'face 'magit-dash-stale)))))
+    (should-not (magit-dash--entry-dimmed-p
+                 (list repo (vector "" "main"))))))

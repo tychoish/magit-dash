@@ -54,6 +54,7 @@
 (declare-function magit-dash-repo-name "magit-dash")
 (declare-function magit-dash-repo-repo "magit-dash")
 (declare-function magit-dash-repo-upstream-repo "magit-dash")
+(declare-function magit-dash-repo-gh-account "magit-dash")
 (declare-function magit-dash-repo-pr "magit-dash")
 (declare-function magit-dash-repo-path "magit-dash")
 (defvar magit-dash-repo-list)
@@ -759,6 +760,7 @@ Uses active columns.  WIDTH is available window width; when nil,
     (keymap-set m "SPC"   #'magit-dash-pr-dashboard-toggle-mark)
     (keymap-set m "g"   #'magit-dash-pr-dashboard-refresh)
     (keymap-set m "r"   #'magit-dash-pr-dashboard-refresh-entries)
+    (keymap-set m "y"   #'magit-dash-pr-cache-prune)
     (keymap-set m "+"   #'magit-dash-pr-dashboard-fetch-more)
     (keymap-set m "/"   #'magit-dash-pr-dashboard-set-filter)
     (keymap-set m "C-/"   #'magit-dash-pr-dashboard-clear-filters)
@@ -1477,7 +1479,7 @@ Evaluates `:conflicts', `--hide-failing', `:ci', `:review', `:stack',
        ("none" (and known-reviewers-p (null reviewers)))
        (_
         (let ((target (if (equal req-filter "@me")
-                          (magit-dash-pr--account-login repo)
+                          (magit-dash-pr-dashboard--resolve-me-login repo)
                         req-filter)))
           (cond
            ;; Cross-repo search already filtered server-side; keep rows until enriched.
@@ -1571,7 +1573,8 @@ marks freshly fetched data and is never dimmed."
                                (map-elt pr 'baseRefName)))
                              ('worktree
                               (cond
-                               ((map-elt magit-dash-pr--pending-worktrees (cons repo-name number))
+                               ((map-elt magit-dash-pr--pending-worktrees
+                                         (magit-dash-pr-dashboard--norm-key repo-name number))
                                 (propertize "?" 'face 'shadow))
                                ((magit-dash-pr-dashboard--worktree-exists-p entry-id)
                                 (propertize "✓" 'face 'success))
@@ -1644,21 +1647,40 @@ with a message and never signals."
               repo-name (error-message-string err))
      nil)))
 
+(defvar magit-dash-pr-dashboard--author-login nil
+  "Optional override login used to resolve \"@me\" author filters.")
+
+(defun magit-dash-pr-dashboard--resolve-me-login (repo)
+  "Return the gh login for \"@me\" in REPO (owner/name slug), or nil."
+  (or (magit-dash-pr--account-login
+       (or (magit-dash-pr-dashboard--find-local-path repo) repo))
+      (when (and (stringp repo) (bound-and-true-p magit-dash-repo-list))
+        (let ((down (downcase repo)))
+          (seq-some
+           (lambda (r)
+             (when (or (and (stringp (magit-dash-repo-repo r))
+                            (equal (downcase (magit-dash-repo-repo r)) down))
+                       (and (stringp (magit-dash-repo-upstream-repo r))
+                            (equal (downcase (magit-dash-repo-upstream-repo r)) down)))
+               (magit-dash-repo-gh-account r)))
+           magit-dash-repo-list)))
+      (bound-and-true-p magit-dash-pr-dashboard--author-login)))
+
 (defun magit-dash-pr-dashboard--cached-entries (filters)
   "Return table entries built from the PR cache for FILTERS.
-Only the state, repo, org and a literal author filter apply; rows keep
-their effective cache timestamp so stale ones are dimmed, and a record
-without one (or with a future one) counts as stale.  Ghost (`:gone')
-records are skipped only in open-state views, as is any record that
-cannot be turned into a row (with a message).  Known
-limitation: the `@me' author filter and closed PRs are not reproduced
-faithfully from the cache; discovery corrects them once it returns."
+Applies `:state' (open, closed, merged, all), `:repo', `:org', `:author'
+\(including `@me'), and client-side filters.  Rows keep their effective
+cache timestamp so stale ones are dimmed, and a record without one (or
+with a future one) counts as stale.  Ghost (`:gone') records are skipped
+only in open-state views, as is any record that cannot be turned into a
+row (with a message)."
   (let* ((state (upcase (or (plist-get filters :state) "open")))
          (org (plist-get filters :org))
-         (author (plist-get filters :author)))
+         (author (plist-get filters :author))
+         (per-repo (plist-get filters :repo)))
     (magit-dash-pr-dashboard--apply-filters
      (thread-last
-       (magit-dash-pr-cache-list (plist-get filters :repo) org)
+       (magit-dash-pr-cache-list per-repo org)
        (seq-remove (lambda (record)
                      (and (equal state "OPEN") (plist-get record :gone))))
        (seq-keep
@@ -1666,14 +1688,36 @@ faithfully from the cache; discovery corrects them once it returns."
           (condition-case err
               (let* ((pr (magit-dash-pr-dashboard--sanitize-pr
                           (plist-get record :payload)))
-                     (repo (plist-get record :repo)))
-                (when (and (equal state (upcase (let ((st (map-elt pr 'state)))
-                                                  (if (stringp st) st "OPEN"))))
+                     (repo (plist-get record :repo))
+                     (pr-state (upcase (let ((st (map-elt pr 'state)))
+                                         (if (stringp st) st "OPEN"))))
+                     (merged-at (map-elt pr 'mergedAt)))
+                (when (and (cond
+                            ((equal state "ALL") t)
+                            ((equal state "CLOSED")
+                             (if per-repo
+                                 (equal pr-state "CLOSED")
+                               (member pr-state '("CLOSED" "MERGED"))))
+                            ((equal state "MERGED")
+                             (or (equal pr-state "MERGED")
+                                 (and (equal pr-state "CLOSED")
+                                      (stringp merged-at)
+                                      (not (string-empty-p merged-at)))))
+                            (t (equal state pr-state)))
                            (or (null org)
                                (string-prefix-p (concat (downcase org) "/") (downcase repo)))
                            (or (null author)
-                               (string-prefix-p "@" author)
-                               (equal author (map-elt (map-elt pr 'author) 'login))))
+                               (string-empty-p author)
+                               (let ((target (if (equal author "@me")
+                                                 (magit-dash-pr-dashboard--resolve-me-login repo)
+                                               author))
+                                     (pr-author (map-elt (map-elt pr 'author) 'login)))
+                                 (cond
+                                  ((null target) (string-prefix-p "@" author))
+                                  ((not (and (stringp pr-author)
+                                             (not (string-empty-p pr-author))))
+                                   nil)
+                                  (t (string-equal-ignore-case target pr-author))))))
                   (magit-dash-pr-dashboard--hold-record-status record)
                   (magit-dash-pr-dashboard--build-entry
                    pr repo
@@ -4050,12 +4094,12 @@ execute it there."
                                created existing missing failed))
              (let* ((target (car remaining)) (entry (car target)) (branch (cdr target))
                     (repo (plist-get entry :repo)) (number (plist-get entry :number))
-                    (key (cons repo number))
+                    (key (magit-dash-pr-dashboard--norm-key repo number))
                     (dir (magit-dash-pr-dashboard--find-local-path repo))
                     (path (and dir (magit-dash-pr--compute-worktree-path
                                     dir (magit-dash-pr--entry-worktree-name entry dir) entry))))
                (cl-labels ((finish (error-message)
-                             (remhash key magit-dash-pr--pending-worktrees)
+                             (map-delete magit-dash-pr--pending-worktrees key)
                              (if error-message
                                  (progn (cl-incf failed)
                                         (message "magit-gh: failed to create %s #%d: %s" repo number error-message))
@@ -4072,7 +4116,7 @@ execute it there."
                      (if pr-data
                          (magit-dash-pr--find-corroborated-worktree main-dir number pr-data repo)
                        (magit-dash-pr--find-existing-worktree main-dir number)))
-                   (remhash key magit-dash-pr--pending-worktrees)
+                   (map-delete magit-dash-pr--pending-worktrees key)
                    (cl-incf existing) (refresh) (next (cdr remaining)))
                   (t
                    (message "magit-gh: fetching %s #%d (%s)…" repo number branch)
@@ -4117,7 +4161,8 @@ execute it there."
                                 (and known-branch
                                      (append pr (list (cons 'number number)
                                                       (cons 'headRefName known-branch)))))))
-            (if (or (gethash (cons repo number) magit-dash-pr--pending-worktrees)
+            (if (or (map-elt magit-dash-pr--pending-worktrees
+                             (magit-dash-pr-dashboard--norm-key repo number))
                     (if corrob-pr
                         (magit-dash-pr--find-corroborated-worktree main-dir number corrob-pr repo)
                       (magit-dash-pr--find-existing-worktree main-dir number)))
@@ -4155,8 +4200,10 @@ execute it there."
         (setq queued (length targets))
         (dolist (target targets)
           (let ((entry (car target)))
-            (puthash (cons (plist-get entry :repo) (plist-get entry :number))
-                     t magit-dash-pr--pending-worktrees)))
+            (setf (map-elt magit-dash-pr--pending-worktrees
+                           (magit-dash-pr-dashboard--norm-key
+                            (plist-get entry :repo) (plist-get entry :number)))
+                  t)))
         (magit-dash-pr-dashboard--rebuild-entries)
         (magit-dash-pr--create-batch-async targets (current-buffer) existing missing)))
     (list :queued queued :existing existing :missing missing)))
@@ -4222,6 +4269,7 @@ Key groups mirror `magit-dash-menu': w worktree, c CI, f filter, m mark."
    ["Dashboard"
     ("r"   "Refresh PR(s) at point/marked" magit-dash-pr-dashboard-refresh-entries)
     ("g"   "Refresh all (re-query)"   magit-dash-pr-dashboard-refresh)
+    ("y"   "Prune PR cache"           magit-dash-pr-cache-prune)
     ("q"   "Quit"                     magit-dash-pr-dashboard-quit)]])
 
 (transient-define-prefix magit-dash-pr-views-menu ()

@@ -34,11 +34,11 @@
 ;; never looks fresh.  A `:fetched-at' more than five minutes in the
 ;; future (clock skew) counts as stale, checked on `:fetched-at' itself so
 ;; an older field time cannot hide it.  A write from cross-repo (search)
-;; discovery, which never supplies those fields, records no field time for
-;; the ones it merely keeps (their old times are dropped), so a PR first
-;; cached from a per-repo view is not dimmed forever by search refreshes;
-;; the trade-off is that its kept CI/review values then look as fresh as
-;; the row.
+;; discovery, which never supplies those fields, preserves existing
+;; `:field-times' for the ones it merely keeps (so
+;; `magit-dash-pr-cache-field-stale-p' reflects their real age) while
+;; marking `:search-refreshed' so a PR first cached from a per-repo view
+;; is not dimmed forever by search refreshes.
 ;;
 ;; Ordering.  A payload whose `updatedAt' is older than the cached one is
 ;; never merged in (no rollback); only the status may be refreshed.  A
@@ -61,18 +61,19 @@
 ;; a record invalid.
 ;;
 ;; Known limitations: ghost eviction needs every discovered row to parse
-;; (any unusable row suppresses it); the search-p trade-off above means
-;; kept CI/review values from cross-repo refreshes look as fresh as the
-;; row; records are validated by shape, not against GitHub;
-;; the `:url' is checked only for a matching pull request number, since a
-;; renamed or transferred repo legitimately has another name in it;
-;; cross-repo (search) discovery, filtered discovery, truncated discovery
-;; and `hide failing' never mark ghosts, so such PRs linger until a
-;; per-repo unfiltered discovery sees them missing; dimming granularity
-;; is the whole row; the skip-rewrite optimisation lets a re-fetch of
+;; (any unusable row suppresses it); records are validated by shape, not
+;; against GitHub; the `:url' is checked only for a matching pull request
+;; number, since a renamed or transferred repo legitimately has another
+;; name in it; cross-repo (search) discovery, filtered discovery,
+;; truncated discovery and `hide failing' never mark ghosts, so such PRs
+;; linger until a per-repo unfiltered discovery sees them missing;
+;; dimming granularity is the whole row (while
+;; `magit-dash-pr-cache-field-stale-p' tracks kept volatile fields
+;; individually); the skip-rewrite optimisation lets a re-fetch of
 ;; identical data refresh `:fetched-at' only once per third of the stale
-;; threshold; concurrent Emacs instances sharing a state dir race
-;; last-writer-wins.
+;; threshold; concurrent Emacs instances re-check `:updated-at' on disk
+;; before renaming temp files, though non-`:updated-at' fields can still
+;; race last-writer-wins.
 
 ;;; Code:
 
@@ -80,6 +81,15 @@
 (require 'seq)
 (require 'subr-x)
 (require 'sprite)
+
+(declare-function hitl-plan-get-domain "hitl-plan" (name))
+(declare-function hitl-plan-register-domain "hitl-plan" (name &rest args))
+(declare-function hitl-plan-register-op "hitl-plan" (domain name &rest args))
+(declare-function hitl-plan-create "hitl-plan" (&rest args))
+(declare-function hitl-plan-review "hitl-plan-ui" (plan-or-id &optional display))
+(declare-function hitl-plan-skip "hitl-plan" (&optional reason))
+(defvar hitl-plan-directory)
+(defvar hitl-plan-current-target)
 
 (defconst magit-dash-pr-cache-version 1
   "Schema version stamped into every cache record.")
@@ -102,6 +112,12 @@ A non-number VALUE falls back to 30 with a message."
 Values below 10 are clamped to 10."
   :type 'number
   :set #'magit-dash-pr-cache--set-stale-minutes
+  :group 'magit-dash)
+
+(defcustom magit-dash-pr-cache-prune-days nil
+  "When non-nil, only prune cache records older than this many days.
+When nil, all gone, closed, or merged records are prune candidates."
+  :type '(choice (const :tag "All gone/closed/merged records" nil) number)
   :group 'magit-dash)
 
 (defface magit-dash-stale
@@ -131,14 +147,34 @@ Values below 10 are clamped to 10."
 
 (defun magit-dash-pr-cache-effective-fetched-at (record)
   "Return the oldest freshness time of RECORD, or nil when it has none.
-That is the minimum of `:fetched-at' and every `:field-times' entry.  A
-non-finite `:fetched-at' counts as none; non-finite field times are
-ignored."
+That is the minimum of `:fetched-at' and every `:field-times' entry,
+unless `:search-refreshed' is non-nil (see `magit-dash-pr-cache-put'),
+in which case `:fetched-at' is returned so kept volatile fields do not
+dim the entire row.  A non-finite `:fetched-at' counts as none;
+non-finite field times are ignored."
   (let ((fetched (plist-get record :fetched-at)))
     (when (magit-dash-pr-cache--finite-p fetched)
-      (apply #'min fetched
-             (seq-filter #'magit-dash-pr-cache--finite-p
-                         (seq-map #'cdr (plist-get record :field-times)))))))
+      (if (plist-get record :search-refreshed)
+          fetched
+        (apply #'min fetched
+               (seq-filter #'magit-dash-pr-cache--finite-p
+                           (seq-map #'cdr (plist-get record :field-times))))))))
+
+(defun magit-dash-pr-cache-field-fetched-at (record field)
+  "Return the freshness timestamp of volatile FIELD in RECORD, or nil."
+  (let ((ts (or (alist-get field (plist-get record :field-times))
+                (and (not (plist-get record :search-refreshed))
+                     (plist-get record :fetched-at)))))
+    (when (magit-dash-pr-cache--finite-p ts)
+      ts)))
+
+(defun magit-dash-pr-cache-field-stale-p (record field &optional now)
+  "Return non-nil when volatile FIELD in RECORD is stale at NOW."
+  (let ((fetched (magit-dash-pr-cache-field-fetched-at record field))
+        (now (or now (float-time))))
+    (or (not fetched)
+        (magit-dash-pr-cache-future-p record now)
+        (> (- now fetched) (magit-dash-pr-cache-stale-seconds)))))
 
 (defun magit-dash-pr-cache-future-p (record &optional now)
   "Return non-nil when RECORD's `:fetched-at' lies beyond the clock skew at NOW."
@@ -257,11 +293,15 @@ Failures are logged and never signal.  Marks REPO as migrated."
       (seq-do
        (lambda (legacy)
          (condition-case err
-             (progn
-               (if (not (file-directory-p canon))
-                   (progn
-                     (make-directory (file-name-directory (directory-file-name canon)) t)
-                     (rename-file (directory-file-name legacy) (directory-file-name canon)))
+             (unless (file-equal-p legacy canon)
+               (when (not (file-directory-p canon))
+                 (make-directory (file-name-directory (directory-file-name canon)) t)
+                 (condition-case nil
+                     (rename-file (directory-file-name legacy)
+                                  (directory-file-name canon))
+                   (file-already-exists nil)))
+               (when (and (file-directory-p legacy)
+                          (not (file-equal-p legacy canon)))
                  (seq-do (lambda (src)
                            (magit-dash-pr-cache--merge-record src canon))
                          (directory-files legacy t "\\.eld\\'"))
@@ -478,8 +518,11 @@ unscannable directory yields nil."
                                nil)))
                           dirs)))))
 
-(defun magit-dash-pr-cache--write (file record)
-  "Atomically write RECORD to FILE."
+(defun magit-dash-pr-cache--write (file record &optional guard-newer)
+  "Atomically write RECORD to FILE.
+When GUARD-NEWER is non-nil, re-read FILE right before renaming and
+refuse to overwrite a record whose `:updated-at' is strictly newer;
+return `(:written . RECORD)' or `(:conflict . ON-DISK)'."
   (let ((dir (file-name-directory file)))
     (make-directory dir t)
     (let ((tmp (make-temp-file (expand-file-name ".pr-" dir) nil ".tmp")))
@@ -492,7 +535,20 @@ unscannable directory yields nil."
               (with-temp-file tmp
                 (prin1 record (current-buffer))
                 (insert "\n")))
-            (rename-file tmp file t))
+            (if guard-newer
+                (let ((on-disk (and (file-readable-p file)
+                                    (magit-dash-pr-cache--read-file file))))
+                  (if (and on-disk
+                           (magit-dash-pr-cache--newer-p
+                            (plist-get on-disk :updated-at)
+                            (plist-get record :updated-at)))
+                      (progn
+                        (ignore-errors (delete-file tmp))
+                        (cons :conflict on-disk))
+                    (rename-file tmp file t)
+                    (cons :written record)))
+              (rename-file tmp file t)
+              record))
         (error
          (ignore-errors (delete-file tmp))
          (signal (car err) (cdr err)))))))
@@ -519,17 +575,33 @@ stale threshold."
        (equal (plist-get new :status) (plist-get prior :status))
        (equal (plist-get new :url) (plist-get prior :url))
        (eq (plist-get new :gone) (plist-get prior :gone))
+       (eq (not (not (plist-get new :search-refreshed)))
+           (not (not (plist-get prior :search-refreshed))))
        (when-let* ((fetched (magit-dash-pr-cache-effective-fetched-at prior)))
          (< 0 (- (float-time) fetched) (/ (magit-dash-pr-cache-stale-seconds) 3)))))
+
+(defun magit-dash-pr-cache--handle-stale-write (file repo number existing status)
+  "Apply non-rollback update for REPO/NUMBER against newer EXISTING record.
+Clears `:gone' when flagged and applies STATUS when non-nil."
+  (cond
+   ((plist-get existing :gone)
+    (let ((revived (plist-put (copy-sequence existing) :gone nil)))
+      (when status
+        (setq revived (plist-put revived :status status)))
+      (magit-dash-pr-cache--write file revived)
+      revived))
+   (status
+    (magit-dash-pr-cache-put-status
+     repo number status (plist-get existing :payload) existing))))
 
 (defun magit-dash-pr-cache-put (repo number payload &optional status prior search-p)
   "Store PAYLOAD (a `gh pr view' alist) for REPO and NUMBER.
 PAYLOAD is merged over the cached payload (fresh keys win).  Keep the
 existing `:status' when STATUS is nil.  PRIOR, when non-nil, is the
-already-read previous record and saves a second read from disk.  REPO's
-case is kept in the record.  SEARCH-P non-nil says PAYLOAD comes from
-cross-repo search, which never supplies the volatile fields: those that
-are merely kept get no field time (see Commentary).
+already-read previous record and is checked against disk if newer data
+was written concurrently.  REPO's case is kept in the record.  SEARCH-P
+non-nil says PAYLOAD comes from cross-repo search, which preserves kept
+`:field-times' while marking `:search-refreshed' (see Commentary).
 
 A PAYLOAD whose `updatedAt' is older than the cached one is dropped (no
 rollback; STATUS alone is applied, and a `:gone' flag is cleared).  A
@@ -551,21 +623,20 @@ could not be written."
           nil)
          (t
           (magit-dash-pr-cache--note-rename repo (map-elt payload 'url))
-          (let* ((prior (or prior (magit-dash-pr-cache-get repo number)))
+          (let* ((disk (and prior
+                            (file-readable-p file)
+                            (magit-dash-pr-cache--read-file file)))
+                 (prior (cond
+                         ((and prior disk (magit-dash-pr-cache--better-p disk prior))
+                          disk)
+                         (prior prior)
+                         (t (magit-dash-pr-cache-get repo number))))
                  (fresh (magit-dash-pr-cache--null-to-nil payload))
                  (old (plist-get prior :payload))
                  (stale-write (magit-dash-pr-cache--newer-p
                                (map-elt old 'updatedAt) (map-elt fresh 'updatedAt))))
             (if stale-write
-                (cond
-                 ((plist-get prior :gone)
-                  (let ((revived (plist-put (copy-sequence prior) :gone nil)))
-                    (when status
-                      (setq revived (plist-put revived :status status)))
-                    (magit-dash-pr-cache--write file revived)
-                    revived))
-                 (status
-                  (magit-dash-pr-cache-put-status repo number status old prior)))
+                (magit-dash-pr-cache--handle-stale-write file repo number prior status)
               (let* ((now (float-time))
                      (newer (magit-dash-pr-cache--newer-p
                              (map-elt fresh 'updatedAt) (map-elt old 'updatedAt)))
@@ -585,11 +656,12 @@ could not be written."
                                     (lambda (key)
                                       (cond
                                        ((assq key fresh) (cons key now))
-                                       ((and (assq key merged) (not search-p))
+                                       ((assq key merged)
                                         (when-let* ((ts (or (alist-get key old-times)
                                                             (plist-get prior :fetched-at))))
                                           (cons key ts)))))
                                     magit-dash-pr-cache--volatile-keys)
+                                   :search-refreshed (and search-p t)
                                    :updated-at (map-elt merged 'updatedAt)
                                    :head-sha (map-elt merged 'headRefOid)
                                    :payload merged
@@ -598,8 +670,11 @@ could not be written."
                  ((magit-dash-pr-cache--skippable-p record prior)
                   prior)
                  (t
-                  (magit-dash-pr-cache--write file record)
-                  record))))))))
+                  (let ((result (magit-dash-pr-cache--write file record t)))
+                    (if (eq (car result) :conflict)
+                        (magit-dash-pr-cache--handle-stale-write
+                         file repo number (cdr result) status)
+                      (cdr result)))))))))))
     (error
      (message "magit-dash-pr-cache: could not write %s#%s: %s"
               repo number (error-message-string err))
@@ -614,11 +689,18 @@ Without one, write PAYLOAD with a fresh stamp.  Return the record, or
 nil when it could not be written."
   (condition-case err
       (when-let* ((file (magit-dash-pr-cache--file repo number)))
-        (if-let* ((old (or prior (magit-dash-pr-cache-get repo number))))
-            (let ((record (plist-put (copy-sequence old) :status status)))
-              (magit-dash-pr-cache--write file record)
-              record)
-          (magit-dash-pr-cache-put repo number payload status)))
+        (let ((disk (and prior
+                         (file-readable-p file)
+                         (magit-dash-pr-cache--read-file file))))
+          (if-let* ((old (cond
+                          ((and prior disk (magit-dash-pr-cache--better-p disk prior))
+                           disk)
+                          (prior prior)
+                          (t (magit-dash-pr-cache-get repo number)))))
+              (let ((record (plist-put (copy-sequence old) :status status)))
+                (magit-dash-pr-cache--write file record)
+                record)
+            (magit-dash-pr-cache-put repo number payload status))))
     (error
      (message "magit-dash-pr-cache: could not write %s#%s: %s"
               repo number (error-message-string err))
@@ -651,6 +733,177 @@ Nothing is written when there is no record or it is already flagged."
      (message "magit-dash-pr-cache: could not mark %s#%s gone: %s"
               repo number (error-message-string err))
      nil)))
+
+(defun magit-dash-pr-cache--prune-reason (record)
+  "Return why RECORD is prunable (\"gone\", \"merged\", or \"closed\"), or nil."
+  (let* ((state (map-elt (plist-get record :payload) 'state))
+         (upper (and (stringp state) (upcase state))))
+    (cond
+     ((plist-get record :gone) "gone")
+     ((equal upper "MERGED") "merged")
+     ((equal upper "CLOSED") "closed"))))
+
+(defun magit-dash-pr-cache-prunable-records (&optional repo days)
+  "Return cached PR records eligible for pruning.
+A record is prunable when it is flagged `:gone' or its payload `state'
+is \"MERGED\" or \"CLOSED\" (case-insensitive).  REPO limits the scan to
+that owner/name repository.  DAYS (defaulting to
+`magit-dash-pr-cache-prune-days'), when a positive number, further limits
+results to records older than DAYS days."
+  (let* ((max-days (if (numberp days)
+                       days
+                     magit-dash-pr-cache-prune-days))
+         (cutoff (when (and (numberp max-days) (> max-days 0))
+                   (- (float-time) (* max-days 86400)))))
+    (seq-filter
+     (lambda (record)
+       (and (magit-dash-pr-cache--prune-reason record)
+            (or (null cutoff)
+                (let ((fetched (magit-dash-pr-cache-effective-fetched-at record)))
+                  (or (null fetched) (< fetched cutoff))))))
+     (magit-dash-pr-cache-list repo))))
+
+(defun magit-dash-pr-cache--plan-directory ()
+  "Return the directory holding PR cache prune plans."
+  (file-name-as-directory
+   (expand-file-name "magit-dash-pr-cache/"
+                     (or (bound-and-true-p hitl-plan-directory)
+                         (sprite-state-path "hitl-plans/")))))
+
+(defun magit-dash-pr-cache--format-prune-target (target)
+  "Return (KEY . LABEL) columns for prune TARGET."
+  (let ((repo (or (plist-get target :repo) "?"))
+        (number (or (plist-get target :number) "?"))
+        (title (plist-get target :title))
+        (reason (or (plist-get target :reason) "prunable")))
+    (cons (format "%s#%s" repo number)
+          (if (and (stringp title) (not (string-empty-p title)))
+              (format "%s (%s)" title reason)
+            (format "(%s)" reason)))))
+
+(defun magit-dash-pr-cache--visit-prune-target (target &optional other-window)
+  "Open TARGET's cache file read-only, or in another window if OTHER-WINDOW."
+  (when-let* ((repo (plist-get target :repo))
+              (number (plist-get target :number))
+              (file (magit-dash-pr-cache--file repo number))
+              ((file-exists-p file)))
+    (if other-window
+        (view-file-other-window file)
+      (view-file file))))
+
+(defun magit-dash-pr-cache--sanitize-prune-target (target)
+  "Validate prune TARGET plist and return a canonical copy."
+  (let ((repo (and (consp target) (plist-get target :repo)))
+        (number (and (consp target) (plist-get target :number))))
+    (unless (and (magit-dash-pr-cache--repo-dir repo) (integerp number))
+      (user-error "Invalid PR cache prune target: %S" target))
+    (let ((record (magit-dash-pr-cache-get repo number)))
+      (unless record
+        (user-error "Cached record %s#%s no longer exists" repo number))
+      (list :repo (plist-get record :repo)
+            :number number
+            :title (or (map-elt (plist-get record :payload) 'title) "")
+            :reason (or (magit-dash-pr-cache--prune-reason record) "prunable")))))
+
+(defun magit-dash-pr-cache--apply-prune ()
+  "Delete the cached PR record named by `hitl-plan-current-target'."
+  (let* ((target hitl-plan-current-target)
+         (repo (plist-get target :repo))
+         (number (plist-get target :number))
+         (file (magit-dash-pr-cache--file repo number))
+         (record (magit-dash-pr-cache-get repo number))
+         (skip-reason
+          (cond
+           ((null record) "already deleted")
+           ((not (magit-dash-pr-cache--prune-reason record))
+            "no longer gone or closed"))))
+    (cond
+     ((and skip-reason (fboundp 'hitl-plan-skip))
+      (hitl-plan-skip skip-reason))
+     (skip-reason
+      (error "%s" skip-reason))
+     ((and (not (magit-dash-pr-cache-delete repo number))
+           file
+           (file-exists-p file))
+      (error "Could not delete cached PR record %s#%s (%s)" repo number file)))))
+
+;;;###autoload
+(defun magit-dash-pr-cache-prune (&optional repo days)
+  "Prune cached PR records that are `:gone', closed, or merged.
+When REPO (OWNER/NAME) is non-nil, limit to that repository.  DAYS
+overrides `magit-dash-pr-cache-prune-days'.  Uses `hitl-plan' for
+step-by-step review when available, otherwise falls back to `y-or-n-p'."
+  (interactive
+   (list (when current-prefix-arg
+           (let ((slug (string-trim (read-string "Repo (owner/name, empty for all): "))))
+             (unless (string-empty-p slug)
+               slug)))))
+  (let ((records (magit-dash-pr-cache-prunable-records repo days)))
+    (if (null records)
+        (progn
+          (message "magit-dash-pr-cache: no gone or closed PR records to prune")
+          nil)
+      (let ((targets
+             (seq-map
+              (lambda (record)
+                (list :repo (plist-get record :repo)
+                      :number (plist-get record :number)
+                      :title (or (map-elt (plist-get record :payload) 'title) "")
+                      :reason (magit-dash-pr-cache--prune-reason record)))
+              records)))
+        (if (and (fboundp 'hitl-plan-create)
+                 (fboundp 'hitl-plan-get-domain)
+                 (fboundp 'hitl-plan-register-domain)
+                 (fboundp 'hitl-plan-register-op)
+                 (fboundp 'hitl-plan-review))
+            (progn
+              (unless (hitl-plan-get-domain 'magit-dash-pr-cache)
+                (hitl-plan-register-domain 'magit-dash-pr-cache
+                  :label "PR cache prune"
+                  :resolve-target #'identity
+                  :format-target #'magit-dash-pr-cache--format-prune-target
+                  :visit-target #'magit-dash-pr-cache--visit-prune-target
+                  :directory #'magit-dash-pr-cache--plan-directory
+                  :sanitize-target #'magit-dash-pr-cache--sanitize-prune-target)
+                (hitl-plan-register-op 'magit-dash-pr-cache 'prune
+                  :key ?d
+                  :label "delete cache file"
+                  :apply #'magit-dash-pr-cache--apply-prune
+                  :describe (lambda (&rest _) "delete cached .eld record")
+                  :schema '("none: each target names its own cache record")))
+              (let ((plan (hitl-plan-create
+                           :domain 'magit-dash-pr-cache
+                           :targets targets
+                           :ops '(prune)
+                           :description (if repo
+                                            (format "Prune gone/closed PR cache for %s" repo)
+                                          "Prune gone/closed PR cache"))))
+                (hitl-plan-review plan)
+                plan))
+          (let* ((count (length targets))
+                 (preview (string-join
+                           (seq-map (lambda (target)
+                                      (format "%s#%s (%s)"
+                                              (plist-get target :repo)
+                                              (plist-get target :number)
+                                              (plist-get target :reason)))
+                                    (seq-take targets 5))
+                           ", "))
+                 (summary (if (> count 5)
+                              (format "%s, ... (+%d more)" preview (- count 5))
+                            preview)))
+            (when (y-or-n-p (format "Prune %d cached PR record(s) [%s]? "
+                                    count summary))
+              (let ((deleted
+                     (seq-filter
+                      (lambda (target)
+                        (magit-dash-pr-cache-delete
+                         (plist-get target :repo)
+                         (plist-get target :number)))
+                      targets)))
+                (message "magit-dash-pr-cache: pruned %d of %d record(s)"
+                         (length deleted) count)
+                (length deleted)))))))))
 
 (provide 'magit-dash-pr-cache)
 ;;; magit-dash-pr-cache.el ends here
