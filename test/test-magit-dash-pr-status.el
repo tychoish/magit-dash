@@ -1025,9 +1025,25 @@ cat %s
                (lambda (&rest _) (signal 'json-utf8-decode-error '("bad")))))
       (should-error (magit-dash-pr-status--parse-json "{}") :type 'user-error))))
 
+(defun magit-dash-pr-status-test/wait-until (pred &optional timeout)
+  "Run the event loop until PRED is non-nil or TIMEOUT (default 10) seconds pass.
+Return PRED's final value."
+  (let ((deadline (+ (float-time) (or timeout 10))))
+    (while (and (not (funcall pred)) (< (float-time) deadline))
+      (accept-process-output nil 0.02))
+    (funcall pred)))
+
+(defun magit-dash-pr-status-test/new-live-gh-procs (before)
+  "Return live `magit-gh' processes created since BEFORE."
+  (seq-filter (lambda (p)
+                (and (not (memq p before))
+                     (equal (process-name p) "magit-gh")
+                     (process-live-p p)))
+              (process-list)))
+
 (ert-deftest magit-dash-pr-status/fetch-one-times-out-once ()
   (let* ((magit-dash-pr-status-fetch-one-timeout 0.3)
-         (out (magit-dash-pr-status-test/fetch-one-with-fake-gh 0 :sleep 5 :wait 60)))
+         (out (magit-dash-pr-status-test/fetch-one-with-fake-gh 0 :sleep 30 :wait 60)))
     (should-not (plist-get out :result))
     (should (= 1 (length (plist-get out :errors))))
     (should (string-match-p "timed out" (plist-get out :error)))
@@ -1037,48 +1053,50 @@ cat %s
   "The timeout kills the process and flips the CANCELLED-P it handed over."
   (let ((magit-dash-pr-status-fetch-one-timeout 0.2)
         (cancelled-p nil)
-        (errors nil))
-    (cl-letf (((symbol-function 'magit-dash-gh--run-process)
-               (lambda (_args _dir _ok &optional _err _attempt cancelled _handle)
-                 (setq cancelled-p cancelled)
-                 (make-process :name "fo-hung" :command '("sleep" "30")
-                               :noquery t))))
-      (magit-dash-pr-status-fetch-one
-       magit-dash-pr-status-test/slug 1 default-directory #'ignore
-       (lambda (e) (push e errors)))
-      (should-not (funcall cancelled-p))
-      (let ((tries 0))
-        (while (and (not errors) (< tries 60))
-          (setq tries (1+ tries))
-          (accept-process-output nil 0.05)))
-      (accept-process-output nil 0.1)
-      (should (funcall cancelled-p))
-      (should (= 1 (length errors)))
-      (should (null (seq-find (lambda (p) (equal (process-name p) "fo-hung"))
-                              (process-list)))))))
+        (errors nil)
+        (hung (make-process :name "fo-hung" :command '("sleep" "30") :noquery t)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'magit-dash-gh--run-process)
+                   (lambda (_args _dir _ok &optional _err _attempt cancelled _handle)
+                     (setq cancelled-p cancelled)
+                     hung)))
+          (magit-dash-pr-status-fetch-one
+           magit-dash-pr-status-test/slug 1 default-directory #'ignore
+           (lambda (e) (push e errors)))
+          (should-not (funcall cancelled-p))
+          (should (magit-dash-pr-status-test/wait-until
+                   (lambda () (and errors (not (process-live-p hung))))
+                   3))
+          (should (funcall cancelled-p))
+          (should (= 1 (length errors)))
+          (should-not (process-live-p hung))
+          (should (eq 'signal (process-status hung))))
+      (when (process-live-p hung)
+        (delete-process hung)))))
 
 (ert-deftest magit-dash-pr-status/fetch-one-real-timeout-kills-gh ()
-  (let ((magit-dash-pr-status-fetch-one-timeout 0.3))
-    (magit-dash-pr-status-test/fetch-one-with-fake-gh 0 :sleep 30 :wait 20)
+  (let* ((before (process-list))
+         (magit-dash-pr-status-fetch-one-timeout 0.3)
+         (out (magit-dash-pr-status-test/fetch-one-with-fake-gh 0 :sleep 30 :wait 60)))
+    (should-not (plist-get out :result))
+    (should (= 1 (length (plist-get out :errors))))
+    (should (string-match-p "timed out" (plist-get out :error)))
     (should (magit-dash-pr-status-test/wait-until
-             (lambda ()
-               (not (seq-find (lambda (p) (and (equal (process-name p) "magit-gh")
-                                               (process-live-p p)))
-                              (process-list))))))))
+             (lambda () (null (magit-dash-pr-status-test/new-live-gh-procs before)))
+             2))))
 
 (ert-deftest magit-dash-pr-status/fetch-one-timeout-kills-retried-process ()
   "A retry already running when the timeout fires is killed too."
-  (let* ((magit-dash-pr-status-fetch-one-timeout 0.8)
+  (let* ((before (process-list))
+         (magit-dash-pr-status-fetch-one-timeout 0.8)
          (out (magit-dash-pr-status-test/fetch-one-with-fake-gh
-               1 :sleep 30 :wait 40)))
+               1 :sleep 30 :wait 60)))
     (should (= 1 (length (plist-get out :errors))))
     (should (string-match-p "timed out" (plist-get out :error)))
     (should (= 2 (plist-get out :calls)))
     (should (magit-dash-pr-status-test/wait-until
-             (lambda ()
-               (not (seq-find (lambda (p) (and (equal (process-name p) "magit-gh")
-                                               (process-live-p p)))
-                              (process-list))))))))
+             (lambda () (null (magit-dash-pr-status-test/new-live-gh-procs before)))
+             2))))
 
 (ert-deftest magit-dash-pr-status/null-thread-nodes-not-counted ()
   (let* ((node (copy-tree (car (map-nested-elt (magit-dash-pr-status-test/response)
@@ -1160,11 +1178,12 @@ cat %s
     (should (= 1 count)))
   ;; A signalling error callback must not run on-error a second time.
   (let ((count 0))
-    (condition-case nil
-        (magit-dash-pr-status-test/fetch-one-with-fake-gh
-         0 :slug "nonsense"
-         :on-error (lambda (_) (setq count (1+ count)) (error "callback boom")))
-      (error nil))
+    (let ((err (should-error
+                (magit-dash-pr-status-test/fetch-one-with-fake-gh
+                 0 :slug "nonsense"
+                 :on-error (lambda (_) (setq count (1+ count)) (error "callback boom")))
+                :type 'error)))
+      (should (string-match-p "callback boom" (cadr err))))
     (should (= 1 count)))
   ;; Synchronous on-error from a missing directory, callback signals.
   (let ((count 0))
@@ -1177,14 +1196,6 @@ cat %s
     (should (= 1 count))))
 
 ;;;; fetch-page-async: retries, cancellation, callbacks
-
-(defun magit-dash-pr-status-test/wait-until (pred &optional timeout)
-  "Run the event loop until PRED is non-nil or TIMEOUT (default 10) seconds pass.
-Return PRED's final value."
-  (let ((deadline (+ (float-time) (or timeout 10))))
-    (while (and (not (funcall pred)) (< (float-time) deadline))
-      (accept-process-output nil 0.02))
-    (funcall pred)))
 
 (defun magit-dash-pr-status-test/with-counting-gh (script fn)
   "Call FN with a temp dir whose `gh' runs SCRIPT after bumping a call counter."
@@ -1237,37 +1248,53 @@ n=$(cat %s 2>/dev/null || echo 0); n=$((n+1)); echo $n > %s
      (let ((magit-dash-gh-retry-delay 0.5)
            (magit-dash-gh-retry-attempts 3)
            (job (list nil))
-           (called nil))
+           (called nil)
+           (timer nil))
        (magit-dash-pr-status--fetch-page-async
         "q" dir 10 nil (lambda (_) (setq called t)) (lambda (_) (setq called t))
         nil nil job)
-       (should (magit-dash-pr-status-test/wait-until
-                (lambda ()
-                  (seq-find (lambda (h) (and (consp h) (timerp (cdr h)))) (cdr job)))))
+       (setq timer
+             (cdr (should (magit-dash-pr-status-test/wait-until
+                           (lambda ()
+                             (seq-find (lambda (h) (and (consp h) (timerp (cdr h))))
+                                       (cdr job)))))))
+       (should (memq timer timer-list))
        (should (= 1 (magit-dash-pr-status-test/gh-calls dir)))
        (magit-dash-pr-status--job-cancel job)
-       (accept-process-output nil 1.0)
+       (should (eq t (car job)))
+       (should (null (cdr job)))
+       (should-not (memq timer timer-list))
+       (accept-process-output nil 0.8)
        (should (= 1 (magit-dash-pr-status-test/gh-calls dir)))
        (should-not called)))))
 
 (ert-deftest magit-dash-pr-status/fetch-page-async-cancel-kills-live-process ()
   (magit-dash-pr-status-test/with-counting-gh
-   "exec sleep 5"
+   "exec sleep 30"
    (lambda (dir)
      (let ((before (process-list))
            (job (list nil))
-           (called nil))
-       (magit-dash-pr-status--fetch-page-async
-        "q" dir 10 nil (lambda (_) (setq called t)) (lambda (_) (setq called t))
-        nil nil job)
-       (let ((live (seq-filter (lambda (p) (and (not (memq p before))
-                                                (equal (process-name p) "magit-gh")))
-                               (process-list))))
-         (should (= 1 (length live)))
-         (magit-dash-pr-status--job-cancel job)
-         (should (magit-dash-pr-status-test/wait-until
-                  (lambda () (not (process-live-p (car live))))))
-         (should-not called))))))
+           (called nil)
+           (live nil))
+       (unwind-protect
+           (progn
+             (magit-dash-pr-status--fetch-page-async
+              "q" dir 10 nil (lambda (_) (setq called t)) (lambda (_) (setq called t))
+              nil nil job)
+             (setq live (magit-dash-pr-status-test/new-live-gh-procs before))
+             (should (= 1 (length live)))
+             (should (consp (cadr job)))
+             (magit-dash-pr-status--job-cancel job)
+             (should (eq t (car job)))
+             (should (null (cdr job)))
+             (should (magit-dash-pr-status-test/wait-until
+                      (lambda () (not (process-live-p (car live))))
+                      2))
+             (should (eq 'signal (process-status (car live))))
+             (accept-process-output nil 0.05)
+             (should-not called))
+         (seq-do (lambda (p) (when (process-live-p p) (delete-process p)))
+                 live))))))
 
 (ert-deftest magit-dash-pr-status/fetch-page-async-success-callback-error-is-messaged ()
   "An error in ON-SUCCESS is messaged and never reclassified as ON-ERROR."

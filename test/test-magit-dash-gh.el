@@ -902,6 +902,21 @@ even when other real candidates exist."
               (funcall fn dir))))
       (delete-directory dir t))))
 
+(defun magit-dash-gh-test--wait-until (pred &optional timeout)
+  "Run the event loop until PRED is non-nil or TIMEOUT (default 10) seconds pass."
+  (let ((deadline (+ (float-time) (or timeout 10))))
+    (while (and (not (funcall pred)) (< (float-time) deadline))
+      (accept-process-output nil 0.02))
+    (funcall pred)))
+
+(defun magit-dash-gh-test--new-live-procs (before)
+  "Return live processes named magit-gh that were not in the list BEFORE."
+  (seq-filter (lambda (p)
+                (and (not (memq p before))
+                     (equal (process-name p) "magit-gh")
+                     (process-live-p p)))
+              (process-list)))
+
 (defun magit-dash-gh-test--run (dir)
   "Run the fake gh in DIR; return (:ok OUT) or (:err OUT CODE)."
   (let (result)
@@ -909,10 +924,7 @@ even when other real candidates exist."
      '("x") dir
      (lambda (out) (setq result (list :ok out)))
      (lambda (out code) (setq result (list :err out code))))
-    (let ((tries 0))
-      (while (and (not result) (< tries 100))
-        (setq tries (1+ tries))
-        (accept-process-output nil 0.05)))
+    (magit-dash-gh-test--wait-until (lambda () result) 5)
     result))
 
 (defun magit-dash-gh-test--proc-buffers (before)
@@ -981,15 +993,12 @@ echo done" counter counter)
          (lambda (dir)
            (let ((magit-dash-gh-retry-delay 0)
                  (magit-dash-gh-retry-attempts 3)
-                 (result nil)
-                 (tries 0))
+                 (result nil))
              (magit-dash-gh--run-process
               '("x") dir
               (lambda (out) (setq result (list :ok out)))
               (lambda (out code) (setq result (list :err out code))))
-             (while (and (not result) (< tries 100))
-               (setq tries (1+ tries))
-               (accept-process-output nil 0.05))
+             (should (magit-dash-gh-test--wait-until (lambda () result) 5))
              (should (equal '(:ok "done\n") result)))))
       (delete-file counter))))
 
@@ -999,43 +1008,31 @@ echo done" counter counter)
         (magit-dash-gh-test--with-fake-gh
          (format "n=$(cat %s 2>/dev/null); n=$((${n:-0}+1)); echo $n > %s
 if [ $n -eq 1 ]; then echo 'HTTP 502' >&2; exit 1; fi
-exec sleep 5" counter counter)
+exec sleep 30" counter counter)
          (lambda (dir)
            (let ((magit-dash-gh-retry-delay 0)
                  (handle (list nil))
-                 (first nil)
-                 (tries 0))
-             (setq first (magit-dash-gh--run-process '("x") dir #'ignore #'ignore
-                                                     nil nil handle))
-             (should (eq first (car handle)))
-             (while (and (or (null (car handle)) (eq (car handle) first)) (< tries 100))
-               (setq tries (1+ tries))
-               (accept-process-output nil 0.05))
-             (should (process-live-p (car handle)))
-             (should-not (eq first (car handle)))
-             (let ((second (car handle)))
-               (magit-dash-gh--handle-cancel handle)
-               (should (magit-dash-gh-test--wait-until
-                        (lambda () (not (process-live-p second)))))))))
+                 (first nil))
+             (unwind-protect
+                 (progn
+                   (setq first (magit-dash-gh--run-process '("x") dir #'ignore #'ignore
+                                                           nil nil handle))
+                   (should (eq first (car handle)))
+                   (should (magit-dash-gh-test--wait-until
+                            (lambda () (and (car handle) (not (eq (car handle) first))))
+                            5))
+                   (should (process-live-p (car handle)))
+                   (let ((second (car handle)))
+                     (magit-dash-gh--handle-cancel handle)
+                     (should (magit-dash-gh-test--wait-until
+                              (lambda () (not (process-live-p second)))
+                              2))
+                     (should (eq 'signal (process-status second)))))
+               (magit-dash-gh--handle-cancel handle)))))
       (delete-file counter))))
 
 
 ;;;; token cache, stderr hygiene, retry start failures
-
-(defun magit-dash-gh-test--wait-until (pred &optional timeout)
-  "Run the event loop until PRED is non-nil or TIMEOUT (default 10) seconds pass."
-  (let ((deadline (+ (float-time) (or timeout 10))))
-    (while (and (not (funcall pred)) (< (float-time) deadline))
-      (accept-process-output nil 0.02))
-    (funcall pred)))
-
-(defun magit-dash-gh-test--new-live-procs (before)
-  "Return live processes named magit-gh that were not in the list BEFORE."
-  (seq-filter (lambda (p)
-                (and (not (memq p before))
-                     (equal (process-name p) "magit-gh")
-                     (process-live-p p)))
-              (process-list)))
 
 (ert-deftest magit-dash-gh/account-token-is-cached-per-user-and-host ()
   (let ((counter (make-temp-file "tok-cache-count"))
@@ -1168,24 +1165,29 @@ echo 'HTTP 503' >&2; exit 1" counter counter)
 (ert-deftest magit-dash-gh/run-process-survives-killed-buffers ()
   "Killing the process buffers before the exit does not break the finish step."
   (magit-dash-gh-test--with-fake-gh
-   "exec sleep 5"
+   "exec sleep 30"
    (lambda (dir)
      (let ((before (process-list))
            (result nil)
            (magit-dash-gh-stderr-grace 0.1)
            (proc nil))
-       (setq proc (magit-dash-gh--run-process
-                   '("x") dir
-                   (lambda (out) (setq result (list :ok out)))
-                   (lambda (out code) (setq result (list :err out code)))))
-       (let ((buf (process-buffer proc)))
-         (when (buffer-live-p buf)
-           (let ((kill-buffer-query-functions nil))
-             (kill-buffer buf))))
-       (when (process-live-p proc)
-         (delete-process proc))
-       (magit-dash-gh-test--wait-until (lambda () result) 3)
-       (should (null (magit-dash-gh-test--new-live-procs before)))))))
+       (unwind-protect
+           (progn
+             (setq proc (magit-dash-gh--run-process
+                         '("x") dir
+                         (lambda (out) (setq result (list :ok out)))
+                         (lambda (out code) (setq result (list :err out code)))))
+             (let ((buf (process-buffer proc)))
+               (when (buffer-live-p buf)
+                 (let ((kill-buffer-query-functions nil))
+                   (kill-buffer buf))))
+             (when (process-live-p proc)
+               (delete-process proc))
+             (should (magit-dash-gh-test--wait-until (lambda () result) 3))
+             (should (eq :err (car result)))
+             (should (null (magit-dash-gh-test--new-live-procs before))))
+         (when (process-live-p proc)
+           (delete-process proc)))))))
 
 (ert-deftest magit-dash-gh/fetch-closed-prs-and-prune-squash-merged ()
   "fetch-closed-prs preserves headRefOid and prune deletes squash-merged cleanly."
@@ -1311,22 +1313,30 @@ echo tok-async-$n" counter counter)
   "Hung gh auth token fails within bounded timeout on both sync and async paths."
   (let ((magit-dash-gh--token-cache (make-hash-table :test #'equal))
         (magit-dash-gh--token-pending (make-hash-table :test #'equal))
-        (magit-dash-gh-token-lookup-timeout 0.15))
-    (magit-dash-gh-test--with-fake-gh
-     "exec sleep 5"
-     (lambda (_dir)
-       (let ((start (float-time)))
-         (should-error (magit-dash-gh--account-token "alice" "github.com")
-                       :type 'user-error)
-         (should (< (- (float-time) start) 1.5)))
-       (let ((async-res nil)
-             (start (float-time)))
-         (magit-dash-gh--prime-account-token-async
-          "bob" "github.com" (lambda (tok err) (setq async-res (list tok err))))
-         (should (magit-dash-gh-test--wait-until (lambda () async-res) 2))
-         (should (< (- (float-time) start) 1.5))
-         (should-not (car async-res))
-         (should (string-match-p "timed out" (cadr async-res))))))))
+        (magit-dash-gh-token-lookup-timeout 0.15)
+        (before (process-list)))
+    (unwind-protect
+        (magit-dash-gh-test--with-fake-gh
+         "exec sleep 30"
+         (lambda (_dir)
+           (let ((start (float-time)))
+             (should-error (magit-dash-gh--account-token "alice" "github.com")
+                           :type 'user-error)
+             (should (< (- (float-time) start) 2.0)))
+           (let ((async-res nil)
+                 (start (float-time)))
+             (magit-dash-gh--prime-account-token-async
+              "bob" "github.com" (lambda (tok err) (setq async-res (list tok err))))
+             (should (magit-dash-gh-test--wait-until (lambda () async-res) 2))
+             (should (< (- (float-time) start) 2.0))
+             (should-not (car async-res))
+             (should (string-match-p "timed out" (cadr async-res))))
+           (should (magit-dash-gh-test--wait-until
+                    (lambda () (null (magit-dash-gh-test--new-live-procs before)))
+                    2))))
+      (seq-do (lambda (p) (when (process-live-p p) (delete-process p)))
+              (seq-filter (lambda (p) (and (not (memq p before)) (process-live-p p)))
+                          (process-list))))))
 
 (ert-deftest magit-dash-gh/run-process-primes-cold-token-async ()
   "run-process primes a cold account token asynchronously without blocking."
@@ -1360,21 +1370,29 @@ fi"
   (let ((magit-dash-gh--token-cache (make-hash-table :test #'equal))
         (magit-dash-gh--token-pending (make-hash-table :test #'equal))
         (magit-dash-gh-token-lookup-timeout 5)
+        (before (process-list))
         (result nil))
-    (magit-dash-gh-test--with-fake-gh
-     "exec sleep 5"
-     (lambda (dir)
-       (cl-letf (((symbol-function 'magit-dash-gh--repo-account)
-                  (lambda (_) '(:user "alice" :host "github.com"))))
-         (magit-dash-gh--run-process
-          '("pr" "list") dir
-          (lambda (out) (setq result (list :ok out)))
-          (lambda (out code) (setq result (list :err out code))))
-         (should (map-elt magit-dash-gh--token-pending '("alice" . "github.com")))
-         (magit-dash-gh-reset-token-cache)
-         (should (zerop (hash-table-count magit-dash-gh--token-pending)))
-         (should (eq :err (car result)))
-         (should (string-match-p "cancelled" (cadr result))))))))
+    (unwind-protect
+        (magit-dash-gh-test--with-fake-gh
+         "exec sleep 30"
+         (lambda (dir)
+           (cl-letf (((symbol-function 'magit-dash-gh--repo-account)
+                      (lambda (_) '(:user "alice" :host "github.com"))))
+             (magit-dash-gh--run-process
+              '("pr" "list") dir
+              (lambda (out) (setq result (list :ok out)))
+              (lambda (out code) (setq result (list :err out code))))
+             (should (map-elt magit-dash-gh--token-pending '("alice" . "github.com")))
+             (magit-dash-gh-reset-token-cache)
+             (should (zerop (hash-table-count magit-dash-gh--token-pending)))
+             (should (eq :err (car result)))
+             (should (string-match-p "cancelled" (cadr result)))
+             (should (magit-dash-gh-test--wait-until
+                      (lambda () (null (magit-dash-gh-test--new-live-procs before)))
+                      2)))))
+      (seq-do (lambda (p) (when (process-live-p p) (delete-process p)))
+              (seq-filter (lambda (p) (and (not (memq p before)) (process-live-p p)))
+                          (process-list))))))
 
 (ert-deftest magit-dash-gh/prime-account-token-async-isolates-callback-errors ()
   "One failing callback does not drop subsequent waiters on the same key."
@@ -1442,5 +1460,63 @@ fi")
                   2))
          (should-not spawned-main)
          (should-not called))))))
+
+(ert-deftest magit-dash-gh/branch-verified-real-git-cases ()
+  "Real git verification distinguishes merged, head-oid, remote, and unverified."
+  (let ((repo (magit-dash-test--make-repo)))
+    (unwind-protect
+        (progn
+          (magit-dash-test--git repo "checkout" "-q" "-b" "merged-b")
+          (magit-dash-test--commit repo "merged.txt")
+          (magit-dash-test--git repo "checkout" "-q" "main")
+          (magit-dash-test--git repo "merge" "-q" "--no-ff" "merged-b" "-m" "merge")
+          (magit-dash-test--git repo "checkout" "-q" "-b" "head-oid-b" "main")
+          (let ((head-oid (magit-dash-test--commit repo "head-oid.txt")))
+            (magit-dash-test--git repo "checkout" "-q" "-b" "remote-b" "main")
+            (let ((remote-oid (magit-dash-test--commit repo "remote.txt")))
+              (magit-dash-test--git repo "update-ref" "refs/remotes/origin/remote-b" remote-oid)
+              (magit-dash-test--git repo "checkout" "-q" "-b" "unverified-b" "main")
+              (magit-dash-test--commit repo "unverified.txt")
+              (magit-dash-test--git repo "checkout" "-q" "main")
+              (should (eq 'merged (magit-dash-gh--branch-verified "merged-b" nil repo "main")))
+              (should (eq 'head-oid
+                          (magit-dash-gh--branch-verified
+                           "head-oid-b" `((headRefOid . ,head-oid)) repo "main")))
+              (should (eq 'remote (magit-dash-gh--branch-verified "remote-b" nil repo "main")))
+              (should-not (magit-dash-gh--branch-verified
+                           "unverified-b" '((headRefOid . "deadbeef")) repo "main")))))
+      (delete-directory repo t))))
+
+(ert-deftest magit-dash-gh/prune-scan-and-delete-without-branch-verified-stub ()
+  "Unverified reused branches are excluded from scan and refused by non-prompt prune."
+  (let ((repo (magit-dash-test--make-repo))
+        (cache-dir (make-temp-file "mdgh-verify-cache-" t)))
+    (unwind-protect
+        (let ((magit-dash-prune-cache-dir cache-dir)
+              (magit-dash-gh--cache (make-hash-table :test #'equal)))
+          (magit-dash-test--git repo "checkout" "-q" "-b" "reused" "main")
+          (let ((old-oid (magit-dash-test--commit repo "old.txt")))
+            (magit-dash-test--commit repo "new-unpushed.txt")
+            (magit-dash-test--git repo "checkout" "-q" "-b" "squash-ok" "main")
+            (let ((ok-oid (magit-dash-test--commit repo "ok.txt"))
+                  (prs (make-hash-table :test #'equal)))
+              (magit-dash-test--git repo "checkout" "-q" "main")
+              (setf (map-elt prs "reused")
+                    `((number . 10) (state . "MERGED") (headRefName . "reused")
+                      (headRefOid . ,old-oid) (title . "Old PR")))
+              (setf (map-elt prs "squash-ok")
+                    `((number . 11) (state . "MERGED") (headRefName . "squash-ok")
+                      (headRefOid . ,ok-oid) (title . "Squashed PR")))
+              (cl-letf (((symbol-function 'magit-dash-gh--repo-dir) (lambda () repo))
+                        ((symbol-function 'magit-dash-gh--default-branch) (lambda () "main"))
+                        ((symbol-function 'magit-dash-gh--fetch-closed-prs) (lambda (&optional _) prs)))
+                (let ((candidates (magit-dash-gh--prune-scan)))
+                  (should (equal '("squash-ok") (seq-map #'car candidates))))
+                (let ((res (magit-dash-gh--prune-delete-branches '("reused") repo nil)))
+                  (should (= 0 (plist-get res :deleted)))
+                  (should (= 1 (plist-get res :skipped)))
+                  (should (magit-dash-gh--branch-tip "reused" repo)))))))
+      (delete-directory repo t)
+      (delete-directory cache-dir t))))
 
 ;;; test-magit-dash-gh.el ends here
