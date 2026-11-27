@@ -127,7 +127,17 @@ Open PRs are not candidates, so nil is returned for them too."
               (local-path (magit-dash-pr-dashboard--find-local-path repo))
               (repo-dir (expand-file-name local-path))
               (number (plist-get entry :number))
-              (pr-data (plist-get entry :pr))
+              (raw-pr (plist-get entry :pr))
+              (pr-data
+               (or (and (map-elt raw-pr 'headRefOid) raw-pr)
+                   (when (and (not (string= (upcase (or (plist-get entry :state)
+                                                        (map-elt raw-pr 'state)
+                                                        ""))
+                                            "OPEN"))
+                              (file-directory-p repo-dir))
+                     (when-let* ((fetched (magit-dash-pr--fetch-pr repo number repo-dir)))
+                       (append fetched raw-pr)))
+                   raw-pr))
               (wt (magit-dash-pr--find-corroborated-worktree repo-dir number pr-data))
               ((file-directory-p (alist-get 'path wt)))
               (state (magit-dash-worktree-clean--closed-state

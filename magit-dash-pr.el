@@ -3381,6 +3381,10 @@ If the worktree does not exist yet, creates it first."
         (magit-dash-pr--pr-merged-p data)))
      (t nil))))
 
+(defconst magit-dash-pr--worktree-pr-fields
+  "number,title,headRefName,headRefOid,state,mergedAt,isCrossRepository,headRepositoryOwner"
+  "JSON fields requested when fetching PRs for worktree operations.")
+
 (defun magit-dash-pr--fetch-repo-prs (repo &optional state dir)
   "Fetch PRs for REPO and STATE in DIR, or return nil on error."
   (when (executable-find "gh")
@@ -3388,7 +3392,7 @@ If the worktree does not exist yet, creates it first."
       (let ((result (magit-dash-gh--call-process
                      (list "pr" "list" "-R" repo "--state" (or state "open")
                            "--limit" "100" "--json"
-                           "number,title,headRefName,state,mergedAt,isCrossRepository,headRepositoryOwner")
+                           magit-dash-pr--worktree-pr-fields)
                      (or dir default-directory))))
         (when (zerop (car result))
           (json-parse-string (cdr result) :object-type 'alist :array-type 'list))))))
@@ -3399,7 +3403,7 @@ If the worktree does not exist yet, creates it first."
     (ignore-errors
       (let ((result (magit-dash-gh--call-process
                      (list "pr" "view" (number-to-string number) "-R" repo "--json"
-                           "number,title,headRefName,state,mergedAt,isCrossRepository,headRepositoryOwner")
+                           magit-dash-pr--worktree-pr-fields)
                      dir)))
         (when (zerop (car result))
           (json-parse-string (cdr result) :object-type 'alist))))))
@@ -3453,7 +3457,7 @@ back to the local branch name (without any `wt/' prefix)."
       (let ((result (magit-dash-gh--call-process
                      (list "pr" "list" "-R" repo "--head" branch "--state" "all"
                            "--limit" "30" "--json"
-                           "number,title,headRefName,state,mergedAt,isCrossRepository,headRepositoryOwner")
+                           magit-dash-pr--worktree-pr-fields)
                      dir)))
         (when (zerop (car result))
           (json-parse-string (cdr result) :object-type 'alist :array-type 'list))))))
@@ -3930,9 +3934,20 @@ The worktree must be on the PR's branch.  Returns `:deleted', `:skipped', or
 explicit yes."
   (let* ((pr-num (plist-get entry :number))
          (repo (plist-get entry :repo))
-         (pr-data (plist-get entry :pr))
+         (raw-pr (plist-get entry :pr))
          (local-path (magit-dash-pr-dashboard--find-local-path repo))
          (repo-dir (and local-path (expand-file-name (magit-dash-worktree-main-dir local-path))))
+         (entry-state (upcase (or (plist-get entry :state)
+                                  (and raw-pr (map-elt raw-pr 'state))
+                                  "")))
+         (fetched (when (and repo pr-num repo-dir
+                             (not (map-elt raw-pr 'headRefOid))
+                             (not (string= entry-state "OPEN"))
+                             (or (null raw-pr) (file-directory-p repo-dir)))
+                    (magit-dash-pr--fetch-pr repo pr-num repo-dir)))
+         (pr-data (if fetched
+                      (append fetched raw-pr)
+                    raw-pr))
          (branch-name (or (and pr-data (map-elt pr-data 'headRefName))
                           (plist-get entry :head-ref)))
          (wt (and repo-dir

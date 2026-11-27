@@ -2998,5 +2998,164 @@ spawns (which also error, so no network)."
                            (magit-dash-pr-dashboard--worktree-path entry)))))
       (delete-directory repo t))))
 
+(defun magit-dash-pr-test--json-field-p (args field)
+  "Return non-nil when gh ARGS list requests FIELD in its `--json' value."
+  (when-let* ((rest (member "--json" args))
+              (fields (cadr rest)))
+    (member field (split-string fields ","))))
+
+(ert-deftest magit-dash-pr/fetch-pr-queries-request-head-ref-oid ()
+  "PR fetch helpers request headRefOid in --json."
+  (let ((seen-json nil))
+    (cl-letf (((symbol-function 'executable-find) (lambda (_) t))
+              ((symbol-function 'magit-dash-gh--call-process)
+               (lambda (args _dir)
+                 (push (cadr (member "--json" args)) seen-json)
+                 (if (member "view" args)
+                     '(0 . "{\"number\":1,\"headRefOid\":\"abc123\"}")
+                   '(0 . "[{\"number\":1,\"headRefOid\":\"abc123\"}]")))))
+      (should (equal "abc123"
+                     (map-elt (car (magit-dash-pr--fetch-repo-prs "o/r" "all" "/tmp"))
+                              'headRefOid)))
+      (should (equal "abc123"
+                     (map-elt (magit-dash-pr--fetch-pr "o/r" 1 "/tmp")
+                              'headRefOid)))
+      (should (equal "abc123"
+                     (map-elt (car (magit-dash-pr--fetch-prs-for-branch "o/r" "feat" "/tmp"))
+                              'headRefOid)))
+      (should (= 3 (length seen-json)))
+      (seq-do (lambda (fields)
+                (should (member "headRefOid" (split-string fields ","))))
+              seen-json))))
+
+(defun magit-dash-pr-test--pr-json (pr include-oid)
+  "Serialize PR alist to JSON, dropping `headRefOid' unless INCLUDE-OID."
+  (json-serialize
+   (if include-oid
+       pr
+     (seq-remove (lambda (cell) (eq (car cell) 'headRefOid)) pr))))
+
+(ert-deftest magit-dash-pr/clean-merged-squash-no-prompt-when-head-oid-matches ()
+  "Squash-merged worktrees with no upstream delete cleanly without risk prompts."
+  (let ((repo (magit-dash-test--make-repo)))
+    (unwind-protect
+        (let* ((wt-recent (expand-file-name ".wt/pr-10" repo))
+               (wt-older (expand-file-name ".wt/pr-42" repo))
+               (wt-branch (expand-file-name ".wt/by-branch" repo)))
+          (magit-dash-test--git repo "worktree" "add" "-q" "-b" "feat-recent" wt-recent "HEAD")
+          (magit-dash-test--git repo "worktree" "add" "-q" "-b" "old-feat" wt-older "HEAD")
+          (magit-dash-test--git repo "worktree" "add" "-q" "-b" "branch-only" wt-branch "HEAD")
+          (let* ((oid-recent (magit-dash-test--commit wt-recent "r.txt"))
+                 (oid-older (magit-dash-test--commit wt-older "o.txt"))
+                 (oid-branch (magit-dash-test--commit wt-branch "b.txt"))
+                 (pr-recent `((number . 10) (headRefName . "feat-recent")
+                              (headRefOid . ,oid-recent) (state . "MERGED")))
+                 (pr-older `((number . 42) (headRefName . "old-feat")
+                             (headRefOid . ,oid-older) (state . "MERGED")))
+                 (pr-branch `((number . 55) (headRefName . "branch-only")
+                              (headRefOid . ,oid-branch) (state . "MERGED"))))
+            (cl-letf (((symbol-function 'executable-find) (lambda (_) t))
+                      ((symbol-function 'magit-dash-pr-dashboard--current-repo-slug)
+                       (lambda () "o/r"))
+                      ((symbol-function 'magit-dash-worktree-confirm-risks)
+                       (lambda (&rest _) (error "must not prompt for risk")))
+                      ((symbol-function 'magit-dash-gh--call-process)
+                       (lambda (args _dir)
+                         (let ((want-oid (magit-dash-pr-test--json-field-p args "headRefOid")))
+                           (cons 0
+                                 (cond
+                                  ((member "view" args)
+                                   (magit-dash-pr-test--pr-json pr-older want-oid))
+                                  ((member "--head" args)
+                                   (json-serialize
+                                    (vector (if want-oid
+                                                pr-branch
+                                              (seq-remove (lambda (c) (eq (car c) 'headRefOid))
+                                                          pr-branch)))))
+                                  (t
+                                   (json-serialize
+                                    (vector (if want-oid
+                                                pr-recent
+                                              (seq-remove (lambda (c) (eq (car c) 'headRefOid))
+                                                          pr-recent)))))))))))
+              (let ((res (magit-dash-pr-clean-merged-worktrees repo nil)))
+                (should (= 3 (plist-get res :deleted)))
+                (should (= 0 (plist-get res :skipped)))
+                (should-not (file-directory-p wt-recent))
+                (should-not (file-directory-p wt-older))
+                (should-not (file-directory-p wt-branch))))))
+      (delete-directory repo t))))
+
+(ert-deftest magit-dash-pr/clean-merged-squash-diverged-tip-triggers-risk ()
+  "Worktree whose tip differs from PR headRefOid still triggers risk confirmation."
+  (let ((repo (magit-dash-test--make-repo)))
+    (unwind-protect
+        (let ((wt (expand-file-name ".wt/pr-11" repo)))
+          (magit-dash-test--git repo "worktree" "add" "-q" "-b" "feat-div" wt "HEAD")
+          (let* ((pushed-oid (magit-dash-test--commit wt "c1.txt"))
+                 (_local-only (magit-dash-test--commit wt "c2.txt"))
+                 (pr `((number . 11) (headRefName . "feat-div")
+                       (headRefOid . ,pushed-oid) (state . "MERGED")))
+                 (asked-risks nil))
+            (cl-letf (((symbol-function 'executable-find) (lambda (_) t))
+                      ((symbol-function 'magit-dash-pr-dashboard--current-repo-slug)
+                       (lambda () "o/r"))
+                      ((symbol-function 'magit-dash-gh--call-process)
+                       (lambda (args _dir)
+                         (let ((want-oid (magit-dash-pr-test--json-field-p args "headRefOid")))
+                           (cons 0 (json-serialize
+                                    (vector (if want-oid
+                                                pr
+                                              (seq-remove (lambda (c) (eq (car c) 'headRefOid))
+                                                          pr)))))))))
+              ;; Unattended: refuses to delete because tip != headRefOid.
+              (let ((res (magit-dash-pr-clean-merged-worktrees repo nil)))
+                (should (= 0 (plist-get res :deleted)))
+                (should (= 1 (plist-get res :skipped)))
+                (should (file-directory-p wt)))
+              ;; Interactive: prompts with unique-commits risk.
+              (cl-letf (((symbol-function 'magit-dash-worktree-confirm-risks)
+                         (lambda (_path risks) (setq asked-risks risks) nil)))
+                (let ((res (magit-dash-pr-clean-merged-worktrees repo t)))
+                  (should (= 0 (plist-get res :deleted)))
+                  (should (= 1 (plist-get res :skipped)))
+                  (should (seq-some (lambda (r) (string-match-p "no upstream" r)) asked-risks))
+                  (should (file-directory-p wt)))))))
+      (delete-directory repo t))))
+
+(ert-deftest magit-dash-pr/clean-entry-squash-merged-fetches-head-oid ()
+  "clean-worktree-for-entry fetches headRefOid when :pr is nil or partial."
+  (let ((repo (magit-dash-test--make-repo)))
+    (unwind-protect
+        (let* ((wt (expand-file-name ".wt/pr-19" repo))
+               (magit-dash-repo-list (list (magit-dash-repo--make :name "r" :path repo))))
+          (magit-dash-test--git repo "worktree" "add" "-q" "-b" "feat-19" wt "HEAD")
+          (let* ((oid (magit-dash-test--commit wt "c1.txt"))
+                 (pr `((number . 19) (headRefName . "feat-19")
+                       (headRefOid . ,oid) (state . "MERGED"))))
+            (cl-letf (((symbol-function 'executable-find) (lambda (_) t))
+                      ((symbol-function 'magit-dash-pr-dashboard--find-local-path)
+                       (lambda (_) repo))
+                      ((symbol-function 'magit-dash-worktree-confirm-risks)
+                       (lambda (&rest _) (error "must not prompt when tip == headRefOid")))
+                      ((symbol-function 'magit-dash-gh--call-process)
+                       (lambda (args _dir)
+                         (let ((want-oid (magit-dash-pr-test--json-field-p args "headRefOid")))
+                           (cons 0 (magit-dash-pr-test--pr-json pr want-oid))))))
+              ;; Diverged tip still triggers risk.
+              (magit-dash-test--commit wt "extra.txt")
+              (should (eq :skipped
+                          (magit-dash-pr--clean-worktree-for-entry
+                           (list :number 19 :repo "o/r" :pr nil) nil)))
+              (should (file-directory-p wt))
+              ;; Reset to PR headRefOid: deletes cleanly without risk prompt.
+              (magit-dash-test--git wt "reset" "--hard" oid)
+              (should (eq :deleted
+                          (magit-dash-pr--clean-worktree-for-entry
+                           (list :number 19 :repo "o/r" :pr nil) nil)))
+              (should-not (file-directory-p wt)))))
+      (delete-directory repo t))))
+
+
 (provide 'test-magit-dash-pr)
 ;;; test-magit-dash-pr.el ends here
