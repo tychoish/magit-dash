@@ -37,6 +37,7 @@
 (require 'subr-x)
 (require 'magit-dash-review-json)
 
+(defvar diff-review-version)
 (defvar diff-review--data)
 (defvar diff-review-file-mode)
 (defvar diff-review--overlays)
@@ -253,8 +254,7 @@ overlays, which in a diff-review file buffer are also pushed onto
   "Add analysis overlays after diff-review decorates a file buffer.
 Never signals: a failure is reported once and diff-review carries on."
   (condition-case err
-      (when-let* (((fboundp 'diff-review--review-buffer))
-                  (review (diff-review--review-buffer))
+      (when-let* ((review (diff-review--review-buffer))
                   (path diff-review--file-path)
                   (table (buffer-local-value 'diff-review--data review))
                   (by-hunk (magit-dash-review-analysis-for-path table path)))
@@ -287,8 +287,10 @@ on a failure the original line is returned and the failure reported once."
   "Redraw every open diff-review buffer and its file buffers."
   (seq-do (lambda (buffer)
             (with-current-buffer buffer
-              (when (and (derived-mode-p 'diff-review-mode)
-                         (fboundp 'diff-review--render-all))
+              (when (derived-mode-p 'diff-review-mode)
+                (unless (and (fboundp 'diff-review--render-all)
+                             (fboundp 'diff-review--redecorate-files))
+                  (user-error "magit-dash-review-analysis: diff-review lacks redraw internals (diff-review--render-all, diff-review--redecorate-files)"))
                 (diff-review--render-all)
                 (diff-review--redecorate-files))))
           (buffer-list)))
@@ -299,25 +301,79 @@ on a failure the original line is returned and the failure reported once."
 Only displays what is already in code_review.analysis; use
 `magit-dash-review-analysis-refresh' to compute it.  Turning the mode off
 removes the decorations.  Enabling signals a `user-error' (and leaves the
-mode off) when diff-review lacks the functions this advises."
+mode off) when diff-review is unavailable, lacks the internals this mode
+depends on, has incompatible arity, or fails advice installation."
   :global t
   :group 'magit-dash-review-analysis
   (cond
    (magit-dash-review-analysis-mode
-    (require 'diff-review)
-    (unless (and (fboundp 'diff-review--decorate)
-                 (fboundp 'diff-review--file-line)
-                 (fboundp 'diff-review--review-buffer)
-                 (fboundp 'diff-review--file)
-                 (fboundp 'diff-review--line-pos)
-                 (equal (func-arity 'diff-review--file-line) '(2 . 2)))
-      (setq magit-dash-review-analysis-mode nil)
-      (user-error "magit-dash-review-analysis: diff-review %s lacks the internals this mode decorates (diff-review--decorate, diff-review--file-line/2)"
-                  (if (boundp 'diff-review-version) diff-review-version "?")))
-    (advice-add 'diff-review--decorate :after #'magit-dash-review-analysis--decorate-advice)
-    (advice-add 'diff-review--file-line :around #'magit-dash-review-analysis--file-line-advice)
-    (setq magit-dash-review-analysis--warned nil)
-    (magit-dash-review-analysis--redraw))
+    (let ((completed nil))
+      (unwind-protect
+          (progn
+            (unless (or (featurep 'diff-review) (locate-library "diff-review"))
+              (user-error "magit-dash-review-analysis: diff-review is not available"))
+            (require 'diff-review)
+            (let* ((specs '((diff-review--decorate :exact (0 . 0))
+                            (diff-review--file-line :exact (2 . 2))
+                            (diff-review--review-buffer :accepts 0)
+                            (diff-review--file :accepts 1)
+                            (diff-review--line-pos :accepts 1)
+                            (diff-review--render-all :accepts 0)
+                            (diff-review--redecorate-files :accepts 0)))
+                   (problems
+                    (delq nil
+                          (seq-map
+                           (lambda (spec)
+                             (pcase-let* ((`(,sym ,kind ,expected) spec)
+                                          (fn (and (fboundp sym) (indirect-function sym)))
+                                          (unwrapped (if (and fn (fboundp 'advice--cd*r))
+                                                         (advice--cd*r fn)
+                                                       fn))
+                                          (arity (and unwrapped
+                                                      (functionp unwrapped)
+                                                      (condition-case nil
+                                                          (func-arity unwrapped)
+                                                        (error nil)))))
+                               (cond
+                                ((not (fboundp sym))
+                                 (format "%s (missing)" sym))
+                                ((null arity)
+                                 (format "%s (not a valid function)" sym))
+                                ((and (eq kind :exact) (not (equal arity expected)))
+                                 (format "%s (arity %S, expected %S)" sym arity expected))
+                                ((and (eq kind :accepts)
+                                      (not (and (<= (car arity) expected)
+                                                (or (eq (cdr arity) 'many)
+                                                    (>= (cdr arity) expected)))))
+                                 (format "%s (arity %S, must accept %d)" sym arity expected)))))
+                           specs))))
+              (when problems
+                (user-error "magit-dash-review-analysis: incompatible diff-review %s: %s"
+                            (if (boundp 'diff-review-version)
+                                diff-review-version
+                              "?")
+                            (string-join problems ", "))))
+            (condition-case err
+                (progn
+                  (advice-add 'diff-review--decorate :after
+                              #'magit-dash-review-analysis--decorate-advice)
+                  (advice-add 'diff-review--file-line :around
+                              #'magit-dash-review-analysis--file-line-advice))
+              (error
+               (user-error "magit-dash-review-analysis: failed to install diff-review advice: %s"
+                           (error-message-string err))))
+            (unless (and (advice-member-p #'magit-dash-review-analysis--decorate-advice
+                                          'diff-review--decorate)
+                         (advice-member-p #'magit-dash-review-analysis--file-line-advice
+                                          'diff-review--file-line))
+              (user-error "magit-dash-review-analysis: failed to verify diff-review advice installation"))
+            (setq magit-dash-review-analysis--warned nil)
+            (magit-dash-review-analysis--redraw)
+            (setq completed t))
+        (unless completed
+          (setq magit-dash-review-analysis-mode nil)
+          (advice-remove 'diff-review--decorate #'magit-dash-review-analysis--decorate-advice)
+          (advice-remove 'diff-review--file-line #'magit-dash-review-analysis--file-line-advice)))))
    (t
     (advice-remove 'diff-review--decorate #'magit-dash-review-analysis--decorate-advice)
     (advice-remove 'diff-review--file-line #'magit-dash-review-analysis--file-line-advice)

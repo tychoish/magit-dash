@@ -87,7 +87,8 @@
 
 (ert-deftest magit-dash-review-analysis-test/mode-on-off ()
   (skip-unless (locate-library "diff-review"))
-  (let ((by-hunk (magit-dash-review-analysis-for-path
+  (let ((magic-mode-alist magic-mode-alist)
+        (by-hunk (magit-dash-review-analysis-for-path
                   (magit-dash-review-analysis-test/table) "src/a.ts")))
     (unwind-protect
         (with-temp-buffer
@@ -197,26 +198,27 @@
 
 (ert-deftest magit-dash-review-analysis-test/real-decorate-flow ()
   (skip-unless (locate-library "diff-review"))
-  (require 'diff-review)
-  (let ((table (magit-dash-review-analysis-test/table))
-        (review (generate-new-buffer " *review*")))
-    (unwind-protect
-        (progn
-          (with-current-buffer review
-            (setq-local diff-review--data table))
-          (cl-letf (((symbol-function 'diff-review--review-buffer) (lambda () review)))
-            (with-temp-buffer
-              (insert "l1\nl2\nl3\n")
-              (setq-local diff-review-file-mode t)
-              (setq-local diff-review--file-path "src/a.ts")
-              (setq-local diff-review--hunks '((:line 1 :count 2)))
-              (setq-local diff-review--overlays nil)
-              (magit-dash-review-analysis--decorate-advice)
-              (should (= (length diff-review--overlays) 1))
-              (let ((overlay (car diff-review--overlays)))
-                (diff-review--undecorate)
-                (should-not (overlay-buffer overlay))))))
-      (kill-buffer review))))
+  (let ((magic-mode-alist magic-mode-alist))
+    (require 'diff-review)
+    (let ((table (magit-dash-review-analysis-test/table))
+          (review (generate-new-buffer " *review*")))
+      (unwind-protect
+          (progn
+            (with-current-buffer review
+              (setq-local diff-review--data table))
+            (cl-letf (((symbol-function 'diff-review--review-buffer) (lambda () review)))
+              (with-temp-buffer
+                (insert "l1\nl2\nl3\n")
+                (setq-local diff-review-file-mode t)
+                (setq-local diff-review--file-path "src/a.ts")
+                (setq-local diff-review--hunks '((:line 1 :count 2)))
+                (setq-local diff-review--overlays nil)
+                (magit-dash-review-analysis--decorate-advice)
+                (should (= (length diff-review--overlays) 1))
+                (let ((overlay (car diff-review--overlays)))
+                  (diff-review--undecorate)
+                  (should-not (overlay-buffer overlay))))))
+        (kill-buffer review)))))
 
 (ert-deftest magit-dash-review-analysis-test/advice-never-breaks-diff-review ()
   (let ((magit-dash-review-analysis--warned nil)
@@ -309,6 +311,140 @@
                            "src/a.ts")))
       (ignore-errors (delete-file file))
       (ignore-errors (delete-file (concat file ".bak"))))))
+
+(defun magit-dash-review-analysis-test/call-with-diff-review-stubs (fn)
+  "Call FN with mocked `diff-review' feature and compatible internals."
+  (let ((real-featurep (symbol-function 'featurep))
+        (real-require (symbol-function 'require))
+        (real-locate-library (symbol-function 'locate-library)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'featurep)
+                   (lambda (feature &optional subfeature)
+                     (or (eq feature 'diff-review)
+                         (funcall real-featurep feature subfeature))))
+                  ((symbol-function 'require)
+                   (lambda (feature &optional filename noerror)
+                     (if (eq feature 'diff-review)
+                         'diff-review
+                       (funcall real-require feature filename noerror))))
+                  ((symbol-function 'locate-library)
+                   (lambda (library &optional nosuffix path interactive-call)
+                     (if (equal library "diff-review")
+                         "/mock/diff-review.el"
+                       (funcall real-locate-library library nosuffix path interactive-call))))
+                  ((symbol-function 'diff-review--decorate) (lambda () nil))
+                  ((symbol-function 'diff-review--file-line) (lambda (_i _indent) ""))
+                  ((symbol-function 'diff-review--review-buffer) (lambda () nil))
+                  ((symbol-function 'diff-review--file) (lambda (&optional _i) nil))
+                  ((symbol-function 'diff-review--line-pos) (lambda (_line) 1))
+                  ((symbol-function 'diff-review--render-all) (lambda () nil))
+                  ((symbol-function 'diff-review--redecorate-files) (lambda () nil)))
+          (funcall fn))
+      (magit-dash-review-analysis-mode -1))))
+
+(ert-deftest magit-dash-review-analysis-test/diff-review-advice-compatibility ()
+  ;; (a) Real diff-review compatibility check when available on load-path.
+  (when (locate-library "diff-review")
+    (let ((magic-mode-alist magic-mode-alist))
+      (require 'diff-review)
+      (magit-dash-review-analysis-mode -1)
+      (should (fboundp 'diff-review--decorate))
+      (should (fboundp 'diff-review--file-line))
+      (should (equal (func-arity 'diff-review--decorate) '(0 . 0)))
+      (should (equal (func-arity 'diff-review--file-line) '(2 . 2)))
+      (should (fboundp 'diff-review--review-buffer))
+      (should (fboundp 'diff-review--file))
+      (should (fboundp 'diff-review--line-pos))
+      (should (fboundp 'diff-review--render-all))
+      (should (fboundp 'diff-review--redecorate-files))))
+  ;; (b) Missing or incompatible diff-review internals must signal user-error
+  ;; naming diff-review and the offending function, leaving the mode off.
+  (magit-dash-review-analysis-test/call-with-diff-review-stubs
+   (lambda ()
+     (seq-do
+      (lambda (spec)
+        (pcase-let* ((`(,sym ,fn) spec))
+          (cl-letf (((symbol-function sym) fn))
+            (let ((err (should-error (magit-dash-review-analysis-mode 1)
+                                     :type 'user-error)))
+              (should (string-match-p "diff-review" (error-message-string err)))
+              (should (string-match-p (regexp-quote (symbol-name sym))
+                                      (error-message-string err)))
+              (should-not magit-dash-review-analysis-mode)))))
+      `((diff-review--decorate nil)
+        (diff-review--decorate 42)
+        (diff-review--decorate ,(lambda (_arg) nil))
+        (diff-review--file-line nil)
+        (diff-review--file-line ,(lambda (_i) ""))
+        (diff-review--file-line ,(lambda (_i _indent &optional _extra) ""))
+        (diff-review--review-buffer nil)
+        (diff-review--review-buffer ,(lambda (_x) nil))
+        (diff-review--file nil)
+        (diff-review--file ,(lambda () nil))
+        (diff-review--line-pos nil)
+        (diff-review--line-pos ,(lambda () 1))
+        (diff-review--render-all nil)
+        (diff-review--render-all ,(lambda (_x) nil))
+        (diff-review--redecorate-files nil)
+        (diff-review--redecorate-files ,(lambda (_x) nil)))))))
+
+(ert-deftest magit-dash-review-analysis-test/mode-reenable-and-install-failure ()
+  (magit-dash-review-analysis-test/call-with-diff-review-stubs
+   (lambda ()
+     ;; Re-enabling an already-active mode must unwrap advice and succeed.
+     (magit-dash-review-analysis-mode 1)
+     (magit-dash-review-analysis-mode 1)
+     (should magit-dash-review-analysis-mode)
+     (magit-dash-review-analysis-mode -1)
+     ;; Partial advice-add failure must signal user-error and roll back.
+     (let ((real-advice-add (symbol-function 'advice-add)))
+       (cl-letf (((symbol-function 'advice-add)
+                  (lambda (symbol where function &optional props)
+                    (when (eq symbol 'diff-review--file-line)
+                      (error "advice boom"))
+                    (funcall real-advice-add symbol where function props))))
+         (should-error (magit-dash-review-analysis-mode 1) :type 'user-error)
+         (should-not magit-dash-review-analysis-mode)
+         (should-not (advice-member-p #'magit-dash-review-analysis--decorate-advice
+                                      'diff-review--decorate))
+         (should-not (advice-member-p #'magit-dash-review-analysis--file-line-advice
+                                      'diff-review--file-line)))))))
+
+(ert-deftest magit-dash-review-analysis-test/mode-missing-diff-review-library ()
+  (let ((real-featurep (symbol-function 'featurep))
+        (real-require (symbol-function 'require))
+        (real-locate-library (symbol-function 'locate-library)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'featurep)
+                   (lambda (feature &optional subfeature)
+                     (unless (eq feature 'diff-review)
+                       (funcall real-featurep feature subfeature))))
+                  ((symbol-function 'locate-library)
+                   (lambda (library &optional nosuffix path interactive-call)
+                     (unless (equal library "diff-review")
+                       (funcall real-locate-library library nosuffix path interactive-call))))
+                  ((symbol-function 'require)
+                   (lambda (feature &optional filename noerror)
+                     (if (eq feature 'diff-review)
+                         (unless noerror
+                           (signal 'file-missing
+                                   '("Cannot open load file" "No such file or directory" "diff-review")))
+                       (funcall real-require feature filename noerror)))))
+          (let ((err (should-error (magit-dash-review-analysis-mode 1)
+                                   :type 'user-error)))
+            (should (string-match-p "diff-review" (error-message-string err)))
+            (should-not magit-dash-review-analysis-mode)))
+      (magit-dash-review-analysis-mode -1))))
+
+(ert-deftest magit-dash-review-analysis-test/decorate-advice-warns-when-missing-internal ()
+  (let ((magit-dash-review-analysis--warned nil)
+        (messages nil))
+    (cl-letf (((symbol-function 'diff-review--review-buffer) nil)
+              ((symbol-function 'message)
+               (lambda (&rest args) (push (apply #'format args) messages))))
+      (should-not (magit-dash-review-analysis--decorate-advice))
+      (should (= (length messages) 1))
+      (should (string-match-p "decoration failed" (car messages))))))
 
 (provide 'test-magit-dash-review-analysis)
 ;;; test-magit-dash-review-analysis.el ends here
