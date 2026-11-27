@@ -57,6 +57,14 @@
 (declare-function magit-dash-repo-pr "magit-dash")
 (declare-function magit-dash-repo-path "magit-dash")
 (defvar magit-dash-repo-list)
+
+(defvar-local magit-dash-pr-dashboard--parent-directory nil
+  "Repository directory used when point is outside a PR row.")
+
+(declare-function eat "eat" (&optional program arg))
+(declare-function agent-shell "agent-shell" ())
+(declare-function magit-dash-ci--dispatch-prompt "magit-dash-gh-ci"
+                  (id args &optional context-dir))
 (declare-function magit-dash--repo-at-point "magit-dash")
 (declare-function magit-dash--repo-at-point-p "magit-dash")
 (declare-function magit-dash-worktree-uncommitted-changes-p "magit-dash-worktree")
@@ -744,6 +752,9 @@ Uses active columns.  WIDTH is available window width; when nil,
     (keymap-set m "a"   #'magit-dash-pr-dashboard-create-all-worktrees)
     (keymap-set m "k"   #'magit-dash-pr-dashboard-clean-merged-worktrees)
     (keymap-set m "d"   #'magit-dash-pr-dashboard-open-dired)
+    (keymap-set m "e"   #'magit-dash-pr-dashboard-open-eat)
+    (keymap-set m "s"   #'magit-dash-pr-dashboard-open-agent-shell)
+    (keymap-set m "F"   #'magit-dash-pr-dashboard-fix-ci)
     (keymap-set m "*"   #'magit-dash-pr-dashboard-mark-all)
     (keymap-set m "SPC"   #'magit-dash-pr-dashboard-toggle-mark)
     (keymap-set m "g"   #'magit-dash-pr-dashboard-refresh)
@@ -768,7 +779,9 @@ Uses active columns.  WIDTH is available window width; when nil,
               (list :state "open" :author nil :repo nil :org nil))
   (setq-local magit-dash-pr-dashboard--all-entries nil)
   (setq-local magit-dash-pr-dashboard--marked-entries nil)
+  (setq-local magit-dash-pr-dashboard--parent-directory default-directory)
   (add-hook 'kill-buffer-hook #'magit-dash-pr-dashboard--cancel-status-collection nil t)
+  (add-hook 'post-command-hook #'magit-dash-pr-dashboard--update-directory nil t)
   (magit-dash-pr-dashboard--setup-code-review-keys))
 
 (defun magit-dash-pr--parse-status-rollup (rollup)
@@ -1314,7 +1327,8 @@ row ids, which defeats `tabulated-list-print's `equal' matching."
                     (when (magit-dash-pr-dashboard--goto-key point-key)
                       (move-to-column col)
                       (set-window-point win (point)))))))
-            saved)))
+            saved)
+    (magit-dash-pr-dashboard--update-directory)))
 
 (defun magit-dash-pr-dashboard--entry-ci-state (entry)
   "Return the resolved CI state string for tabulated-list ENTRY, or nil."
@@ -2783,7 +2797,8 @@ when provided."
         (setq magit-dash-pr-dashboard--filters
               (plist-put (copy-sequence magit-dash-pr-dashboard--filters) :repo repo))
         (when-let* ((resolved-dir (magit-dash-pr--resolve-dashboard-default-directory repo orig-dir)))
-          (setq-local default-directory resolved-dir)))
+          (setq-local default-directory resolved-dir)
+          (setq-local magit-dash-pr-dashboard--parent-directory resolved-dir)))
       (magit-dash-pr-dashboard-refresh))
     (if (and from-dash (window-live-p orig-win))
         (let ((pr-win (or (get-buffer-window buf)
@@ -2815,7 +2830,8 @@ PR views can remain open simultaneously."
       (magit-dash-pr-dashboard--update-mode-line)
       (when-let* ((repo (plist-get clean :repo))
                   (resolved-dir (magit-dash-pr--resolve-dashboard-default-directory repo orig-dir)))
-        (setq-local default-directory resolved-dir))
+        (setq-local default-directory resolved-dir)
+        (setq-local magit-dash-pr-dashboard--parent-directory resolved-dir))
       (magit-dash-pr-dashboard-refresh))
     (pop-to-buffer buf)))
 
@@ -3241,6 +3257,56 @@ The current repository is the fallback, matched the same way."
   "Return non-nil if a local worktree directory exists for PR ENTRY."
   (when-let* ((wt-dir (magit-dash-pr-dashboard--worktree-path entry)))
     (file-directory-p wt-dir)))
+
+(defun magit-dash-pr-dashboard--action-directory (entry)
+  "Return ENTRY's existing worktree directory, falling back to its repository."
+  (let ((worktree (magit-dash-pr-dashboard--worktree-path entry)))
+    (file-name-as-directory
+     (or (and worktree (file-directory-p worktree) worktree)
+         (magit-dash-pr-dashboard--find-local-path (plist-get entry :repo))
+         (user-error "No registered local checkout for %s" (plist-get entry :repo))))))
+
+(defun magit-dash-pr-dashboard--update-directory ()
+  "Set `default-directory' from the PR row under point."
+  (setq-local default-directory
+              (or (when-let* ((entry (tabulated-list-get-id)))
+                    (condition-case nil
+                        (magit-dash-pr-dashboard--action-directory entry)
+                      (user-error nil)))
+                  magit-dash-pr-dashboard--parent-directory
+                  default-directory)))
+
+(defun magit-dash-pr-dashboard-open-eat (&optional entry)
+  "Open Eat in ENTRY's worktree or parent repository."
+  (interactive)
+  (let ((default-directory
+         (magit-dash-pr-dashboard--action-directory
+          (or entry (magit-dash-pr-dashboard--entry-at-point)))))
+    (unless (fboundp 'eat) (user-error "Eat is unavailable"))
+    (eat nil t)))
+
+(defun magit-dash-pr-dashboard-open-agent-shell (&optional entry)
+  "Open an agent shell in ENTRY's worktree or parent repository."
+  (interactive)
+  (let ((default-directory
+         (magit-dash-pr-dashboard--action-directory
+          (or entry (magit-dash-pr-dashboard--entry-at-point)))))
+    (unless (fboundp 'agent-shell) (user-error "Agent-shell is unavailable"))
+    (agent-shell)))
+
+(defun magit-dash-pr-dashboard-fix-ci (&optional entry)
+  "Dispatch the fix-ci workflow for ENTRY's head branch."
+  (interactive)
+  (require 'magit-dash-gh-ci)
+  (let* ((entry (or entry (magit-dash-pr-dashboard--entry-at-point)))
+         (directory (magit-dash-pr-dashboard--action-directory entry))
+         (branch (or (map-elt (plist-get entry :pr) 'headRefName)
+                     (plist-get entry :head-ref))))
+    (unless (and (stringp branch) (not (string-empty-p branch)))
+      (user-error "Refresh this PR to fetch its head branch before fixing CI"))
+    (magit-dash-ci--dispatch-prompt
+     'fix-ci (list :repo (plist-get entry :repo) :branch branch :root directory)
+     directory)))
 
 (defun magit-dash-pr-dashboard-open-dired (&optional entry)
   "Open Dired in the worktree for the pull request at point (or ENTRY).
@@ -4005,12 +4071,16 @@ Key groups mirror `magit-dash-menu': w worktree, c CI, f filter, m mark."
     ("wd"  "Clean merged"             magit-dash-pr-dashboard-clean-merged-worktrees)
     ("wo"  "Open Magit in worktree"   magit-dash-pr-dashboard-open-worktree)
     ("wi"  "Open Dired in worktree"   magit-dash-pr-dashboard-open-dired)]
+   ["Shells"
+    ("we"  "Open Eat"                 magit-dash-pr-dashboard-open-eat)
+    ("ws"  "Open agent shell"         magit-dash-pr-dashboard-open-agent-shell)]
    ["Chain"
     ("wc"  "Plan chain merge (from PR)" magit-dash-chain-plan)
     ("wm"  "Resume chain"             magit-dash-chain-resume)
     ("wh"  "Open chain plan"          magit-dash-chain-open)]
    ["CI"
-    ("cf"  "Fetch CI logs"            magit-dash-pr-dashboard-fetch-ci)]]
+    ("cf"  "Fetch CI logs"            magit-dash-pr-dashboard-fetch-ci)
+    ("cx"  "Fix branch CI"            magit-dash-pr-dashboard-fix-ci)]]
   [["View & Filter"
     ("v"   "Switch view…"             magit-dash-pr-dashboard-switch-view)
     ("V"   "Open view in new buffer…" magit-dash-pr-dashboard-open-view)

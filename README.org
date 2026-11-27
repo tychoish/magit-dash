@@ -322,6 +322,13 @@ To run remote sync automatically during repo sync, you can wire a generated targ
  :sort-hint 10)
 #+END_SRC
 
+The PR dashboard follows the worktree under point through
+=default-directory=, falling back to the parent repository when no
+worktree exists.  Press =e= to open Eat, =s= to open agent-shell, or =F=
+to dispatch =fix-ci= for the PR's head branch.  These actions are also
+available in the =?= menu; they use the existing worktree or parent
+repository without creating a worktree.
+
 * PR Chain Merge Plans
 :PROPERTIES:
 :CUSTOM_ID: pr-chain
@@ -350,6 +357,13 @@ finishes the merge commit and continues. Set
 conflict to an agent first; the result is always verified before continuing,
 and a missing agent falls back to halting. Use hitl =plan_status= (domain
 =magit-dash-chain=) for read-only status.
+
+In the plan review buffer, =R= rediscovers the chain and regenerates its
+steps, =r= retries failed steps, and =C= resets every step after confirmation.
+Press =f= on a failed step to dispatch an agent-shell repair task in its
+worktree, then retry when the repair is ready.  Each plan line sets
+=default-directory= to its branch worktree.  Regenerating clears recorded
+results; retrying retains the original merge tip for rollback.
 
 Missing worktrees are created under =magit-dash-chain-worktree-directory=,
 which defaults to =".wt"=: a relative value is resolved against the main

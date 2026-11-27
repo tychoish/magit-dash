@@ -42,6 +42,62 @@
 
 ;;;; Discovery
 
+(ert-deftest magit-dash-chain/directory-falls-back-to-existing-repository ()
+  (cl-letf (((symbol-function 'magit-dash-chain--worktree-for-branch) #'ignore))
+    (should (equal
+             (magit-dash-chain--target-directory
+              '(:repo-dir "/tmp/" :worktree "/nonexistent/chain-worktree/"
+                :branch "topic"))
+             "/tmp/"))))
+
+(ert-deftest magit-dash-chain/retry-preserves-conflict-rollback-baseline ()
+  (let ((plan (hitl-plan--make
+               :metadata '(:chain (:results ((1 :status blocked :before "original"
+                                                :conflicts ("a"))))))))
+    (cl-letf (((symbol-function 'magit-dash-chain--write-record) #'ignore))
+      (magit-dash-chain--after-reset plan (list (hitl-plan-step--make :id 1)))
+      (should (equal (magit-dash-chain--result plan 1) '(:before "original"))))))
+
+(ert-deftest magit-dash-chain/regenerate-refreshes-metadata-and-clears-all-results ()
+  (let* ((chain '(:repo-dir "/tmp/" :root "topic" :base "main" :slug "o/r"))
+         (plan (hitl-plan--make
+                :metadata (list :chain (list :repo-dir "/tmp/" :root "topic"
+                                            :base "main" :chain-data chain
+                                            :results '((99 :sha "obsolete")))))))
+    (cl-letf (((symbol-function 'magit-dash-chain--fetch-prs) #'ignore)
+              ((symbol-function 'magit-dash-chain-discover) (lambda (&rest _) chain))
+              ((symbol-function 'magit-dash-chain-validate) #'identity)
+              ((symbol-function 'magit-dash-chain-render-ascii) (lambda (_) "fresh tree"))
+              ((symbol-function 'magit-dash-chain--targets)
+               (lambda (_chain _land) '(fresh-target))))
+      (should (equal (magit-dash-chain--regenerate plan) '(fresh-target)))
+      (should-not (plist-get (magit-dash-chain--meta plan) :results))
+      (should (string-match-p "fresh tree" (hitl-plan-description plan))))))
+
+(ert-deftest magit-dash-chain/recovery-dispatches-in-step-worktree ()
+  (let ((step (hitl-plan-step--make
+               :id 1 :target '(:worktree "/tmp/" :branch "topic")
+               :message "verification failed"))
+        dispatched)
+    (cl-letf (((symbol-function 'magit-dash-chain--unmerged-files) #'ignore)
+              ((symbol-function 'magit-dash-chain--target-directory)
+               (lambda (_) "/tmp/"))
+              ((symbol-function 'magit-dash-chain--dispatch-agent)
+               (lambda (strategy directory prompt _callback)
+                 (setq dispatched (list strategy directory prompt)))))
+      (magit-dash-chain--recover-step nil step)
+      (should (eq (car dispatched) 'agent-shell))
+      (should (equal (cadr dispatched) "/tmp/"))
+      (should (string-match-p "verification failed" (nth 2 dispatched))))))
+
+(ert-deftest magit-dash-chain/reset-discards-only-reset-results ()
+  (let ((plan (hitl-plan--make
+               :metadata '(:chain (:results ((1 :before "old") (2 :sha "keep")))))))
+    (cl-letf (((symbol-function 'magit-dash-chain--write-record) #'ignore))
+      (magit-dash-chain--after-reset plan (list (hitl-plan-step--make :id 1)))
+      (should-not (magit-dash-chain--result plan 1))
+      (should (equal (magit-dash-chain--result plan 2) '(:sha "keep"))))))
+
 (ert-deftest magit-dash-chain/discover-linear-chain ()
   (let* ((prs (magit-dash-chain-test--chain-prs))
          (chain (magit-dash-chain-discover "/nonexistent" 1 "main" prs)))

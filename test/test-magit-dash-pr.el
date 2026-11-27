@@ -18,6 +18,52 @@
 
 ;;; Test helpers
 
+(ert-deftest magit-dash-pr/dashboard-directory-outside-row ()
+  (with-temp-buffer
+    (setq-local default-directory "/tmp/old-worktree/")
+    (setq-local magit-dash-pr-dashboard--parent-directory "/tmp/")
+    (cl-letf (((symbol-function 'tabulated-list-get-id) #'ignore))
+      (magit-dash-pr-dashboard--update-directory)
+      (should (equal default-directory "/tmp/")))))
+
+(ert-deftest magit-dash-pr/dashboard-directory-follows-row ()
+  (with-temp-buffer
+    (let ((entry '(:repo "owner/repo" :number 1)))
+      (cl-letf (((symbol-function 'tabulated-list-get-id) (lambda () entry))
+                ((symbol-function 'magit-dash-pr-dashboard--find-local-path)
+                 (lambda (_) "/tmp/"))
+                ((symbol-function 'magit-dash-pr-dashboard--worktree-path)
+                 (lambda (_) "/tmp/")))
+        (magit-dash-pr-dashboard--update-directory)
+        (should (equal default-directory "/tmp/"))
+        (cl-letf (((symbol-function 'magit-dash-pr-dashboard--worktree-path)
+                   (lambda (_) "/missing/worktree/")))
+          (magit-dash-pr-dashboard--update-directory)
+          (should (equal default-directory "/tmp/")))))))
+
+(ert-deftest magit-dash-pr/dashboard-actions-use-row-context ()
+  (let ((entry '(:repo "owner/repo" :number 1
+                 :pr ((headRefName . "topic"))))
+        calls)
+    (cl-letf (((symbol-function 'magit-dash-pr-dashboard--entry-at-point)
+               (lambda () entry))
+              ((symbol-function 'magit-dash-pr-dashboard--action-directory)
+               (lambda (_) "/tmp/"))
+              ((symbol-function 'eat)
+               (lambda (&rest _) (push default-directory calls)))
+              ((symbol-function 'agent-shell)
+               (lambda () (push default-directory calls)))
+              ((symbol-function 'magit-dash-ci--dispatch-prompt)
+               (lambda (id args directory)
+                 (push (list id args directory) calls))))
+      (magit-dash-pr-dashboard-open-eat)
+      (magit-dash-pr-dashboard-open-agent-shell)
+      (magit-dash-pr-dashboard-fix-ci)
+      (should (equal (car calls)
+                     '(fix-ci (:repo "owner/repo" :branch "topic" :root "/tmp/")
+                              "/tmp/")))
+      (should (equal (cdr calls) '("/tmp/" "/tmp/"))))))
+
 (defmacro magit-dash-pr-test/with-temp-dir (&rest body)
   "Execute BODY with `default-directory' set to a fresh temp directory."
   (declare (indent 0))

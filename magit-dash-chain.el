@@ -524,12 +524,12 @@ Return nil (without signalling) if the agent is unavailable."
   (condition-case nil
       (pcase strategy
         ('agent-shell
-         (when (and (require 'agent-shell nil t) (fboundp 'agent-shell-insert))
+         (when (fboundp 'agent-shell-insert)
            (let ((default-directory (file-name-as-directory dir)))
              (agent-shell-insert :text prompt :submit t)
              t)))
         ('gptel
-         (when (and (require 'gptel nil t) (fboundp 'gptel-request))
+         (when (fboundp 'gptel-request)
            (let ((default-directory (file-name-as-directory dir)))
              (gptel-request prompt
                :callback (lambda (resp _info)
@@ -798,11 +798,83 @@ the plan, leaving the rest pending.  RESOLVED maps steps to targets."
   "Refuse caller-supplied targets: chain plans come only from discovery."
   (user-error "Chain plans are created with chain_plan, not from explicit targets"))
 
+(defun magit-dash-chain--regenerate (plan)
+  "Rediscover PLAN's chain and return fresh targets."
+  (let* ((metadata (magit-dash-chain--meta plan))
+         (previous (plist-get metadata :chain-data))
+         (repo (plist-get metadata :repo-dir))
+         (slug (plist-get previous :slug))
+         (chain (magit-dash-chain-validate
+                 (plist-put
+                  (magit-dash-chain-discover
+                   repo (plist-get metadata :root) (plist-get metadata :base)
+                   (magit-dash-chain--fetch-prs slug repo))
+                  :slug slug))))
+    (when-let* ((errors (plist-get chain :errors)))
+      (user-error "Cannot regenerate chain: %s" (string-join errors "; ")))
+    (setf (plist-get metadata :chain-data) chain
+          (plist-get metadata :results) nil
+          (plist-get metadata :tree) (magit-dash-chain-render-ascii chain))
+    (setf (hitl-plan-description plan)
+          (format "PR chain %s onto %s (merge commits only, no rebase)\n\n%s"
+                  (plist-get chain :root) (plist-get chain :base)
+                  (plist-get metadata :tree)))
+    (magit-dash-chain--targets chain (plist-get metadata :land))))
+
+(defun magit-dash-chain--after-reset (plan steps)
+  "Discard cached execution results for reset STEPS of PLAN."
+  (let ((metadata (magit-dash-chain--meta plan)))
+    (setf (plist-get metadata :results)
+          (seq-keep
+           (lambda (result)
+             (if (seq-some (lambda (step)
+                             (equal (car result) (hitl-plan-step-id step)))
+                           steps)
+                 (when (and (memq (plist-get (cdr result) :status) '(blocked failed))
+                            (plist-get (cdr result) :before))
+                   (list (car result) :before (plist-get (cdr result) :before)))
+               result))
+           (plist-get metadata :results))))
+  (magit-dash-chain--write-record plan))
+
+(defun magit-dash-chain--target-directory (target)
+  "Return TARGET's existing branch worktree or parent repository."
+  (seq-find #'file-directory-p
+            (delq nil
+                  (list (magit-dash-chain--worktree-for-branch
+                         (plist-get target :repo-dir) (plist-get target :branch))
+                        (plist-get target :worktree)
+                        (plist-get target :repo-dir)))))
+
+(defun magit-dash-chain--recover-step (_plan step)
+  "Dispatch an agent task to repair failed chain STEP."
+  (let* ((target (hitl-plan-step-target step))
+         (directory (or (magit-dash-chain--worktree-for-branch
+                         (plist-get target :repo-dir) (plist-get target :branch))
+                        (plist-get target :worktree)))
+         (_valid (unless (and directory (file-directory-p directory))
+                   (user-error "No existing worktree for branch %s"
+                               (plist-get target :branch))))
+         (files (magit-dash-chain--unmerged-files directory))
+         (prompt (if files
+                     (magit-dash-chain--conflict-prompt
+                      (plist-put (copy-sequence target) :worktree directory)
+                      files (plist-get target :source))
+                   (format
+                    "Repair the failed PR chain step in %s on branch %s.\nFailure: %s\nDiagnose and fix the failure; do not push, rebase, or rewrite history.\nLeave the worktree ready for the user to retry the chain step."
+                    directory (plist-get target :branch) (hitl-plan-step-message step)))))
+    (unless (magit-dash-chain--dispatch-agent 'agent-shell directory prompt #'ignore)
+      (user-error "Agent-shell is unavailable; repair this step manually"))))
+
 (hitl-plan-register-domain 'magit-dash-chain
   :label "PR chain"
   :resolve-target #'identity
   :format-target #'magit-dash-chain--format-target
   :visit-target #'magit-dash-chain--visit-target
+  :target-directory #'magit-dash-chain--target-directory
+  :regenerate #'magit-dash-chain--regenerate
+  :after-reset #'magit-dash-chain--after-reset
+  :recover-step #'magit-dash-chain--recover-step
   :driver #'magit-dash-chain--driver
   :directory #'magit-dash-chain--directory
   :sanitize-target #'magit-dash-chain--sanitize-target)
