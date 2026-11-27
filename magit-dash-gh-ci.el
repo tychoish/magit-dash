@@ -635,5 +635,269 @@ Returns a plist with :repo :number :untrusted :failing_checks :run_id :log_tail 
             :log_tail log-tail
             :log_lines lines))))
 
+;;; Strict Exact-Revision CI Observation and Policy
+
+(defcustom magit-dash-gh-ci-repo-policies nil
+  "Alist mapping repository slug (\"owner/repo\") to strict CI policy plists.
+Each value is a plist with `:policy' (one of `explicit-checks', `all-at-head',
+`main-workflows', `latest-branch-run', or `required-at-pr-head'), optional
+`:checks' list of check names, and optional `:discovery-deadline' seconds."
+  :type '(alist :key-type string :value-type plist)
+  :group 'magit-dash)
+
+(defconst magit-dash-gh-ci--strict-policies
+  '(explicit-checks all-at-head main-workflows latest-branch-run required-at-pr-head)
+  "Valid strict CI policy symbols.")
+
+(defun magit-dash-gh-ci--full-sha-p (sha)
+  "Return non-nil when SHA is a full 40-character hexadecimal Git SHA."
+  (and (stringp sha)
+       (string-match-p "\\`[0-9a-fA-F]\\{40\\}\\'" sha)))
+
+(defun magit-dash-gh-ci-resolve-policy (repo-slug &optional override)
+  "Resolve strict CI policy plist for REPO-SLUG with optional OVERRIDE.
+Returns (:policy SYM :checks LIST :policy-source STR :best-effort BOOL
+:discovery-deadline INT)."
+  (let* ((configured (cdr (assoc repo-slug magit-dash-gh-ci-repo-policies)))
+         (raw (or override configured '(:policy all-at-head)))
+         (policy (or (plist-get raw :policy) 'all-at-head))
+         (source (cond
+                  (override "override")
+                  (configured "repo-config")
+                  (t "default-best-effort")))
+         (best-effort (memq policy '(all-at-head latest-branch-run))))
+    (unless (memq policy magit-dash-gh-ci--strict-policies)
+      (user-error "Unsupported strict CI policy: %S" policy))
+    (list :policy policy
+          :checks (plist-get raw :checks)
+          :policy-source source
+          :best-effort (not (null best-effort))
+          :discovery-deadline (or (plist-get raw :discovery-deadline) 300))))
+
+(defun magit-dash-gh-ci--normalize-check-runs (check-runs requested-sha)
+  "Filter CHECK-RUNS strictly to REQUESTED-SHA and deduplicate reruns.
+Returns (:checks LIST :ignored-wrong-sha INT :ignored-obsolete INT)."
+  (let ((latest (make-hash-table :test #'equal))
+        (wrong-sha 0)
+        (obsolete 0))
+    (dolist (run check-runs)
+      (let* ((sha (or (map-elt run 'head_sha) (map-elt run :head-sha)
+                      (map-elt run 'headSha)))
+             (name (or (map-elt run 'name) (map-elt run :name) "unknown"))
+             (app-obj (or (map-elt run 'app) (map-elt run :app)))
+             (app (if (listp app-obj)
+                      (or (map-elt app-obj 'slug) (map-elt app-obj 'name) "github")
+                    (or app-obj "github")))
+             (attempt (or (map-elt run 'run_attempt) (map-elt run :run-attempt) 1))
+             (run-id (or (map-elt run 'run_id) (map-elt run :run-id)
+                         (map-elt run 'id) (map-elt run :id)))
+             (status (downcase (format "%s" (or (map-elt run 'status)
+                                                (map-elt run :status) "queued"))))
+             (raw-conc (or (map-elt run 'conclusion) (map-elt run :conclusion)))
+             (conc (when (and raw-conc (not (eq raw-conc :null)))
+                     (downcase (format "%s" raw-conc))))
+             (key (cons name app)))
+        (if (not (and (stringp sha) (string-equal (downcase sha) (downcase requested-sha))))
+            (setq wrong-sha (1+ wrong-sha))
+          (let ((prev (map-elt latest key))
+                (norm (list :kind 'check-run
+                            :name name
+                            :app app
+                            :head-sha sha
+                            :run-id run-id
+                            :run-attempt attempt
+                            :status status
+                            :conclusion conc)))
+            (if (null prev)
+                (setf (map-elt latest key) norm)
+              (let ((prev-att (or (plist-get prev :run-attempt) 1))
+                    (prev-id (or (plist-get prev :run-id) 0)))
+                (if (or (> attempt prev-att)
+                        (and (= attempt prev-att)
+                             (integerp run-id) (integerp prev-id)
+                             (> run-id prev-id)))
+                    (progn
+                      (setq obsolete (1+ obsolete))
+                      (setf (map-elt latest key) norm))
+                  (setq obsolete (1+ obsolete)))))))))
+    (let (checks)
+      (map-do (lambda (_k v) (push v checks)) latest)
+      (list :checks (nreverse checks)
+            :ignored-wrong-sha wrong-sha
+            :ignored-obsolete obsolete))))
+
+(defun magit-dash-gh-ci--normalize-commit-statuses (statuses requested-sha)
+  "Normalize GitHub commit STATUSES strictly matching REQUESTED-SHA."
+  (let (out)
+    (dolist (st statuses)
+      (let* ((sha (or (map-elt st 'sha) (map-elt st :sha) requested-sha))
+             (ctx (or (map-elt st 'context) (map-elt st :context) "status"))
+             (state (downcase (format "%s" (or (map-elt st 'state)
+                                               (map-elt st :state) "pending")))))
+        (when (string-equal (downcase sha) (downcase requested-sha))
+          (push (list :kind 'commit-status
+                      :name ctx
+                      :app "commit-status"
+                      :head-sha sha
+                      :run-id (or (map-elt st 'id) (map-elt st :id))
+                      :run-attempt 1
+                      :status (if (equal state "pending") "in_progress" "completed")
+                      :conclusion (pcase state
+                                    ("success" "success")
+                                    ((or "failure" "error") "failure")
+                                    (_ nil)))
+                out))))
+    (nreverse out)))
+
+(cl-defun magit-dash-gh-ci-evaluate-strict-observation
+    (requested-sha check-runs commit-statuses
+                   &key repository ref (policy 'all-at-head)
+                   (policy-source "default") required-checks
+                   observed-at created-at (discovery-deadline 300))
+  "Pure strict CI evaluator for exact 40-char REQUESTED-SHA.
+Combines CHECK-RUNS and COMMIT-STATUSES without falling back to any other SHA.
+Missing expected checks never pass vacuously."
+  (unless (magit-dash-gh-ci--full-sha-p requested-sha)
+    (user-error "Strict CI observation requires a full 40-char hex SHA: %S" requested-sha))
+  (let* ((now (or observed-at (float-time)))
+         (cr-res (magit-dash-gh-ci--normalize-check-runs check-runs requested-sha))
+         (cs-list (magit-dash-gh-ci--normalize-commit-statuses commit-statuses requested-sha))
+         (all-checks (append (plist-get cr-res :checks) cs-list))
+         (present-names (mapcar (lambda (c) (plist-get c :name)) all-checks))
+         (expected (when (memq policy '(explicit-checks required-at-pr-head main-workflows))
+                     required-checks))
+         (missing (when expected
+                    (seq-filter (lambda (name) (not (member name present-names))) expected)))
+         (relevant (if expected
+                       (seq-filter (lambda (c) (member (plist-get c :name) expected)) all-checks)
+                     all-checks))
+         (failing (seq-filter
+                   (lambda (c)
+                     (member (plist-get c :conclusion)
+                             '("failure" "timed_out" "startup_failure"
+                               "action_required" "cancelled")))
+                   relevant))
+         (pending (seq-filter
+                   (lambda (c)
+                     (not (equal (plist-get c :status) "completed")))
+                   relevant))
+         (past-deadline (and created-at (> (- now created-at) discovery-deadline)))
+         (verdict
+          (cond
+           (failing 'failed)
+           (pending 'pending)
+           ((or missing (null relevant))
+            (if past-deadline 'missing-checks 'pending))
+           (t 'succeeded))))
+    (list :repository repository
+          :ref ref
+          :requested-sha requested-sha
+          :actual-sha (when all-checks requested-sha)
+          :policy policy
+          :policy-source policy-source
+          :best-effort (not (null (memq policy '(all-at-head latest-branch-run))))
+          :verdict verdict
+          :checks all-checks
+          :failing-checks failing
+          :missing-checks missing
+          :ignored-wrong-sha (plist-get cr-res :ignored-wrong-sha)
+          :ignored-obsolete (plist-get cr-res :ignored-obsolete)
+          :observed-at now)))
+
+(defun magit-dash-gh-ci--gh-api-json (args dir)
+  "Run `gh api' with ARGS in DIR and return (:ok BOOL :data OBJ :error STR :rate-limited BOOL)."
+  (pcase-let* ((`(,code . ,output)
+                (magit-dash-gh--call-process (cons "api" args) (or dir default-directory))))
+    (cond
+     ((eq code 0)
+      (condition-case err
+          (list :ok t :data (json-parse-string output :array-type 'list :object-type 'alist))
+        (error (list :ok nil :error (error-message-string err) :rate-limited nil))))
+     ((string-match-p "rate limit\\|HTTP 429\\|secondary rate limit" (or output ""))
+      (list :ok nil :error output :rate-limited t))
+     (t
+      (list :ok nil :error output :rate-limited nil)))))
+
+(cl-defun magit-dash-gh-ci-observe-strict
+    (slug ref requested-sha &key policy-override dir created-at)
+  "Observe strict CI state for SLUG at REF and exact full REQUESTED-SHA.
+Handles rate limits, inaccessible branch protection metadata, main-based
+workflow discovery, check runs, and commit statuses."
+  (unless (magit-dash-gh-ci--full-sha-p requested-sha)
+    (user-error "Strict CI observation requires full 40-char SHA: %S" requested-sha))
+  (let* ((pol-spec (magit-dash-gh-ci-resolve-policy slug policy-override))
+         (policy (plist-get pol-spec :policy))
+         (policy-source (plist-get pol-spec :policy-source))
+         (required-checks (plist-get pol-spec :checks))
+         (deadline (plist-get pol-spec :discovery-deadline))
+         (policy-error nil))
+    (cond
+     ((eq policy 'required-at-pr-head)
+      (let* ((branch (replace-regexp-in-string "\\`refs/heads/" "" (or ref "main")))
+             (prot (magit-dash-gh-ci--gh-api-json
+                    (list (format "repos/%s/branches/%s/protection/required_status_checks"
+                                  slug branch))
+                    dir)))
+        (if (not (plist-get prot :ok))
+            (setq policy-error
+                  (list :verdict (if (plist-get prot :rate-limited) 'rate-limited 'unknown-policy)
+                        :error (plist-get prot :error)))
+          (let* ((data (plist-get prot :data))
+                 (ctxs (map-elt data 'contexts))
+                 (checks (mapcar (lambda (c) (map-elt c 'context)) (map-elt data 'checks))))
+            (setq required-checks (seq-uniq (append ctxs checks)))
+            (setq policy-source "branch-protection")))))
+     ((eq policy 'main-workflows)
+      (pcase-let* ((`(,code . ,out)
+                    (magit-dash-gh--call-process
+                     (list "run" "list" "--repo" slug "--branch" "main"
+                           "--limit" "20" "--json" "workflowName")
+                     (or dir default-directory))))
+        (if (not (eq code 0))
+            (setq policy-error (list :verdict 'unknown-policy :error out))
+          (let ((runs (ignore-errors
+                        (json-parse-string out :array-type 'list :object-type 'alist))))
+            (setq required-checks
+                  (seq-uniq (delq nil (mapcar (lambda (r) (map-elt r 'workflowName)) runs))))
+            (setq policy-source "main-workflows"))))))
+    (if policy-error
+        (list :repository slug :ref ref :requested-sha requested-sha
+              :policy policy :policy-source policy-source
+              :verdict (plist-get policy-error :verdict)
+              :error (plist-get policy-error :error)
+              :observed-at (float-time))
+      (let* ((cr (magit-dash-gh-ci--gh-api-json
+                  (list (format "repos/%s/commits/%s/check-runs?per_page=100" slug requested-sha))
+                  dir))
+             (cs (magit-dash-gh-ci--gh-api-json
+                  (list (format "repos/%s/commits/%s/status" slug requested-sha))
+                  dir)))
+        (cond
+         ((or (plist-get cr :rate-limited) (plist-get cs :rate-limited))
+          (list :repository slug :ref ref :requested-sha requested-sha
+                :policy policy :policy-source policy-source
+                :verdict 'rate-limited
+                :error (or (plist-get cr :error) (plist-get cs :error))
+                :observed-at (float-time)))
+         ((not (plist-get cr :ok))
+          (list :repository slug :ref ref :requested-sha requested-sha
+                :policy policy :policy-source policy-source
+                :verdict 'observation-error
+                :error (plist-get cr :error)
+                :observed-at (float-time)))
+         (t
+          (let ((runs (map-elt (plist-get cr :data) 'check_runs))
+                (statuses (when (plist-get cs :ok)
+                            (map-elt (plist-get cs :data) 'statuses))))
+            (magit-dash-gh-ci-evaluate-strict-observation
+             requested-sha runs statuses
+             :repository slug
+             :ref ref
+             :policy policy
+             :policy-source policy-source
+             :required-checks required-checks
+             :created-at created-at
+             :discovery-deadline deadline))))))))
+
 (provide 'magit-dash-gh-ci)
 ;;; magit-dash-gh-ci.el ends here
