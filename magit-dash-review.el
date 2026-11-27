@@ -566,7 +566,7 @@ Returns a plist (:review-file :root :base :head :path :line :end-line :hunk
                (magit-dash-gh--call-process
                 (list "pr" "view" (number-to-string pr-number)
                       "-R" slug
-                      "--json" "number,title,url,headRefName,baseRefName,headRefOid,baseRefOid,state,reviewDecision")
+                      "--json" "number,title,url,headRefName,baseRefName,headRefOid,baseRefOid,state,reviewDecision,isCrossRepository,headRepositoryOwner")
                 repo-dir)))
     (unless (zerop code)
       (error "Failed to fetch PR metadata for %s#%d: %s" slug pr-number output))
@@ -626,7 +626,16 @@ PR metadata and GraphQL reviewThreads, performs a three-way merge into
          (head-oid (map-elt pr-info 'headRefOid))
          (base-oid (map-elt pr-info 'baseRefOid))
          (url (map-elt pr-info 'url))
-         (existing-wt (magit-dash-pr--find-existing-worktree dir pr-num head-ref))
+         (existing-wt (cond
+                       ((map-elt pr-info 'headRefName)
+                        (alist-get 'path (magit-dash-pr--find-corroborated-worktree
+                                          dir pr-num pr-info slug)))
+                       (pr-info
+                        (let ((branch-hint (unless (magit-dash-pr--fork-pr-p pr-info slug)
+                                             (map-elt pr-info 'headRefName))))
+                          (magit-dash-pr--find-existing-worktree dir pr-num branch-hint)))
+                       (t
+                        (magit-dash-pr--find-existing-worktree dir pr-num nil))))
          (wt-dir (or existing-wt
                      (condition-case err
                          (magit-dash-pr--create-worktree-for-entry
