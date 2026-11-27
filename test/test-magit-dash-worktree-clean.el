@@ -455,5 +455,85 @@
              (lambda (&rest _) (error "must not open"))))
     (should-error (magit-dash-review-pr 7 "/tmp") :type 'user-error)))
 
+(ert-deftest magit-dash-worktree-clean/squash-merged-scan-and-entry-target-no-risk ()
+  "Squash-merged worktrees with no upstream get :pr-head-oid and no commit risk."
+  (magit-dash-worktree-clean-test--with-repo (repo wt)
+    (magit-dash-worktree-clean-test--with-store
+      (let* ((oid (magit-dash-test--commit wt "squash.txt"))
+             (pr `((number . 7) (headRefName . "feat")
+                   (headRefOid . ,oid) (state . "MERGED"))))
+        (cl-letf (((symbol-function 'executable-find) (lambda (_) t))
+                  ((symbol-function 'magit-dash-pr-dashboard--current-repo-slug)
+                   (lambda () "o/r"))
+                  ((symbol-function 'magit-dash-pr-dashboard--find-local-path)
+                   (lambda (_) repo))
+                  ((symbol-function 'magit-dash-worktree-confirm-risks)
+                   (lambda (&rest _) (error "must not prompt")))
+                  ((symbol-function 'magit-dash-gh--call-process)
+                   (lambda (args _dir)
+                     (let* ((fields (cadr (member "--json" args)))
+                            (want-oid (and fields (member "headRefOid" (split-string fields ","))))
+                            (payload (if want-oid
+                                         pr
+                                       (seq-remove (lambda (c) (eq (car c) 'headRefOid)) pr))))
+                       (cons 0 (json-serialize
+                                (if (member "view" args) payload (vector payload))))))))
+          ;; 1. entry-target with partial :pr lacking headRefOid fetches it.
+          (let ((entry-target (magit-dash-worktree-clean-entry-target
+                               '(:number 7 :repo "o/r"
+                                 :pr ((number . 7) (state . "closed"))))))
+            (should entry-target)
+            (should (equal oid (plist-get entry-target :pr-head-oid)))
+            (should-not (plist-get entry-target :risks)))
+          ;; 2. scan populates :pr-head-oid and executes deletion cleanly.
+          (let* ((targets (magit-dash-worktree-clean-scan repo))
+                 (target (car targets)))
+            (should (= 1 (length targets)))
+            (should (equal oid (plist-get target :pr-head-oid)))
+            (should-not (plist-get target :risks))
+            (let ((plan (hitl-plan-create
+                         :domain 'magit-dash-worktree-clean
+                         :targets targets
+                         :ops '(delete-worktree))))
+              (hitl-plan-execute plan)
+              (should (eq 'done (hitl-plan-step-status (car (hitl-plan-steps plan)))))
+              (should-not (file-directory-p wt)))))))))
+
+(ert-deftest magit-dash-worktree-clean/squash-merged-diverged-tip-triggers-risk ()
+  "Worktree ahead of PR headRefOid is flagged risky and refused unattended."
+  (magit-dash-worktree-clean-test--with-repo (repo wt)
+    (magit-dash-worktree-clean-test--with-store
+      (let* ((pushed-oid (magit-dash-test--commit wt "c1.txt"))
+             (_local-oid (magit-dash-test--commit wt "c2.txt"))
+             (pr `((number . 7) (headRefName . "feat")
+                   (headRefOid . ,pushed-oid) (state . "MERGED")))
+             (magit-dash-worktree-unattended t)
+             (magit-dash-worktree-unattended-risk-policy 'refuse))
+        (cl-letf (((symbol-function 'executable-find) (lambda (_) t))
+                  ((symbol-function 'magit-dash-pr-dashboard--current-repo-slug)
+                   (lambda () "o/r"))
+                  ((symbol-function 'magit-dash-gh--call-process)
+                   (lambda (args _dir)
+                     (let* ((fields (cadr (member "--json" args)))
+                            (want-oid (and fields (member "headRefOid" (split-string fields ","))))
+                            (payload (if want-oid
+                                         pr
+                                       (seq-remove (lambda (c) (eq (car c) 'headRefOid)) pr))))
+                       (cons 0 (json-serialize
+                                (if (member "view" args) payload (vector payload))))))))
+          (let* ((targets (magit-dash-worktree-clean-scan repo))
+                 (target (car targets))
+                 (expected-refusal (if (fboundp 'hitl-plan-skip) 'skipped 'failed)))
+            (should (seq-some (lambda (r) (string-match-p "no upstream" r))
+                              (plist-get target :risks)))
+            (let ((plan (hitl-plan-create
+                         :domain 'magit-dash-worktree-clean
+                         :targets targets
+                         :ops '(delete-worktree))))
+              (hitl-plan-execute plan)
+              (should (eq expected-refusal
+                          (hitl-plan-step-status (car (hitl-plan-steps plan)))))
+              (should (file-directory-p wt)))))))))
+
 (provide 'test-magit-dash-worktree-clean)
 ;;; test-magit-dash-worktree-clean.el ends here

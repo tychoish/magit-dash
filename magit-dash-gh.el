@@ -430,17 +430,18 @@ Uses a single gh call fetching up to `magit-dash-prune-pr-limit' PRs."
         (seq-do (lambda (pr)
                   (let* ((num (map-elt pr 'number))
                          (head (map-elt pr 'headRefName))
-                         (pr-tag (when num (format "pr-%s" num))))
-                    (when head
-                      (unless (map-elt table head)
-                        (setf (map-elt table head) pr))
-                      (unless (map-elt table (concat "wt/" head))
-                        (setf (map-elt table (concat "wt/" head)) pr)))
-                    (when pr-tag
-                      (unless (map-elt table pr-tag)
-                        (setf (map-elt table pr-tag) pr))
-                      (unless (map-elt table (concat "wt/" pr-tag))
-                        (setf (map-elt table (concat "wt/" pr-tag)) pr))))))))
+                         (pr-tag (when num (format "pr-%s" num)))
+                         (keys (delq nil (list head
+                                               (and head (concat "wt/" head))
+                                               pr-tag
+                                               (and pr-tag (concat "wt/" pr-tag))))))
+                    (seq-do (lambda (key)
+                              (let ((existing (map-elt table key)))
+                                (when (or (null existing)
+                                          (and (not (map-elt existing 'headRefOid))
+                                               (map-elt pr 'headRefOid)))
+                                  (setf (map-elt table key) pr))))
+                            keys))))))
     (magit-dash-gh--prune-save-cache table)
     table))
 
@@ -790,7 +791,13 @@ Throws `magit-dash-gh--prune-exit' to terminate the menu loop."
      ((assoc label merged-wts)
       (require 'magit-dash-pr nil t)
       (if (fboundp 'magit-dash-pr-delete-worktree)
-          (magit-dash-pr-delete-worktree label path)
+          (let* ((entry (cdr (assoc label merged-wts)))
+                 (pr (cdr entry))
+                 (pr-oid (and (or (listp pr) (hash-table-p pr))
+                              (map-elt pr 'headRefOid))))
+            (if pr-oid
+                (magit-dash-pr-delete-worktree label path pr-oid)
+              (magit-dash-pr-delete-worktree label path)))
         (user-error "magit-dash-pr-delete-worktree is not available"))
       (magit-dash-gh--prune-scan))
      (t
